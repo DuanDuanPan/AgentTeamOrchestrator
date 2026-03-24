@@ -22,6 +22,7 @@ from ato.models.schemas import (
     StateTransitionError,
     StoryRecord,
     TaskRecord,
+    TransitionEvent,
 )
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "StateTransitionError",
     "StoryRecord",
     "TaskRecord",
+    "TransitionEvent",
     "get_active_batch",
     "get_batch_progress",
     "get_batch_stories",
