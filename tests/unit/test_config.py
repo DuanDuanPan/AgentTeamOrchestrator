@@ -830,10 +830,10 @@ class TestConfigTemplate:
             "developing",
             "reviewing",
             "fixing",
-            "review_passed",
-            "qa",
+            "qa_testing",
             "uat",
             "merging",
+            "regression",
         ]
         assert phase_names == expected
 

@@ -54,7 +54,7 @@ development_status:
 
   # ===== Epic 2A: 编排引擎核心 =====
   epic-2a: in-progress
-  2a-1-story-state-machine-progression: ready-for-dev
+  2a-1-story-state-machine-progression: review
   2a-2-serial-transition-queue: backlog
   2a-3-orchestrator-start-stop: backlog
   epic-2a-retrospective: optional
