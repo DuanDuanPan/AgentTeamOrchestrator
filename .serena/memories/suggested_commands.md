@@ -1,0 +1,1 @@
+Key commands: `uv run pytest`, `uv run pytest tests/unit/test_<module>.py -v`, `uv run ruff check src/ato tests`, `uv run mypy src/ato`, `uv run pre-commit run --all-files`, `uv add <pkg>`, `git status --short`, `git log --oneline -5`. Entrypoint is `ato = "ato.cli:app"` from pyproject.toml.

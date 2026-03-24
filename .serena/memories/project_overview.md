@@ -1,0 +1,1 @@
+AgentTeamOrchestrator is a Python 3.11+ CLI/TUI orchestration system for multi-role AI workflows. Core stack: typer, textual, structlog, aiosqlite, pydantic v2, python-statemachine 3.x, uv, hatchling. Runtime state lives in SQLite WAL under .ato/. Main package is src/ato with modules for config, orchestration core, adapters, models, recovery, and TUI.
