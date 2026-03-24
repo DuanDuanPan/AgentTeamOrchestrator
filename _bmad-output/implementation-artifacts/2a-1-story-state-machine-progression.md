@@ -1,6 +1,6 @@
 # Story 2A.1: Story 状态机自动推进
 
-Status: review
+Status: done
 
 ## Story
 
