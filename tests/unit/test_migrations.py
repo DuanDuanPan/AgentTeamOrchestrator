@@ -135,3 +135,72 @@ class TestMigrations:
             row = await cursor.fetchone()
             assert row is not None
             assert row[0] == SCHEMA_VERSION
+
+
+class TestMigrationV2:
+    """MIGRATIONS[2] — batches 和 batch_stories 表迁移测试。"""
+
+    async def test_v2_creates_batches_table(self, db_path: Path) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, SCHEMA_VERSION)
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='batches'"
+            )
+            assert await cursor.fetchone() is not None
+
+    async def test_v2_creates_batch_stories_table(self, db_path: Path) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, SCHEMA_VERSION)
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='batch_stories'"
+            )
+            assert await cursor.fetchone() is not None
+
+    async def test_v2_creates_single_active_index(self, db_path: Path) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, SCHEMA_VERSION)
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='idx_batches_single_active'"
+            )
+            assert await cursor.fetchone() is not None
+
+    async def test_v1_to_v2_incremental(self, db_path: Path) -> None:
+        """从 v1 增量迁移到 v2 成功。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            # 先迁移到 v1
+            await run_migrations(db, 0, 1)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 1
+
+            # 再迁移到 v2
+            await run_migrations(db, 1, 2)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 2
+
+            # 验证新表存在
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )
+            tables = [r[0] for r in await cursor.fetchall()]
+            assert "batches" in tables
+            assert "batch_stories" in tables

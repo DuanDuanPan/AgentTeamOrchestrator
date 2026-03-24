@@ -100,6 +100,37 @@ async def _migrate_v0_to_v1(db: aiosqlite.Connection) -> None:
     )
 
 
+@_register(2)
+async def _migrate_v1_to_v2(db: aiosqlite.Connection) -> None:
+    """v1 → v2: 新增 batches 和 batch_stories 表（Story 2B.5）。"""
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS batches (
+            batch_id     TEXT PRIMARY KEY,
+            status       TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            completed_at TEXT
+        )"""
+    )
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS batch_stories (
+            batch_id    TEXT NOT NULL REFERENCES batches(batch_id),
+            story_id    TEXT NOT NULL REFERENCES stories(story_id),
+            sequence_no INTEGER NOT NULL,
+            PRIMARY KEY (batch_id, story_id),
+            UNIQUE(batch_id, sequence_no)
+        )"""
+    )
+    # 同一时间仅允许 1 个 active batch — partial unique index
+    await db.execute(
+        """\
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_single_active
+        ON batches(status) WHERE status = 'active'
+        """
+    )
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

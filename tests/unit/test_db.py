@@ -9,12 +9,17 @@ import aiosqlite
 import pytest
 
 from ato.models.db import (
+    get_active_batch,
+    get_batch_progress,
+    get_batch_stories,
     get_connection,
     get_pending_approvals,
     get_story,
     get_tasks_by_story,
     init_db,
     insert_approval,
+    insert_batch,
+    insert_batch_story_links,
     insert_story,
     insert_task,
     update_story_status,
@@ -23,6 +28,9 @@ from ato.models.db import (
 from ato.models.schemas import (
     SCHEMA_VERSION,
     ApprovalRecord,
+    BatchRecord,
+    BatchStatus,
+    BatchStoryLink,
     StoryRecord,
     StoryStatus,
     TaskRecord,
@@ -586,3 +594,220 @@ def _make_approval(approval_id: str, story_id: str) -> ApprovalRecord:
         status="pending",
         created_at=_NOW,
     )
+
+
+def _make_batch(batch_id: str, status: BatchStatus = "active") -> BatchRecord:
+    return BatchRecord(
+        batch_id=batch_id,
+        status=status,
+        created_at=_NOW,
+    )
+
+
+def _make_batch_link(batch_id: str, story_id: str, seq: int) -> BatchStoryLink:
+    return BatchStoryLink(batch_id=batch_id, story_id=story_id, sequence_no=seq)
+
+
+# ---------------------------------------------------------------------------
+# CRUD — Batch round-trip (Story 2B.5)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchCrud:
+    async def test_insert_and_get_active(self, initialized_db_path: Path) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            batch = _make_batch("batch-001")
+            await insert_batch(db, batch)
+            result = await get_active_batch(db)
+            assert result is not None
+            assert result.batch_id == "batch-001"
+            assert result.status == "active"
+        finally:
+            await db.close()
+
+    async def test_get_active_returns_none_when_empty(self, initialized_db_path: Path) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            result = await get_active_batch(db)
+            assert result is None
+        finally:
+            await db.close()
+
+    async def test_single_active_batch_constraint(self, initialized_db_path: Path) -> None:
+        """同一时间仅允许 1 个 active batch。"""
+        import aiosqlite as aiosqlite_mod
+
+        db = await get_connection(initialized_db_path)
+        try:
+            batch1 = _make_batch("batch-001")
+            await insert_batch(db, batch1)
+            batch2 = _make_batch("batch-002")
+            with pytest.raises(aiosqlite_mod.IntegrityError):
+                await insert_batch(db, batch2)
+        finally:
+            await db.close()
+
+    async def test_completed_batch_allows_new_active(self, initialized_db_path: Path) -> None:
+        """已完成的 batch 不阻止新 active batch。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            batch1 = _make_batch("batch-old", status="completed")
+            await insert_batch(db, batch1)
+            batch2 = _make_batch("batch-new", status="active")
+            await insert_batch(db, batch2)
+            result = await get_active_batch(db)
+            assert result is not None
+            assert result.batch_id == "batch-new"
+        finally:
+            await db.close()
+
+    async def test_batch_datetime_roundtrip(self, initialized_db_path: Path) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            batch = _make_batch("batch-dt")
+            await insert_batch(db, batch)
+            result = await get_active_batch(db)
+            assert result is not None
+            assert isinstance(result.created_at, datetime)
+        finally:
+            await db.close()
+
+
+class TestBatchStoryLinkCrud:
+    async def test_insert_and_get_stories(self, initialized_db_path: Path) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            # 先创建 story 和 batch
+            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s2"))
+            batch = _make_batch("b1")
+            await insert_batch(db, batch)
+
+            links = [
+                _make_batch_link("b1", "s1", 0),
+                _make_batch_link("b1", "s2", 1),
+            ]
+            await insert_batch_story_links(db, links)
+
+            results = await get_batch_stories(db, "b1")
+            assert len(results) == 2
+            assert results[0][0].sequence_no == 0
+            assert results[1][0].sequence_no == 1
+            assert results[0][1].story_id == "s1"
+            assert results[1][1].story_id == "s2"
+        finally:
+            await db.close()
+
+    async def test_sequence_order_preserved(self, initialized_db_path: Path) -> None:
+        """batch_stories 按 sequence_no 排序返回。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-a"))
+            await insert_story(db, _make_story("s-b"))
+            await insert_story(db, _make_story("s-c"))
+            batch = _make_batch("b-seq")
+            await insert_batch(db, batch)
+
+            links = [
+                _make_batch_link("b-seq", "s-c", 0),
+                _make_batch_link("b-seq", "s-a", 1),
+                _make_batch_link("b-seq", "s-b", 2),
+            ]
+            await insert_batch_story_links(db, links)
+
+            results = await get_batch_stories(db, "b-seq")
+            story_ids = [r[1].story_id for r in results]
+            assert story_ids == ["s-c", "s-a", "s-b"]
+        finally:
+            await db.close()
+
+    async def test_foreign_key_batch(self, initialized_db_path: Path) -> None:
+        """batch_stories 外键约束：无对应 batch 插入失败。"""
+        import aiosqlite as aiosqlite_mod
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fk"))
+            links = [_make_batch_link("nonexistent-batch", "s-fk", 0)]
+            with pytest.raises(aiosqlite_mod.IntegrityError):
+                await insert_batch_story_links(db, links)
+        finally:
+            await db.close()
+
+    async def test_foreign_key_story(self, initialized_db_path: Path) -> None:
+        """batch_stories 外键约束：无对应 story 插入失败。"""
+        import aiosqlite as aiosqlite_mod
+
+        db = await get_connection(initialized_db_path)
+        try:
+            batch = _make_batch("b-fk")
+            await insert_batch(db, batch)
+            links = [_make_batch_link("b-fk", "nonexistent-story", 0)]
+            with pytest.raises(aiosqlite_mod.IntegrityError):
+                await insert_batch_story_links(db, links)
+        finally:
+            await db.close()
+
+
+class TestBatchProgress:
+    async def test_progress_aggregation(self, initialized_db_path: Path) -> None:
+        """AC2: 进度分类规则。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            # 创建不同状态的 stories
+            await insert_story(db, _make_story("s-done", status="done"))
+            await insert_story(db, _make_story("s-blocked", status="blocked"))
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-queued",
+                    title="t",
+                    status="backlog",
+                    current_phase="queued",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                ),
+            )
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-active",
+                    title="t",
+                    status="planning",
+                    current_phase="creating",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                ),
+            )
+            await insert_story(db, _make_story("s-ready", status="ready"))
+
+            batch = _make_batch("b-prog")
+            await insert_batch(db, batch)
+            links = [
+                _make_batch_link("b-prog", "s-done", 0),
+                _make_batch_link("b-prog", "s-blocked", 1),
+                _make_batch_link("b-prog", "s-queued", 2),
+                _make_batch_link("b-prog", "s-active", 3),
+                _make_batch_link("b-prog", "s-ready", 4),
+            ]
+            await insert_batch_story_links(db, links)
+
+            progress = await get_batch_progress(db, "b-prog")
+            assert progress.done == 1
+            assert progress.failed == 1
+            assert progress.pending == 2  # queued + ready
+            assert progress.active == 1  # planning/creating
+            assert progress.total == 5
+        finally:
+            await db.close()
+
+    async def test_empty_batch_progress(self, initialized_db_path: Path) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            batch = _make_batch("b-empty")
+            await insert_batch(db, batch)
+            progress = await get_batch_progress(db, "b-empty")
+            assert progress.total == 0
+        finally:
+            await db.close()

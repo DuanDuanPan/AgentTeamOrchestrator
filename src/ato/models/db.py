@@ -16,6 +16,9 @@ from ato.models.migrations import run_migrations
 from ato.models.schemas import (
     SCHEMA_VERSION,
     ApprovalRecord,
+    BatchRecord,
+    BatchStatus,
+    BatchStoryLink,
     StoryRecord,
     StoryStatus,
     TaskRecord,
@@ -27,6 +30,7 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # 写前校验用 TypeAdapter — 避免脏数据写入 SQLite
 _story_status_validator: TypeAdapter[StoryStatus] = TypeAdapter(StoryStatus)
 _task_status_validator: TypeAdapter[TaskStatus] = TypeAdapter(TaskStatus)
+_batch_status_validator: TypeAdapter[BatchStatus] = TypeAdapter(BatchStatus)
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -73,6 +77,29 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at    TEXT,
     created_at    TEXT NOT NULL
 )"""
+
+_BATCHES_DDL = """\
+CREATE TABLE IF NOT EXISTS batches (
+    batch_id     TEXT PRIMARY KEY,
+    status       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    completed_at TEXT
+)"""
+
+_BATCH_STORIES_DDL = """\
+CREATE TABLE IF NOT EXISTS batch_stories (
+    batch_id    TEXT NOT NULL REFERENCES batches(batch_id),
+    story_id    TEXT NOT NULL REFERENCES stories(story_id),
+    sequence_no INTEGER NOT NULL,
+    PRIMARY KEY (batch_id, story_id),
+    UNIQUE(batch_id, sequence_no)
+)"""
+
+# 同一时间仅允许 1 个 active batch — partial unique index
+_BATCH_ACTIVE_UNIQUE_IDX = """\
+CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_single_active
+ON batches(status) WHERE status = 'active'
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -375,3 +402,139 @@ def _row_to_approval(row: aiosqlite.Row) -> ApprovalRecord:
     for dt_field in ("decided_at", "created_at"):
         data[dt_field] = _iso_to_dt(data[dt_field])
     return ApprovalRecord.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# CRUD — Batches (Story 2B.5)
+# ---------------------------------------------------------------------------
+
+
+async def insert_batch(db: aiosqlite.Connection, batch: BatchRecord) -> None:
+    """插入一条 batch 记录。"""
+    await db.execute(
+        "INSERT INTO batches (batch_id, status, created_at, completed_at) VALUES (?, ?, ?, ?)",
+        (
+            batch.batch_id,
+            batch.status,
+            _dt_to_iso(batch.created_at),
+            _dt_to_iso(batch.completed_at),
+        ),
+    )
+    await db.commit()
+
+
+async def insert_batch_story_links(db: aiosqlite.Connection, links: list[BatchStoryLink]) -> None:
+    """批量插入 batch_stories 关联记录。"""
+    await db.executemany(
+        "INSERT INTO batch_stories (batch_id, story_id, sequence_no) VALUES (?, ?, ?)",
+        [(link.batch_id, link.story_id, link.sequence_no) for link in links],
+    )
+    await db.commit()
+
+
+async def get_active_batch(db: aiosqlite.Connection) -> BatchRecord | None:
+    """获取当前唯一的 active batch，不存在返回 None。"""
+    cursor = await db.execute("SELECT * FROM batches WHERE status = ?", ("active",))
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return _row_to_batch(row)
+
+
+async def get_batch_stories(
+    db: aiosqlite.Connection, batch_id: str
+) -> list[tuple[BatchStoryLink, StoryRecord]]:
+    """按 sequence_no 顺序获取 batch 中所有 story（含关联的 StoryRecord）。"""
+    cursor = await db.execute(
+        "SELECT bs.batch_id, bs.story_id, bs.sequence_no, "
+        "s.story_id AS s_story_id, s.title, s.status, s.current_phase, "
+        "s.worktree_path, s.created_at, s.updated_at "
+        "FROM batch_stories bs "
+        "JOIN stories s ON bs.story_id = s.story_id "
+        "WHERE bs.batch_id = ? ORDER BY bs.sequence_no",
+        (batch_id,),
+    )
+    rows = await cursor.fetchall()
+    results: list[tuple[BatchStoryLink, StoryRecord]] = []
+    for row in rows:
+        data = dict(row)
+        link = BatchStoryLink.model_validate(
+            {
+                "batch_id": data["batch_id"],
+                "story_id": data["story_id"],
+                "sequence_no": data["sequence_no"],
+            }
+        )
+        story = StoryRecord.model_validate(
+            {
+                "story_id": data["s_story_id"],
+                "title": data["title"],
+                "status": data["status"],
+                "current_phase": data["current_phase"],
+                "worktree_path": data["worktree_path"],
+                "created_at": _iso_to_dt(data["created_at"]),
+                "updated_at": _iso_to_dt(data["updated_at"]),
+            }
+        )
+        results.append((link, story))
+    return results
+
+
+class BatchProgress:
+    """Batch 进度汇总（非 Pydantic 模型，仅用于返回聚合结果）。"""
+
+    __slots__ = ("active", "done", "failed", "pending", "total")
+
+    def __init__(
+        self,
+        *,
+        done: int = 0,
+        active: int = 0,
+        pending: int = 0,
+        failed: int = 0,
+    ) -> None:
+        self.done = done
+        self.active = active
+        self.pending = pending
+        self.failed = failed
+        self.total = done + active + pending + failed
+
+
+async def get_batch_progress(db: aiosqlite.Connection, batch_id: str) -> BatchProgress:
+    """按 AC2 规则聚合 batch 内各 story 的进度分类。
+
+    分类规则：
+      - done = status == "done"
+      - failed = status == "blocked"
+      - pending = current_phase == "queued" 或 status in {"backlog", "ready"}
+      - active = 其余状态（planning, in_progress, review, uat）
+    """
+    cursor = await db.execute(
+        "SELECT s.status, s.current_phase "
+        "FROM batch_stories bs "
+        "JOIN stories s ON bs.story_id = s.story_id "
+        "WHERE bs.batch_id = ?",
+        (batch_id,),
+    )
+    rows = await cursor.fetchall()
+    done = active = pending = failed = 0
+    for row in rows:
+        status = row[0]
+        phase = row[1]
+        if status == "done":
+            done += 1
+        elif status == "blocked":
+            failed += 1
+        elif phase == "queued" or status in ("backlog", "ready"):
+            pending += 1
+        else:
+            active += 1
+    return BatchProgress(done=done, active=active, pending=pending, failed=failed)
+
+
+def _row_to_batch(row: aiosqlite.Row) -> BatchRecord:
+    """SQLite Row → BatchRecord。"""
+    data = dict(row)
+    data["created_at"] = _iso_to_dt(data["created_at"])
+    data["completed_at"] = _iso_to_dt(data["completed_at"])
+    return BatchRecord.model_validate(data)
