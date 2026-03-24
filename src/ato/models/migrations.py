@@ -131,6 +131,32 @@ async def _migrate_v1_to_v2(db: aiosqlite.Connection) -> None:
     )
 
 
+@_register(3)
+async def _migrate_v2_to_v3(db: aiosqlite.Connection) -> None:
+    """v2 → v3: 新增 cost_log 表（Story 2B.1）。"""
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS cost_log (
+            cost_log_id TEXT PRIMARY KEY,
+            story_id    TEXT NOT NULL,
+            task_id     TEXT,
+            cli_tool    TEXT NOT NULL,
+            model       TEXT,
+            phase       TEXT NOT NULL,
+            role        TEXT,
+            input_tokens   INTEGER NOT NULL,
+            output_tokens  INTEGER NOT NULL,
+            cache_read_input_tokens INTEGER DEFAULT 0,
+            cost_usd    REAL NOT NULL,
+            duration_ms INTEGER,
+            session_id  TEXT,
+            exit_code   INTEGER,
+            error_category TEXT,
+            created_at  TEXT NOT NULL
+        )"""
+    )
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------
