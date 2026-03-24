@@ -12,6 +12,7 @@ from ato.models.schemas import (
     ApprovalRecord,
     ATOError,
     CLIAdapterError,
+    CodexOutput,
     ConfigError,
     RecoveryError,
     StateTransitionError,
@@ -223,3 +224,54 @@ class TestApprovalRecord:
         data["approval_type"] = 123
         with pytest.raises(ValidationError):
             ApprovalRecord.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# CodexOutput
+# ---------------------------------------------------------------------------
+
+
+class TestCodexOutput:
+    def test_model_validate_defaults(self) -> None:
+        output = CodexOutput.model_validate({
+            "status": "success",
+            "exit_code": 0,
+        })
+        assert output.cache_read_input_tokens == 0
+        assert output.model_name is None
+        assert output.text_result == ""
+        assert output.cost_usd == 0.0
+
+    def test_model_validate_full(self) -> None:
+        output = CodexOutput.model_validate({
+            "status": "success",
+            "exit_code": 0,
+            "text_result": "review done",
+            "cost_usd": 0.05,
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 400,
+            "model_name": "codex-mini-latest",
+            "session_id": "thread-123",
+        })
+        assert output.cache_read_input_tokens == 400
+        assert output.model_name == "codex-mini-latest"
+        assert output.input_tokens == 1000
+
+    def test_structured_output_mapping(self) -> None:
+        output = CodexOutput.model_validate({
+            "status": "success",
+            "exit_code": 0,
+            "structured_output": {"findings": [{"severity": "blocking"}]},
+        })
+        assert output.structured_output is not None
+        assert output.structured_output["findings"][0]["severity"] == "blocking"
+
+    def test_extra_fields_ignored(self) -> None:
+        """CodexOutput 继承 AdapterResult (extra='ignore')，额外字段不报错。"""
+        output = CodexOutput.model_validate({
+            "status": "success",
+            "exit_code": 0,
+            "unknown_field": "should be ignored",
+        })
+        assert output.status == "success"

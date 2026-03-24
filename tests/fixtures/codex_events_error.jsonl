@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"thread-codex-err-456"}
+{"type":"turn.started"}
+{"type":"error","message":"Rate limit exceeded. Please try again later."}

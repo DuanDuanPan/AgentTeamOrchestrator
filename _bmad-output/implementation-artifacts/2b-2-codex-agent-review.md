@@ -1,6 +1,6 @@
 # Story 2B.2: 操作者可看到 Codex agent 执行审查并返回 findings
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -57,36 +57,36 @@ So that 确认双 CLI 异构 agent 调用均正常工作。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 定义 CodexOutput 模型与价格表 (AC: #2, #3)
-  - [ ] 1.1 在 `src/ato/models/schemas.py` 中定义 `CodexOutput(AdapterResult)` 子类：无 `model_usage`；添加 `cache_read_input_tokens: int = 0`（映射 Codex JSONL 的 `cached_input_tokens`，复用现有 telemetry 字段）和 `model_name: str | None = None`（从 JSONL 或 options 提取）
-  - [ ] 1.2 实现 `CodexOutput.from_events(events, *, exit_code, output_file_content, model_name, cost_usd)` 类方法：从解析后的 JSONL 事件列表构建验证后的模型；兼容 `item.text` 与旧版 `item.content[].text` 两种消息结构；若 `output_file_content` 为 JSON 则映射到 `structured_output`
-  - [ ] 1.3 在 `src/ato/adapters/codex_cli.py` 中定义 `CODEX_PRICE_TABLE: dict[str, dict[str, float]]` 常量，初始包含 `"codex-mini-latest"` 的 `input_per_1m` / `cached_input_per_1m` / `output_per_1m`
-  - [ ] 1.4 实现 `calculate_cost(model: str, input_tokens: int, output_tokens: int, *, cached_input_tokens: int = 0) -> float` 函数：查表计算成本，未知模型返回 0.0 并 structlog 警告
+- [x] Task 1: 定义 CodexOutput 模型与价格表 (AC: #2, #3)
+  - [x] 1.1 在 `src/ato/models/schemas.py` 中定义 `CodexOutput(AdapterResult)` 子类：无 `model_usage`；添加 `cache_read_input_tokens: int = 0`（映射 Codex JSONL 的 `cached_input_tokens`，复用现有 telemetry 字段）和 `model_name: str | None = None`（从 JSONL 或 options 提取）
+  - [x] 1.2 实现 `CodexOutput.from_events(events, *, exit_code, output_file_content, model_name, cost_usd)` 类方法：从解析后的 JSONL 事件列表构建验证后的模型；兼容 `item.text` 与旧版 `item.content[].text` 两种消息结构；若 `output_file_content` 为 JSON 则映射到 `structured_output`
+  - [x] 1.3 在 `src/ato/adapters/codex_cli.py` 中定义 `CODEX_PRICE_TABLE: dict[str, dict[str, float]]` 常量，初始包含 `"codex-mini-latest"` 的 `input_per_1m` / `cached_input_per_1m` / `output_per_1m`
+  - [x] 1.4 实现 `calculate_cost(model: str, input_tokens: int, output_tokens: int, *, cached_input_tokens: int = 0) -> float` 函数：查表计算成本，未知模型返回 0.0 并 structlog 警告
 
-- [ ] Task 2: 实现 CodexAdapter (AC: #1, #2, #5)
-  - [ ] 2.1 在 `src/ato/adapters/codex_cli.py` 中实现 `CodexAdapter(BaseAdapter)` 类
-  - [ ] 2.2 实现 `_build_command(prompt, options) -> list[str]`：构建 `codex exec <prompt> --json` 命令；支持 `sandbox`（默认 "read-only"）、`output_file`（`-o` 路径）、`output_schema`（`--output-schema` 路径）、`ephemeral`
-  - [ ] 2.3 实现 `async execute(prompt, options, *, on_process_start) -> CodexOutput`：通过 `asyncio.create_subprocess_exec` 执行，支持 `cwd=(options or {}).get("cwd")`；解析 stdout JSONL，读取 `-o` 输出文件，计算成本；成功场景忽略 stderr 中的进度日志
-  - [ ] 2.4 实现 `_parse_jsonl(stdout: str) -> list[dict]`：逐行 `json.loads`，跳过空行和非 JSON 行
-  - [ ] 2.5 实现 `_aggregate_usage(events) -> tuple[int, int, int]`：从 `turn.completed` 事件聚合 `input_tokens`、`cached_input_tokens` 和 `output_tokens`
-  - [ ] 2.6 实现 `_extract_text_result(events) -> str`：从最后一个 `item.completed`（type=agent_message）提取文本结果；优先使用当前 CLI 的 `item.text`，并兼容旧版 `item.content[].text`
-  - [ ] 2.7 实现 `_parse_output_file(content: str) -> tuple[dict[str, Any] | None, str]`：`json.loads` 成功时返回结构化结果与文本；失败时返回 `structured_output=None` 与原始文本
-  - [ ] 2.8 实现错误分类逻辑 `_classify_error(exit_code, stderr)`：复用与 Claude adapter 相同的分类策略；仅在非 0 exit 或解析失败时分类，不把成功场景的 stderr 进度输出误判为错误
-  - [ ] 2.9 subprocess 调用全部在 `try/finally` 中执行，进程启动后触发 `on_process_start(proc)` 完成 PID 注册，超时/异常时调用 `cleanup_process()`
+- [x] Task 2: 实现 CodexAdapter (AC: #1, #2, #5)
+  - [x] 2.1 在 `src/ato/adapters/codex_cli.py` 中实现 `CodexAdapter(BaseAdapter)` 类
+  - [x] 2.2 实现 `_build_command(prompt, options) -> list[str]`：构建 `codex exec <prompt> --json` 命令；支持 `sandbox`（默认 "read-only"）、`output_file`（`-o` 路径）、`output_schema`（`--output-schema` 路径）、`ephemeral`
+  - [x] 2.3 实现 `async execute(prompt, options, *, on_process_start) -> CodexOutput`：通过 `asyncio.create_subprocess_exec` 执行，支持 `cwd=(options or {}).get("cwd")`；解析 stdout JSONL，读取 `-o` 输出文件，计算成本；成功场景忽略 stderr 中的进度日志
+  - [x] 2.4 实现 `_parse_jsonl(stdout: str) -> list[dict]`：逐行 `json.loads`，跳过空行和非 JSON 行
+  - [x] 2.5 实现 `_aggregate_usage(events) -> tuple[int, int, int]`：从 `turn.completed` 事件聚合 `input_tokens`、`cached_input_tokens` 和 `output_tokens`
+  - [x] 2.6 实现 `_extract_text_result(events) -> str`：从最后一个 `item.completed`（type=agent_message）提取文本结果；优先使用当前 CLI 的 `item.text`，并兼容旧版 `item.content[].text`
+  - [x] 2.7 实现 `_parse_output_file(content: str) -> tuple[dict[str, Any] | None, str]`：`json.loads` 成功时返回结构化结果与文本；失败时返回 `structured_output=None` 与原始文本
+  - [x] 2.8 实现错误分类逻辑 `_classify_error(exit_code, stderr)`：复用与 Claude adapter 相同的分类策略；仅在非 0 exit 或解析失败时分类，不把成功场景的 stderr 进度输出误判为错误
+  - [x] 2.9 subprocess 调用全部在 `try/finally` 中执行，进程启动后触发 `on_process_start(proc)` 完成 PID 注册，超时/异常时调用 `cleanup_process()`
 
-- [ ] Task 3: 创建 Snapshot fixture 与测试 (AC: #4)
-  - [ ] 3.1 创建 `tests/fixtures/codex_events_success.jsonl`——成功审查的 JSONL 事件流 fixture（含 thread.started、turn.started、item.completed、turn.completed 事件；覆盖当前 CLI 的 `item.text` 与 `cached_input_tokens` 字段）
-  - [ ] 3.2 创建 `tests/fixtures/codex_output_success.json`——成功审查的 `-o` 输出文件 fixture（含 findings 结构）
-  - [ ] 3.3 创建 `tests/fixtures/codex_events_error.jsonl`——错误场景的 JSONL fixture
-  - [ ] 3.4 实现 `tests/unit/test_codex_adapter.py`：fixture 解析测试、命令构建测试（含 `--output-schema`）、当前/旧版消息事件形态兼容测试、错误分类测试、execute mock 测试、cleanup 协议测试、缓存输入成本计算测试
-  - [ ] 3.5 修改 `tests/unit/test_subprocess_mgr.py`：覆盖 CodexOutput 成功路径将 `model_name` 与 `cache_read_input_tokens` 正确写入 `cost_log`
-  - [ ] 3.6 修改 `tests/unit/test_schemas.py`：补充 `CodexOutput` 的 model_validate / 默认值 / 结构化输出映射测试
+- [x] Task 3: 创建 Snapshot fixture 与测试 (AC: #4)
+  - [x] 3.1 创建 `tests/fixtures/codex_events_success.jsonl`——成功审查的 JSONL 事件流 fixture（含 thread.started、turn.started、item.completed、turn.completed 事件；覆盖当前 CLI 的 `item.text` 与 `cached_input_tokens` 字段）
+  - [x] 3.2 创建 `tests/fixtures/codex_output_success.json`——成功审查的 `-o` 输出文件 fixture（含 findings 结构）
+  - [x] 3.3 创建 `tests/fixtures/codex_events_error.jsonl`——错误场景的 JSONL fixture
+  - [x] 3.4 实现 `tests/unit/test_codex_adapter.py`：fixture 解析测试、命令构建测试（含 `--output-schema`）、当前/旧版消息事件形态兼容测试、错误分类测试、execute mock 测试、cleanup 协议测试、缓存输入成本计算测试
+  - [x] 3.5 修改 `tests/unit/test_subprocess_mgr.py`：覆盖 CodexOutput 成功路径将 `model_name` 与 `cache_read_input_tokens` 正确写入 `cost_log`
+  - [x] 3.6 修改 `tests/unit/test_schemas.py`：补充 `CodexOutput` 的 model_validate / 默认值 / 结构化输出映射测试
 
-- [ ] Task 4: 代码质量验证
-  - [ ] 4.1 `uv run ruff check src/ato tests` — 0 errors
-  - [ ] 4.2 `uv run mypy src/ato` — Success
-  - [ ] 4.3 新模块测试全部通过
-  - [ ] 4.4 `uv run pytest` — 全量通过，0 regressions
+- [x] Task 4: 代码质量验证
+  - [x] 4.1 `uv run ruff check src/ato tests` — 0 errors
+  - [x] 4.2 `uv run mypy src/ato` — Success
+  - [x] 4.3 新模块测试全部通过
+  - [x] 4.4 `uv run pytest` — 全量通过，0 regressions
 
 ## Dev Notes
 
@@ -374,10 +374,59 @@ Codex CLI 的 JSONL stdout 可能包含非 JSON 行（进度信息输出到 stde
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+N/A — 全部测试一次通过
+
 ### Completion Notes List
 
+- ✅ CodexOutput(AdapterResult) 子类定义完成，含 cache_read_input_tokens 和 model_name 字段
+- ✅ CodexOutput.from_events() 类方法实现，兼容 item.text 与旧版 item.content[].text
+- ✅ CODEX_PRICE_TABLE 价格表常量（codex-mini-latest）及 calculate_cost() 函数实现
+- ✅ CodexAdapter(BaseAdapter) 完整实现：命令构建、JSONL 事件流解析、-o 输出文件读取、成本计算、错误分类、三阶段清理协议
+- ✅ SubprocessManager 成功路径增加 CodexOutput 分支，正确提取 model_name 和 cache_read_input_tokens
+- ✅ 3 个 fixture 文件：codex_events_success.jsonl、codex_output_success.json、codex_events_error.jsonl
+- ✅ test_codex_adapter.py — 54 个测试覆盖全部 AC（含 12 个回归测试）
+- ✅ test_subprocess_mgr.py — 新增 Codex telemetry 落库测试
+- ✅ test_schemas.py — 新增 CodexOutput model_validate 测试
+- ✅ 全量 513 tests passed, ruff 0 errors, mypy Success
+- ✅ Code Review R1 修复 3 项 findings:
+  - R1-1 (High): -o 纯文本 fallback 修复，text_result 不再丢失
+  - R1-2 (High): JSONL 全解析失败时抛 parse_error 而非静默成功
+  - R1-3 (Medium): _extract_text_result 过滤 item.type=="agent_message"
+- ✅ Code Review R2 修复 3 项 findings:
+  - R2-1 (High): --model 透传到 codex exec 命令
+  - R2-2 (Medium): 超时/异常路径临时目录泄漏修复（外层 try/finally 保证 cleanup）
+  - R2-3 (Medium): 部分有效 JSONL（缺 turn.completed）也报 parse_error
+- ✅ Code Review R3 修复 1 项 finding:
+  - R3-1 (Medium): stdout 为空时报 parse_error 而非静默成功
+- ✅ Code Review R4 修复 1 项 finding:
+  - R4-1 (Medium): 缺少 agent_message item 时报 parse_error（有 output_file 时豁免）
+- ✅ Code Review R5 修复 1 项 finding:
+  - R5-1 (High): agent_message 校验从检查参数改为检查实际文件内容——先读文件再校验两个来源
+
+### Change Log
+
+- 2026-03-24: Story 2B.2 实现完成 — Codex CLI 适配器、CodexOutput 模型、价格表、42 个新测试
+- 2026-03-24: Code Review R1 findings 修复 — 3 个缺陷修复 + 3 个回归测试
+- 2026-03-24: Code Review R2 findings 修复 — 3 个缺陷修复 + 5 个回归测试
+- 2026-03-24: Code Review R3 findings 修复 — 1 个缺陷修复 + 1 个回归测试
+- 2026-03-24: Code Review R4 findings 修复 — 1 个缺陷修复 + 1 个回归测试
+- 2026-03-24: Code Review R5 findings 修复 — 1 个缺陷修复 + 2 个回归测试
+
 ### File List
+
+**新建：**
+- `src/ato/adapters/codex_cli.py` — CodexAdapter 完整实现 + CODEX_PRICE_TABLE + calculate_cost
+- `tests/unit/test_codex_adapter.py` — 42 个 Codex 适配器单元测试
+- `tests/fixtures/codex_events_success.jsonl` — 成功审查 JSONL 事件流 fixture
+- `tests/fixtures/codex_output_success.json` — 成功审查 -o 输出 fixture
+- `tests/fixtures/codex_events_error.jsonl` — 错误场景 JSONL fixture
+
+**修改：**
+- `src/ato/models/schemas.py` — 添加 CodexOutput(AdapterResult) 子类
+- `src/ato/subprocess_mgr.py` — 添加 isinstance(result, CodexOutput) 分支
+- `tests/unit/test_subprocess_mgr.py` — 新增 Codex telemetry 持久化测试
+- `tests/unit/test_schemas.py` — 新增 CodexOutput 模型测试

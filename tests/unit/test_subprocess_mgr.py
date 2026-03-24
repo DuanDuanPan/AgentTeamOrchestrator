@@ -454,3 +454,43 @@ class TestTelemetryPersistence:
         data = dict(row)
         assert data["model"] == "claude-opus-4-6"
         assert data["cache_read_input_tokens"] == 300
+
+    async def test_codex_output_model_and_cache_persisted(self, db_ready: Path) -> None:
+        """CodexOutput 的 model_name 与 cache_read_input_tokens 正确写入 cost_log。"""
+        from ato.models.schemas import CodexOutput
+
+        codex_result = CodexOutput.model_validate({
+            "status": "success",
+            "exit_code": 0,
+            "duration_ms": 1500,
+            "text_result": "review complete",
+            "cost_usd": 0.03,
+            "input_tokens": 26024,
+            "output_tokens": 29,
+            "cache_read_input_tokens": 10624,
+            "session_id": "thread-abc",
+            "model_name": "codex-mini-latest",
+        })
+
+        class CodexResultAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> CodexOutput:
+                return codex_result
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=CodexResultAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+        await mgr.dispatch(
+            story_id="story-test", phase="review", role="reviewer",
+            cli_tool="codex", prompt="test",
+        )
+
+        db = await get_connection(db_ready)
+        cursor = await db.execute(
+            "SELECT model, cache_read_input_tokens, cost_usd, cli_tool FROM cost_log"
+        )
+        row = await cursor.fetchone()
+        await db.close()
+        assert row is not None
+        data = dict(row)
+        assert data["model"] == "codex-mini-latest"
+        assert data["cache_read_input_tokens"] == 10624
+        assert data["cli_tool"] == "codex"
+        assert data["cost_usd"] == pytest.approx(0.03)
