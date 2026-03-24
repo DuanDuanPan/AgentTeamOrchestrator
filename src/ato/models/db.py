@@ -378,6 +378,39 @@ def _row_to_task(row: aiosqlite.Row) -> TaskRecord:
     return TaskRecord.model_validate(data)
 
 
+async def mark_running_tasks_paused(db: aiosqlite.Connection) -> int:
+    """批量将所有 status='running' 的 task 标记为 'paused'。
+
+    不自动 commit——调用方负责事务边界。
+
+    Returns:
+        受影响的行数。
+    """
+    cursor = await db.execute(
+        "UPDATE tasks SET status = ? WHERE status = ?",
+        ("paused", "running"),
+    )
+    return cursor.rowcount
+
+
+async def count_tasks_by_status(db: aiosqlite.Connection, status: str) -> int:
+    """按状态计数 tasks。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        status: 要计数的 task 状态值。
+
+    Returns:
+        匹配状态的 task 数量。
+    """
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status = ?",
+        (status,),
+    )
+    row = await cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
 # ---------------------------------------------------------------------------
 # CRUD — Approvals
 # ---------------------------------------------------------------------------

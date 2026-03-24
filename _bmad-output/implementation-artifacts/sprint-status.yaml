@@ -56,7 +56,7 @@ development_status:
   epic-2a: in-progress
   2a-1-story-state-machine-progression: done
   2a-2-serial-transition-queue: done
-  2a-3-orchestrator-start-stop: ready-for-dev
+  2a-3-orchestrator-start-stop: done
   epic-2a-retrospective: optional
 
   # ===== Epic 2B: Agent 集成与工作空间 =====

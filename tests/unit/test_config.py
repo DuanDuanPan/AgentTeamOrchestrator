@@ -603,6 +603,40 @@ cost:
         with pytest.raises(ConfigError, match=r"blocking_threshold.*>= 0"):
             load_config(p)
 
+    def test_zero_polling_interval(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+polling_interval: 0
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match=r"polling_interval.*> 0"):
+            load_config(p)
+
+    def test_negative_polling_interval(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+polling_interval: -1
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match=r"polling_interval.*> 0"):
+            load_config(p)
+
     def test_boundary_values_accepted(self, tmp_path: Path) -> None:
         """边界值（max_rounds=1, threshold=0, threshold=1 等）应被接受。"""
         yaml_content = """\
@@ -619,6 +653,7 @@ convergent_loop:
   max_rounds: 1
   convergence_threshold: 0
 max_concurrent_agents: 1
+polling_interval: 0.5
 timeout:
   structured_job: 1
   interactive_session: 1
@@ -631,6 +666,7 @@ cost:
         assert config.convergent_loop.max_rounds == 1
         assert config.convergent_loop.convergence_threshold == 0
         assert config.cost.blocking_threshold == 0
+        assert config.polling_interval == 0.5
 
 
 # ---------------------------------------------------------------------------
