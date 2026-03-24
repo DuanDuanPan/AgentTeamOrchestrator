@@ -1,0 +1,57 @@
+[project]
+name = "agent-team-orchestrator"
+version = "0.1.0"
+description = "Agent Team Orchestrator - 多角色 AI 团队编排系统"
+readme = "README.md"
+authors = [
+    { name = "enjoyjavapan", email = "enjoyjavapan@163.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "pydantic>=2.0",
+    "python-statemachine>=3.0",
+    "structlog>=25.5.0",
+    "textual>=2.0",
+    "typer>=0.24.1",
+]
+
+[project.scripts]
+ato = "ato.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ato"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".agent", ".agents", ".claude", "_bmad"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ato]
+claude_cli_version = ""
+codex_cli_version = ""
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.7",
+]

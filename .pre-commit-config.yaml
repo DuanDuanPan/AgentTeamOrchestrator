@@ -1,0 +1,15 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+        exclude: ^(\.(agent|agents|claude)/|_bmad/)
+      - id: ruff-format
+        exclude: ^(\.(agent|agents|claude)/|_bmad/)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.19.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [pydantic>=2.0, typer, structlog]
+        exclude: ^(\.(agent|agents|claude)/|_bmad/)
