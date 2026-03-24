@@ -191,8 +191,18 @@ async def update_story_status(
     story_id: str,
     status: str,
     phase: str,
+    *,
+    commit: bool = True,
 ) -> None:
     """更新 story 的 status、current_phase 和 updated_at。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        story_id: Story 唯一标识。
+        status: 高层状态（必须是合法 StoryStatus 值）。
+        phase: 详细阶段名（current_phase 列）。
+        commit: 是否自动 commit。``False`` 时由调用方负责 commit，
+            用于 TransitionQueue 统一事务边界。
 
     Raises:
         pydantic.ValidationError: status 值不在 StoryStatus Literal 范围内。
@@ -202,11 +212,15 @@ async def update_story_status(
         msg = f"phase must be str, got {type(phase).__name__}"
         raise TypeError(msg)
     now_iso = _dt_to_iso(datetime.now(tz=UTC))
-    await db.execute(
+    cursor = await db.execute(
         "UPDATE stories SET status = ?, current_phase = ?, updated_at = ? WHERE story_id = ?",
         (status, phase, now_iso, story_id),
     )
-    await db.commit()
+    if cursor.rowcount == 0:
+        msg = f"Story '{story_id}' not found in database"
+        raise ValueError(msg)
+    if commit:
+        await db.commit()
 
 
 def _row_to_story(row: aiosqlite.Row) -> StoryRecord:
