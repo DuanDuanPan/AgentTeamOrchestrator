@@ -1,6 +1,6 @@
 # Story 1.3: 声明式配置引擎
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -40,18 +40,18 @@ so that 系统行为可通过配置文件定制而非修改代码。
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: 安装配置依赖 (AC: 前提)
-  - [ ] 0.1 执行 `uv add "pydantic-settings[yaml]"` 安装依赖并更新 `pyproject.toml` / `uv.lock`
-  - [ ] 0.2 统一通过 `pydantic-settings` 的 YAML source 读取配置，不新增手写 `import yaml` 解析路径
+- [x] Task 0: 安装配置依赖 (AC: 前提)
+  - [x] 0.1 执行 `uv add “pydantic-settings[yaml]”` 安装依赖并更新 `pyproject.toml` / `uv.lock`
+  - [x] 0.2 统一通过 `pydantic-settings` 的 YAML source 读取配置，不新增手写 `import yaml` 解析路径
 
-- [ ] Task 1: 定义外部 YAML schema 对应的 Pydantic 模型 (AC: #1, #5)
-  - [ ] 1.1 在 `src/ato/config.py` 中定义嵌套配置模型（继承 `BaseModel`，主配置类继承 `BaseSettings`）
-  - [ ] 1.2 `RoleConfig` 保持 PRD 示例中的外部键名：`cli: Literal["claude", "codex"]`、`model: str`、`sandbox: Literal["read-only", "workspace-write"] | None = None`
-  - [ ] 1.3 `PhaseConfig` 至少包含：`name: str`、`role: str`、`type: Literal["structured_job", "convergent_loop", "interactive_session"]`、`next_on_success: str`、`next_on_failure: str | None = None`
-  - [ ] 1.4 定义 `ConvergentLoopConfig`：`max_rounds: int = 3`、`convergence_threshold: float = 0.5`
-  - [ ] 1.5 定义 `TimeoutConfig`：`structured_job: int = 1800`、`interactive_session: int = 7200`
-  - [ ] 1.6 定义 `CostConfig`：`budget_per_story: float = 5.0`、`blocking_threshold: int = 10`
-  - [ ] 1.7 定义 `ATOSettings(BaseSettings)`，字段至少包含：
+- [x] Task 1: 定义外部 YAML schema 对应的 Pydantic 模型 (AC: #1, #5)
+  - [x] 1.1 在 `src/ato/config.py` 中定义嵌套配置模型（继承 `BaseModel`，主配置类继承 `BaseSettings`）
+  - [x] 1.2 `RoleConfig` 保持 PRD 示例中的外部键名：`cli: Literal[“claude”, “codex”]`、`model: str`、`sandbox: Literal[“read-only”, “workspace-write”] | None = None`
+  - [x] 1.3 `PhaseConfig` 至少包含：`name: str`、`role: str`、`type: Literal[“structured_job”, “convergent_loop”, “interactive_session”]`、`next_on_success: str`、`next_on_failure: str | None = None`
+  - [x] 1.4 定义 `ConvergentLoopConfig`：`max_rounds: int = 3`、`convergence_threshold: float = 0.5`
+  - [x] 1.5 定义 `TimeoutConfig`：`structured_job: int = 1800`、`interactive_session: int = 7200`
+  - [x] 1.6 定义 `CostConfig`：`budget_per_story: float = 5.0`、`blocking_threshold: int = 10`
+  - [x] 1.7 定义 `ATOSettings(BaseSettings)`，字段至少包含：
     - `roles: dict[str, RoleConfig]`
     - `phases: list[PhaseConfig]`
     - `max_concurrent_agents: int = 4`
@@ -59,63 +59,63 @@ so that 系统行为可通过配置文件定制而非修改代码。
     - `timeout: TimeoutConfig`
     - `cost: CostConfig`
     - `model_map: dict[str, str] = {}`
-  - [ ] 1.8 配置 `model_config = SettingsConfigDict(yaml_file="ato.yaml", yaml_file_encoding="utf-8")`
-  - [ ] 1.9 实现 `settings_customise_sources`，明确以 init 参数 + YAML 文件为主配置来源；MVP 不依赖隐式 env/dotenv override
+  - [x] 1.8 配置 `model_config = SettingsConfigDict(yaml_file=”ato.yaml”, yaml_file_encoding=”utf-8”)`
+  - [x] 1.9 实现 `settings_customise_sources`，明确以 init 参数 + YAML 文件为主配置来源；MVP 不依赖隐式 env/dotenv override
 
-- [ ] Task 2: 实现配置加载函数 (AC: #1, #2, #4)
-  - [ ] 2.1 实现 `def load_config(config_path: Path) -> ATOSettings`
-  - [ ] 2.2 检查 `config_path` 是否存在；不存在时抛出 `ConfigError`，消息包含从 `ato.yaml.example` 复制的指引
-  - [ ] 2.3 通过 `YamlConfigSettingsSource(settings_cls, yaml_file=config_path, yaml_file_encoding="utf-8")` 绑定显式路径；不要依赖不存在的 `_yaml_file` init 参数
-  - [ ] 2.4 捕获 `ValidationError` 并转换为 `ConfigError`，保留定位信息
-  - [ ] 2.5 加载成功后调用 `_validate_config(settings)` 做领域级校验
-  - [ ] 2.6 保持 `load_config()` 无模块级缓存，避免 FR51 之外的隐式热更新行为
+- [x] Task 2: 实现配置加载函数 (AC: #1, #2, #4)
+  - [x] 2.1 实现 `def load_config(config_path: Path) -> ATOSettings`
+  - [x] 2.2 检查 `config_path` 是否存在；不存在时抛出 `ConfigError`，消息包含从 `ato.yaml.example` 复制的指引
+  - [x] 2.3 通过 `YamlConfigSettingsSource(settings_cls, yaml_file=config_path, yaml_file_encoding=”utf-8”)` 绑定显式路径；不要依赖不存在的 `_yaml_file` init 参数
+  - [x] 2.4 捕获 `ValidationError` 并转换为 `ConfigError`，保留定位信息
+  - [x] 2.5 加载成功后调用 `_validate_config(settings)` 做领域级校验
+  - [x] 2.6 保持 `load_config()` 无模块级缓存，避免 FR51 之外的隐式热更新行为
 
-- [ ] Task 3: 实现领域级配置验证 (AC: #2)
-  - [ ] 3.1 实现 `def _validate_config(config: ATOSettings) -> None`，验证失败时抛出 `ConfigError`
-  - [ ] 3.2 验证阶段角色引用：每个 `PhaseConfig.role` 必须存在于 `config.roles`
-  - [ ] 3.3 验证阶段转换引用：每个 `next_on_success` 和 `next_on_failure`（非 `None` 时）必须引用已定义 phase 或特殊值 `"done"`
-  - [ ] 3.4 验证 `phases` 非空，且 phase 名唯一
-  - [ ] 3.5 用图遍历验证不存在“只有回环、没有出口”的配置：从入口 phase 与所有 failure 跳转目标出发，最终都必须存在通向 `"done"` 的路径；允许 review/fix 这类受控回环
-  - [ ] 3.6 验证数值边界：`max_rounds >= 1`、`0 <= convergence_threshold <= 1`、`max_concurrent_agents >= 1`、所有 timeout > 0、`budget_per_story > 0`、`blocking_threshold >= 0`
-  - [ ] 3.7 验证 `model_map` 的 key 必须引用已定义 phase 名
+- [x] Task 3: 实现领域级配置验证 (AC: #2)
+  - [x] 3.1 实现 `def _validate_config(config: ATOSettings) -> None`，验证失败时抛出 `ConfigError`
+  - [x] 3.2 验证阶段角色引用：每个 `PhaseConfig.role` 必须存在于 `config.roles`
+  - [x] 3.3 验证阶段转换引用：每个 `next_on_success` 和 `next_on_failure`（非 `None` 时）必须引用已定义 phase 或特殊值 `”done”`
+  - [x] 3.4 验证 `phases` 非空，且 phase 名唯一
+  - [x] 3.5 用图遍历验证不存在”只有回环、没有出口”的配置：从入口 phase 与所有 failure 跳转目标出发，最终都必须存在通向 `”done”` 的路径；允许 review/fix 这类受控回环
+  - [x] 3.6 验证数值边界：`max_rounds >= 1`、`0 <= convergence_threshold <= 1`、`max_concurrent_agents >= 1`、所有 timeout > 0、`budget_per_story > 0`、`blocking_threshold >= 0`
+  - [x] 3.7 验证 `model_map` 的 key 必须引用已定义 phase 名
 
-- [ ] Task 4: 实现阶段定义生成 (AC: #3)
-  - [ ] 4.1 定义 `PhaseDefinition` 数据类（放 `config.py`，非 Pydantic model）：`name`、`role`、`cli_tool`、`model`、`sandbox`、`phase_type`、`next_on_success`、`next_on_failure`、`timeout_seconds`
-  - [ ] 4.2 实现 `def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]`
-  - [ ] 4.3 将 `PhaseConfig` + 对应 `RoleConfig` 合并为 `PhaseDefinition`
-  - [ ] 4.4 `model` 解析规则：`model_map[phase.name]` 优先，否则回退到 `roles[phase.role].model`
-  - [ ] 4.5 `timeout_seconds` 由 `phase.type` 映射到 `timeout.structured_job` / `timeout.interactive_session`；`convergent_loop` 视为非交互阶段
-  - [ ] 4.6 保持阶段顺序与 `config.phases` 一致，不实例化状态机类
+- [x] Task 4: 实现阶段定义生成 (AC: #3)
+  - [x] 4.1 定义 `PhaseDefinition` 数据类（放 `config.py`，非 Pydantic model）：`name`、`role`、`cli_tool`、`model`、`sandbox`、`phase_type`、`next_on_success`、`next_on_failure`、`timeout_seconds`
+  - [x] 4.2 实现 `def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]`
+  - [x] 4.3 将 `PhaseConfig` + 对应 `RoleConfig` 合并为 `PhaseDefinition`
+  - [x] 4.4 `model` 解析规则：`model_map[phase.name]` 优先，否则回退到 `roles[phase.role].model`
+  - [x] 4.5 `timeout_seconds` 由 `phase.type` 映射到 `timeout.structured_job` / `timeout.interactive_session`；`convergent_loop` 视为非交互阶段
+  - [x] 4.6 保持阶段顺序与 `config.phases` 一致，不实例化状态机类
 
-- [ ] Task 5: 创建 `ato.yaml.example` 模板 (AC: #5)
-  - [ ] 5.1 在项目根目录创建 `ato.yaml.example`，包含完整配置示例和中文注释
-  - [ ] 5.2 外部 YAML 键名与 PRD 示例一致：`roles.*.cli`、`phases[].type`、`max_concurrent_agents`、`convergent_loop`、`timeout`、`cost`、`model_map`
-  - [ ] 5.3 roles 部分至少包含 `creator`、`validator`、`developer`、`reviewer`、`fixer`、`qa` 六个角色，并为只读 Codex 角色示例化 `sandbox: read-only`
-  - [ ] 5.4 phases 部分包含完整 story 生命周期阶段序列：`creating → validating → dev_ready → developing → reviewing → fixing → review_passed → qa → uat → merging → done`
-  - [ ] 5.5 模板显式说明配置变更需重启系统生效（FR51）
+- [x] Task 5: 创建 `ato.yaml.example` 模板 (AC: #5)
+  - [x] 5.1 在项目根目录创建 `ato.yaml.example`，包含完整配置示例和中文注释
+  - [x] 5.2 外部 YAML 键名与 PRD 示例一致：`roles.*.cli`、`phases[].type`、`max_concurrent_agents`、`convergent_loop`、`timeout`、`cost`、`model_map`
+  - [x] 5.3 roles 部分至少包含 `creator`、`validator`、`developer`、`reviewer`、`fixer`、`qa` 六个角色，并为只读 Codex 角色示例化 `sandbox: read-only`
+  - [x] 5.4 phases 部分包含完整 story 生命周期阶段序列：`creating → validating → dev_ready → developing → reviewing → fixing → review_passed → qa → uat → merging → done`
+  - [x] 5.5 模板显式说明配置变更需重启系统生效（FR51）
 
-- [ ] Task 6: 更新模块导出 (AC: #1)
-  - [ ] 6.1 在 `src/ato/config.py` 顶部定义 `__all__`
-  - [ ] 6.2 导出 `ATOSettings`、`RoleConfig`、`PhaseConfig`、`ConvergentLoopConfig`、`TimeoutConfig`、`CostConfig`、`PhaseDefinition`、`load_config`、`build_phase_definitions`
+- [x] Task 6: 更新模块导出 (AC: #1)
+  - [x] 6.1 在 `src/ato/config.py` 顶部定义 `__all__`
+  - [x] 6.2 导出 `ATOSettings`、`RoleConfig`、`PhaseConfig`、`ConvergentLoopConfig`、`TimeoutConfig`、`CostConfig`、`PhaseDefinition`、`load_config`、`build_phase_definitions`
 
-- [ ] Task 7: 编写单元测试 (AC: #1, #2, #3, #4, #5)
-  - [ ] 7.1 创建 `tests/unit/test_config.py`
-  - [ ] 7.2 测试有效配置加载：从 `ato.yaml.example` 复制有效配置到 `tmp_path`，调用 `load_config()` 成功返回 `ATOSettings`
-  - [ ] 7.3 测试配置缺失：`config_path` 不存在时抛出 `ConfigError`，消息包含 `ato.yaml.example`
-  - [ ] 7.4 测试必填字段缺失：YAML 缺少 `roles` 或 `phases` 时抛出 `ConfigError`
-  - [ ] 7.5 测试角色 / phase / `model_map` 引用错误时抛出 `ConfigError`
-  - [ ] 7.6 测试死循环或无出口配置时抛出 `ConfigError`
-  - [ ] 7.7 测试数值边界：`max_rounds=0`、`convergence_threshold=1.5`、`max_concurrent_agents=0`、非正 timeout / budget 时抛出 `ConfigError`
-  - [ ] 7.8 测试 `build_phase_definitions()` 正确解析 `cli_tool`、`model`、`sandbox`、`timeout_seconds`
-  - [ ] 7.9 测试显式路径加载：`tmp_path/custom.yaml` 也可被 `load_config()` 读取，覆盖 story 原稿中错误的 `_yaml_file` 假设
-  - [ ] 7.10 测试配置解析性能：加载合理大小配置无明显性能退化
+- [x] Task 7: 编写单元测试 (AC: #1, #2, #3, #4, #5)
+  - [x] 7.1 创建 `tests/unit/test_config.py`
+  - [x] 7.2 测试有效配置加载：从 `ato.yaml.example` 复制有效配置到 `tmp_path`，调用 `load_config()` 成功返回 `ATOSettings`
+  - [x] 7.3 测试配置缺失：`config_path` 不存在时抛出 `ConfigError`，消息包含 `ato.yaml.example`
+  - [x] 7.4 测试必填字段缺失：YAML 缺少 `roles` 或 `phases` 时抛出 `ConfigError`
+  - [x] 7.5 测试角色 / phase / `model_map` 引用错误时抛出 `ConfigError`
+  - [x] 7.6 测试死循环或无出口配置时抛出 `ConfigError`
+  - [x] 7.7 测试数值边界：`max_rounds=0`、`convergence_threshold=1.5`、`max_concurrent_agents=0`、非正 timeout / budget 时抛出 `ConfigError`
+  - [x] 7.8 测试 `build_phase_definitions()` 正确解析 `cli_tool`、`model`、`sandbox`、`timeout_seconds`
+  - [x] 7.9 测试显式路径加载：`tmp_path/custom.yaml` 也可被 `load_config()` 读取，覆盖 story 原稿中错误的 `_yaml_file` 假设
+  - [x] 7.10 测试配置解析性能：加载合理大小配置无明显性能退化
 
-- [ ] Task 8: 质量验证 (AC: 全部)
-  - [ ] 8.1 执行 `uv run ruff check src/ato/config.py tests/unit/test_config.py`
-  - [ ] 8.2 执行 `uv run mypy src/ato/config.py tests/unit/test_config.py`
-  - [ ] 8.3 执行 `uv run pytest tests/unit/test_config.py -v`
-  - [ ] 8.4 执行 `uv run pytest`
-  - [ ] 8.5 执行 `uv run pre-commit run --all-files`
+- [x] Task 8: 质量验证 (AC: 全部)
+  - [x] 8.1 执行 `uv run ruff check src/ato/config.py tests/unit/test_config.py`
+  - [x] 8.2 执行 `uv run mypy src/ato/config.py tests/unit/test_config.py`
+  - [x] 8.3 执行 `uv run pytest tests/unit/test_config.py -v`
+  - [x] 8.4 执行 `uv run pytest`
+  - [x] 8.5 执行 `uv run pre-commit run --all-files`
 
 ## Dev Notes
 
@@ -265,10 +265,35 @@ model_map: {}
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- 可达性验证初版使用 DFS + 记忆化，发现在回环路径中会错误地提前标记节点为不可达（fixing → reviewing 回环场景）。改为固定点反向传播算法，从 "done" 出发逐步标记可达节点，正确处理所有受控回环。
+- pre-commit mypy 环境缺少 pydantic-settings 依赖导致 BaseSettings 被视为 Any 类型，已在 .pre-commit-config.yaml 中补充 additional_dependencies。
+
 ### Completion Notes List
 
+- 实现了完整的声明式配置引擎：6 个配置模型类 + load_config() + _validate_config() + build_phase_definitions()
+- 配置通过 pydantic-settings YamlConfigSettingsSource 加载，使用 ClassVar _yaml_file_override 实现运行时路径注入
+- 领域验证覆盖：角色引用、阶段转换引用、phase 名唯一、保留终态名检查、图可达性（固定点算法）、数值边界、model_map key 引用
+- PhaseDefinition 为 frozen dataclass，合并 PhaseConfig + RoleConfig，支持 model_map 覆盖和 type-based timeout 映射
+- ato.yaml.example 包含 6 角色 10 阶段完整生命周期，含中文注释和 FR51 重启说明
+- 53 个单元测试覆盖所有 5 个 AC，全部通过；161 个全量测试无回归
+- ruff check/format、mypy strict、pre-commit 全部通过
+- [Code Review] 所有嵌套配置模型添加 extra="forbid" 拒绝 typo 字段
+- [Code Review] 禁止 "done" 作为普通阶段名（保留终态标识符）
+
+### Change Log
+
+- 2026-03-24: Story 1.3 声明式配置引擎实现完成
+- 2026-03-24: 修复 code review findings — extra="forbid" 防 typo + done 保留名检查
+
 ### File List
+
+- `src/ato/config.py` — 配置模型、加载函数、领域验证、阶段定义生成（主实现文件，从 docstring-only 扩展）
+- `ato.yaml.example` — 配置模板（新建），6 角色 10 阶段完整示例
+- `tests/unit/test_config.py` — 49 个配置单元测试（新建）
+- `pyproject.toml` — 新增 pydantic-settings[yaml] 依赖
+- `uv.lock` — 依赖锁文件更新
+- `.pre-commit-config.yaml` — mypy hook 新增 pydantic-settings 依赖

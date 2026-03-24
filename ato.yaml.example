@@ -1,0 +1,141 @@
+# ATO 声明式工作流配置
+# ================================
+# 本文件定义系统的角色、阶段序列、转换规则和阈值参数。
+# 配置变更需重启系统生效（FR51）。
+#
+# 使用方法：
+#   cp ato.yaml.example ato.yaml
+#   根据项目需求编辑 ato.yaml
+
+# ---------------------------------------------------------------------------
+# 角色定义
+# ---------------------------------------------------------------------------
+# 每个角色指定使用的 CLI 工具（claude / codex）和默认模型。
+# sandbox 选项：read-only（只读沙箱）、workspace-write（可写）、省略（默认）。
+
+roles:
+  creator:
+    cli: claude
+    model: sonnet
+  validator:
+    cli: codex
+    model: codex-mini-latest
+    sandbox: read-only
+  developer:
+    cli: claude
+    model: sonnet
+  reviewer:
+    cli: codex
+    model: codex-mini-latest
+    sandbox: read-only
+  fixer:
+    cli: claude
+    model: sonnet
+  qa:
+    cli: codex
+    model: codex-mini-latest
+    sandbox: read-only
+
+# ---------------------------------------------------------------------------
+# 阶段序列
+# ---------------------------------------------------------------------------
+# 定义 story 生命周期的各个阶段及其转换规则。
+# type 取值：structured_job | convergent_loop | interactive_session
+# next_on_success: 成功后跳转的阶段（或 "done" 表示完成）
+# next_on_failure: 失败后跳转的阶段（可选）
+
+phases:
+  - name: creating
+    role: creator
+    type: structured_job
+    next_on_success: validating
+
+  - name: validating
+    role: validator
+    type: convergent_loop
+    next_on_success: dev_ready
+    next_on_failure: creating
+
+  - name: dev_ready
+    role: developer
+    type: structured_job
+    next_on_success: developing
+
+  - name: developing
+    role: developer
+    type: structured_job
+    next_on_success: reviewing
+
+  - name: reviewing
+    role: reviewer
+    type: convergent_loop
+    next_on_success: review_passed
+    next_on_failure: fixing
+
+  - name: fixing
+    role: fixer
+    type: structured_job
+    next_on_success: reviewing
+
+  - name: review_passed
+    role: developer
+    type: structured_job
+    next_on_success: qa
+
+  - name: qa
+    role: qa
+    type: convergent_loop
+    next_on_success: uat
+    next_on_failure: fixing
+
+  - name: uat
+    role: developer
+    type: interactive_session
+    next_on_success: merging
+
+  - name: merging
+    role: developer
+    type: structured_job
+    next_on_success: done
+
+# ---------------------------------------------------------------------------
+# 并发控制
+# ---------------------------------------------------------------------------
+
+# 最大并发 agent 数量
+max_concurrent_agents: 4
+
+# ---------------------------------------------------------------------------
+# Convergent Loop 参数
+# ---------------------------------------------------------------------------
+
+convergent_loop:
+  max_rounds: 3                     # 最大迭代轮次（>= 1）
+  convergence_threshold: 0.5        # 收敛阈值（0.0 ~ 1.0）
+
+# ---------------------------------------------------------------------------
+# 超时设置（秒）
+# ---------------------------------------------------------------------------
+
+timeout:
+  structured_job: 1800              # 结构化任务超时：30 分钟
+  interactive_session: 7200         # 交互式会话超时：2 小时
+
+# ---------------------------------------------------------------------------
+# 成本控制
+# ---------------------------------------------------------------------------
+
+cost:
+  budget_per_story: 5.0             # 每个 story 预算上限（USD）
+  blocking_threshold: 10            # 阻塞性 finding 数量阈值
+
+# ---------------------------------------------------------------------------
+# 模型覆盖映射（可选）
+# ---------------------------------------------------------------------------
+# 为特定阶段指定不同于角色默认的模型。
+# key 必须是已定义的阶段名。
+# 示例：
+#   reviewing: opus
+#   qa: codex-mini-latest
+
+model_map: {}
