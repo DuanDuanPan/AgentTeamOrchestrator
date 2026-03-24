@@ -9,8 +9,11 @@ from pathlib import Path
 import click.exceptions
 import structlog
 import typer
+from rich.console import Console
+from rich.text import Text
 
-from ato.models.schemas import StoryRecord
+from ato.models.schemas import CheckResult, StoryRecord
+from ato.preflight import run_preflight
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
@@ -46,6 +49,154 @@ def main(ctx: typer.Context) -> None:
     """Agent Team Orchestrator — 多角色 AI 团队编排系统。"""
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
+
+
+# ---------------------------------------------------------------------------
+# ato init — Preflight 渲染与项目初始化
+# ---------------------------------------------------------------------------
+
+_console = Console()
+
+_STATUS_MAP: dict[str, tuple[str, str]] = {
+    "PASS": ("✔", "green"),
+    "HALT": ("✖", "red bold"),
+    "WARN": ("⚠", "yellow"),
+    "INFO": ("ℹ", "dim"),
+}
+
+_LAYER_TITLES: dict[str, str] = {
+    "system": "第一层：系统环境",
+    "project": "第二层：项目结构",
+    "artifact": "第三层：编排前置 Artifact",
+}
+
+_HINTS: dict[str, str] = {
+    "python_version": "升级到 Python ≥ 3.11 后重新运行 `ato init`",
+    "claude_installed": "安装 Claude CLI 后重新运行 `ato init`",
+    "claude_auth": "执行 `claude auth` 完成登录",
+    "codex_installed": "安装 Codex CLI 后重新运行 `ato init`",
+    "codex_auth": "完成 Codex CLI 认证后重试",
+    "git_installed": "安装 Git 后重试",
+    "git_repo": "在目标目录执行 `git init`，或切换到已有仓库",
+    "bmad_config": "补齐 `_bmad/bmm/config.yaml` 的必填字段",
+    "bmad_skills": "运行 BMAD 安装流程以部署 skills 目录",
+    "ato_yaml": "从 `ato.yaml.example` 复制并补全配置",
+    "epic_files": "补齐 epics 文档，否则 `sprint-planning` / `create-story` 无法运行",
+    "prd_files": "建议运行 `/bmad-create-prd`",
+    "architecture_files": "建议运行 `/bmad-create-architecture`",
+    "impl_directory": "修复目录权限，或检查 BMAD config 中 implementation_artifacts 路径",
+}
+
+
+def render_preflight_results(
+    results: list[CheckResult],
+    *,
+    console: Console | None = None,
+) -> None:
+    """渲染 Preflight 检查结果到 console。"""
+    con = console or _console
+
+    con.print()
+    con.print(Text("AgentTeamOrchestrator — Preflight Check", style="bold"))
+    con.print()
+
+    current_layer: str | None = None
+    for r in results:
+        if r.layer != current_layer:
+            if current_layer is not None:
+                con.print()
+            current_layer = r.layer
+            title = _LAYER_TITLES.get(r.layer, r.layer)
+            con.print(Text(title, style="bold"))
+
+        icon, style = _STATUS_MAP.get(r.status, ("?", ""))
+        line = Text()
+        line.append(f"  {icon} ", style=style)
+        line.append(r.message)
+        con.print(line, highlight=False)
+
+        if r.status in ("WARN", "HALT"):
+            hint = _HINTS.get(r.check_item)
+            if hint:
+                hint_line = Text()
+                hint_line.append(f"    → {hint}", style="dim")
+                con.print(hint_line, highlight=False)
+
+    con.print()
+    con.rule()
+    _render_summary(results, con)
+
+
+def _render_summary(results: list[CheckResult], console: Console) -> None:
+    """渲染底部摘要。"""
+    halt_count = sum(1 for r in results if r.status == "HALT")
+    warn_count = sum(1 for r in results if r.status == "WARN")
+    info_count = sum(1 for r in results if r.status == "INFO")
+
+    if halt_count > 0:
+        summary = Text(f"结果: ✖ 未就绪（{halt_count} 阻断）", style="red bold")
+    elif warn_count > 0:
+        summary = Text(
+            f"结果: 就绪（{warn_count} 警告, {info_count} 信息）", style="yellow"
+        )
+    else:
+        summary = Text("结果: ✔ 就绪", style="green")
+
+    console.print(summary)
+
+
+@app.command("init")
+def init_command(
+    project_path: Path = typer.Argument(
+        ".",
+        help="目标项目路径",
+        exists=True,
+        file_okay=False,
+        resolve_path=True,
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite 数据库路径（默认 <project>/.ato/state.db）",
+    ),
+) -> None:
+    """初始化项目环境，执行 Preflight 检查。"""
+    resolved_db = db_path or (project_path / ".ato" / "state.db")
+
+    if resolved_db.exists():
+        typer.confirm("已检测到现有数据库，是否重新初始化？", abort=True)
+
+    try:
+        asyncio.run(_init_async(project_path, resolved_db))
+    except click.exceptions.Exit:
+        raise
+    except click.exceptions.Abort:
+        raise
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+async def _init_async(project_path: Path, db_path: Path) -> None:
+    """执行 Preflight 检查并渲染结果。"""
+    results = await run_preflight(project_path, db_path, include_auth=True)
+
+    render_preflight_results(results)
+
+    has_halt = any(r.status == "HALT" for r in results)
+    if has_halt:
+        typer.echo("环境检查未通过，请根据上方提示修复后重新运行 `ato init`", err=True)
+        raise typer.Exit(code=2)
+
+    typer.prompt(
+        "按 Enter 继续初始化，或 Ctrl-C 取消",
+        default="",
+        show_default=False,
+    )
+
+    typer.echo("✔ 系统已初始化")
+    typer.echo("运行 `ato start` 开始编排")
+    typer.echo("运行 `ato tui` 打开仪表盘")
 
 
 # ---------------------------------------------------------------------------

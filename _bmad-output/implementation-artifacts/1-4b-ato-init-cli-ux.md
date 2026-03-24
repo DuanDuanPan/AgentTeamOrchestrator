@@ -1,6 +1,6 @@
 # Story 1.4b: ato init CLI 命令与 UX 渲染
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -50,62 +50,62 @@ So that 获得清晰的就绪/缺失反馈，确认可以开始编排。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 `ato init` CLI 命令入口 (AC: #1, #3, #4)
-  - [ ] 1.1 在 `src/ato/cli.py` 中新增 `@app.command("init")` 命令，接受 `project_path: Path` 位置参数（默认 `.`）和 `--db-path` 可选参数（默认 `{project_path}/.ato/state.db`）
-  - [ ] 1.2 实现重新初始化检测：若 `db_path` 已存在，使用 `typer.confirm("已检测到现有数据库，是否重新初始化？", abort=True)` 提示确认
-  - [ ] 1.3 调用 `asyncio.run(_init_async(project_path, db_path))` 执行异步流程
-  - [ ] 1.4 在 `src/ato/cli.py` 模块级导入 `run_preflight` / `CheckResult`；`_init_async` 内部调用 `run_preflight(project_path, db_path, include_auth=True)` 获取完整 `list[CheckResult]`
-  - [ ] 1.5 调用渲染函数 `render_preflight_results(results)` 显示格式化输出
-  - [ ] 1.6 若结果含 HALT：渲染结果后 `raise typer.Exit(code=2)`
-  - [ ] 1.7 若无 HALT：显示摘要，等待 Enter 确认（`typer.prompt("按 Enter 继续初始化，或 Ctrl-C 取消", default="", show_default=False)`）
-  - [ ] 1.8 确认后显示完成信息："✔ 系统已初始化\n运行 `ato start` 开始编排\n运行 `ato tui` 打开仪表盘"（注意：`run_preflight()` 内部已调用 `init_db(db_path)` 创建 `.ato/` 目录和数据库，CLI 层无需重复调用）
-  - [ ] 1.9 若用户在重新初始化确认时拒绝，保留 `click.exceptions.Abort` 的默认行为（不要吞掉 `Aborted!` 提示，也不要包装成通用异常）
-  - [ ] 1.10 异常处理：`click.exceptions.Exit` 与 `click.exceptions.Abort` 直接 re-raise；其他异常 `typer.echo(str(exc), err=True)` + `raise typer.Exit(code=1)`
+- [x] Task 1: 实现 `ato init` CLI 命令入口 (AC: #1, #3, #4)
+  - [x] 1.1 在 `src/ato/cli.py` 中新增 `@app.command(“init”)` 命令，接受 `project_path: Path` 位置参数（默认 `.`）和 `--db-path` 可选参数（默认 `{project_path}/.ato/state.db`）
+  - [x] 1.2 实现重新初始化检测：若 `db_path` 已存在，使用 `typer.confirm(“已检测到现有数据库，是否重新初始化？”, abort=True)` 提示确认
+  - [x] 1.3 调用 `asyncio.run(_init_async(project_path, db_path))` 执行异步流程
+  - [x] 1.4 在 `src/ato/cli.py` 模块级导入 `run_preflight` / `CheckResult`；`_init_async` 内部调用 `run_preflight(project_path, db_path, include_auth=True)` 获取完整 `list[CheckResult]`
+  - [x] 1.5 调用渲染函数 `render_preflight_results(results)` 显示格式化输出
+  - [x] 1.6 若结果含 HALT：渲染结果后 `raise typer.Exit(code=2)`
+  - [x] 1.7 若无 HALT：显示摘要，等待 Enter 确认（`typer.prompt(“按 Enter 继续初始化，或 Ctrl-C 取消”, default=””, show_default=False)`）
+  - [x] 1.8 确认后显示完成信息：”✔ 系统已初始化\n运行 `ato start` 开始编排\n运行 `ato tui` 打开仪表盘”（注意：`run_preflight()` 内部已调用 `init_db(db_path)` 创建 `.ato/` 目录和数据库，CLI 层无需重复调用）
+  - [x] 1.9 若用户在重新初始化确认时拒绝，保留 `click.exceptions.Abort` 的默认行为（不要吞掉 `Aborted!` 提示，也不要包装成通用异常）
+  - [x] 1.10 异常处理：`click.exceptions.Exit` 与 `click.exceptions.Abort` 直接 re-raise；其他异常 `typer.echo(str(exc), err=True)` + `raise typer.Exit(code=1)`
 
-- [ ] Task 2: 实现 rich 渲染模块 (AC: #1, #2)
-  - [ ] 2.1 在 `src/ato/cli.py` 中（或若代码量过大则提取到 `src/ato/cli_render.py`）实现 `render_preflight_results(results: list[CheckResult], *, console: Console | None = None) -> None`
-  - [ ] 2.2 使用 `rich.console.Console` 创建模块级默认 console；测试时可注入 `Console(file=io.StringIO())`
-  - [ ] 2.3 实现四级状态图标与颜色映射：
+- [x] Task 2: 实现 rich 渲染模块 (AC: #1, #2)
+  - [x] 2.1 在 `src/ato/cli.py` 中（或若代码量过大则提取到 `src/ato/cli_render.py`）实现 `render_preflight_results(results: list[CheckResult], *, console: Console | None = None) -> None`
+  - [x] 2.2 使用 `rich.console.Console` 创建模块级默认 console；测试时可注入 `Console(file=io.StringIO())`
+  - [x] 2.3 实现四级状态图标与颜色映射：
     - `PASS` → `✔` + `green`
     - `HALT` → `✖` + `red bold`
     - `WARN` → `⚠` + `yellow`（rich 中琥珀色用 yellow 近似）
     - `INFO` → `ℹ` + `dim`（灰色用 dim 样式）
-  - [ ] 2.4 先打印标题 `AgentTeamOrchestrator — Preflight Check`，再按 `layer` 字段分组渲染：`system` → "第一层：系统环境"、`project` → "第二层：项目结构"、`artifact` → "第三层：编排前置 Artifact"
-  - [ ] 2.5 逐行渲染 `run_preflight()` 实际返回的检查项；**不要**为了贴近 UX 示例而合成额外行（如单独的“config.yaml 字段完整”或 “Sprint status”）
-  - [ ] 2.6 每层标题用 `console.print()` + 加粗，每个检查项缩进两格显示 `{icon} {message}`；使用 `highlight=False` 或 `rich.text.Text` 对象避免 message 中 `[`/`]` 被误解析为 rich markup
-  - [ ] 2.7 WARN/HALT 项的第二行修复指引必须基于 `check_item` → hint 映射生成，不要解析 `message` 文本拼建议；`INFO` / `PASS` 不显示建议行
-  - [ ] 2.8 渲染分隔线 `console.rule()`
-  - [ ] 2.9 实现底部摘要渲染 `_render_summary(results, console)`：
+  - [x] 2.4 先打印标题 `AgentTeamOrchestrator — Preflight Check`，再按 `layer` 字段分组渲染：`system` → “第一层：系统环境”、`project` → “第二层：项目结构”、`artifact` → “第三层：编排前置 Artifact”
+  - [x] 2.5 逐行渲染 `run_preflight()` 实际返回的检查项；**不要**为了贴近 UX 示例而合成额外行（如单独的”config.yaml 字段完整”或 “Sprint status”）
+  - [x] 2.6 每层标题用 `console.print()` + 加粗，每个检查项缩进两格显示 `{icon} {message}`；使用 `highlight=False` 或 `rich.text.Text` 对象避免 message 中 `[`/`]` 被误解析为 rich markup
+  - [x] 2.7 WARN/HALT 项的第二行修复指引必须基于 `check_item` → hint 映射生成，不要解析 `message` 文本拼建议；`INFO` / `PASS` 不显示建议行
+  - [x] 2.8 渲染分隔线 `console.rule()`
+  - [x] 2.9 实现底部摘要渲染 `_render_summary(results, console)`：
     - 统计 HALT/WARN/INFO 数量
     - 全部通过：`✔ 就绪` 绿色
     - 有 WARN 无 HALT：`就绪（N 警告, M 信息）` 黄色
     - 有 HALT：`✖ 未就绪（N 阻断）` 红色
 
-- [ ] Task 3: 编写 CLI 命令测试 (AC: #1, #2, #3, #4)
-  - [ ] 3.1 新建 `tests/unit/test_cli_init.py`，使用 `typer.testing.CliRunner`；若 `cli.py` 为模块级导入，则 patch `ato.cli.run_preflight`（不要额外 mock `init_db`，因为 `run_preflight` 已被替换）
-  - [ ] 3.2 测试正常流程：mock `run_preflight` 返回全 PASS，验证退出码 0
-  - [ ] 3.3 测试 HALT 流程：mock `run_preflight` 返回含 HALT 结果，验证退出码 2
-  - [ ] 3.4 测试 WARN 流程：mock `run_preflight` 返回 WARN + PASS，验证退出码 0 + 摘要包含"警告"
-  - [ ] 3.5 测试重新初始化检测：预先创建 db 文件，验证出现确认提示
-  - [ ] 3.6 测试重新初始化拒绝：模拟用户拒绝确认，验证 Click 默认 abort 行为仍保留（退出且不破坏现有数据库）
-  - [ ] 3.7 测试 `--db-path` 自定义路径参数
-  - [ ] 3.8 测试默认 project_path 为当前目录（`.`）
+- [x] Task 3: 编写 CLI 命令测试 (AC: #1, #2, #3, #4)
+  - [x] 3.1 新建 `tests/unit/test_cli_init.py`，使用 `typer.testing.CliRunner`；若 `cli.py` 为模块级导入，则 patch `ato.cli.run_preflight`（不要额外 mock `init_db`，因为 `run_preflight` 已被替换）
+  - [x] 3.2 测试正常流程：mock `run_preflight` 返回全 PASS，验证退出码 0
+  - [x] 3.3 测试 HALT 流程：mock `run_preflight` 返回含 HALT 结果，验证退出码 2
+  - [x] 3.4 测试 WARN 流程：mock `run_preflight` 返回 WARN + PASS，验证退出码 0 + 摘要包含”警告”
+  - [x] 3.5 测试重新初始化检测：预先创建 db 文件，验证出现确认提示
+  - [x] 3.6 测试重新初始化拒绝：模拟用户拒绝确认，验证 Click 默认 abort 行为仍保留（退出且不破坏现有数据库）
+  - [x] 3.7 测试 `--db-path` 自定义路径参数
+  - [x] 3.8 测试默认 project_path 为当前目录（`.`）
 
-- [ ] Task 4: 编写渲染输出测试 (AC: #1, #2)
-  - [ ] 4.1 在 `tests/unit/test_cli_init.py` 中测试 `render_preflight_results` 输出
-  - [ ] 4.2 使用 `rich.console.Console(file=io.StringIO(), force_terminal=True)` 捕获渲染输出
-  - [ ] 4.3 验证层标题正确显示（"第一层"、"第二层"、"第三层"）
-  - [ ] 4.4 验证标题 `AgentTeamOrchestrator — Preflight Check` 显示
-  - [ ] 4.5 验证只渲染输入 `results` 中实际存在的检查项，不合成额外行
-  - [ ] 4.6 验证 WARN/HALT 的建议行来自 `check_item` 映射，`INFO` / `PASS` 不显示建议行
-  - [ ] 4.7 验证四种状态图标（✔/✖/⚠/ℹ）正确渲染
-  - [ ] 4.8 验证摘要文本：全通过 → "就绪"、有 WARN → "警告"、有 HALT → "未就绪"
+- [x] Task 4: 编写渲染输出测试 (AC: #1, #2)
+  - [x] 4.1 在 `tests/unit/test_cli_init.py` 中测试 `render_preflight_results` 输出
+  - [x] 4.2 使用 `rich.console.Console(file=io.StringIO(), force_terminal=True)` 捕获渲染输出
+  - [x] 4.3 验证层标题正确显示（”第一层”、”第二层”、”第三层”）
+  - [x] 4.4 验证标题 `AgentTeamOrchestrator — Preflight Check` 显示
+  - [x] 4.5 验证只渲染输入 `results` 中实际存在的检查项，不合成额外行
+  - [x] 4.6 验证 WARN/HALT 的建议行来自 `check_item` 映射，`INFO` / `PASS` 不显示建议行
+  - [x] 4.7 验证四种状态图标（✔/✖/⚠/ℹ）正确渲染
+  - [x] 4.8 验证摘要文本：全通过 → “就绪”、有 WARN → “警告”、有 HALT → “未就绪”
 
-- [ ] Task 5: 代码质量验证
-  - [ ] 5.1 `uv run ruff check src/ato/cli.py` — 通过
-  - [ ] 5.2 `uv run mypy src/ato/cli.py` — 通过
-  - [ ] 5.3 `uv run pytest tests/unit/test_cli_init.py -v` — 全部通过
-  - [ ] 5.4 `uv run pytest` — 全部通过, 0 regressions
+- [x] Task 5: 代码质量验证
+  - [x] 5.1 `uv run ruff check src/ato/cli.py` — 通过
+  - [x] 5.2 `uv run mypy src/ato/cli.py` — 通过
+  - [x] 5.3 `uv run pytest tests/unit/test_cli_init.py -v` — 全部通过
+  - [x] 5.4 `uv run pytest` — 全部通过, 0 regressions
 
 ## Dev Notes
 
@@ -422,14 +422,28 @@ CLI 实际流程：
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- ✅ Task 1: 在 `cli.py` 中实现 `init_command` + `_init_async`，包含重新初始化检测（`typer.confirm`）、`asyncio.run` 异步调用、Exit/Abort 透传、退出码规范（0/1/2）
+- ✅ Task 2: 实现 `render_preflight_results` + `_render_summary`，使用 `rich.text.Text` 安全渲染（避免 markup 误解析），四级状态图标/颜色映射，`_HINTS` check_item → hint 字典，按层分组标题
+- ✅ Task 3: 11 个 CLI 命令测试覆盖：正常流程、HALT(exit 2)、WARN(exit 0+摘要)、重新初始化检测、拒绝abort、自定义db-path、默认project_path
+- ✅ Task 4: 15 个渲染输出测试覆盖：标题、层标题、部分层、无合成行、HALT/WARN hint、PASS/INFO 无hint、四种图标、三种摘要状态
+- ✅ Task 5: ruff check 通过、mypy strict 通过、29 测试全部通过、483 全量测试 0 regressions
+- ✅ Code Review 修复（3 patch）：HALT 错误信息输出到 stderr、python_version HALT hint 补全、WARN 摘要始终包含"N 警告, M 信息"
+
 ### File List
+
+- `src/ato/cli.py` — 修改：新增 `init_command`、`_init_async`、`render_preflight_results`、`_render_summary` + 常量映射（_STATUS_MAP、_LAYER_TITLES、_HINTS）
+- `tests/unit/test_cli_init.py` — 新建：29 个测试（11 CLI + 15 渲染 + 3 review fix）
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — 修改：1-4b 状态 → review
+- `_bmad-output/implementation-artifacts/1-4b-ato-init-cli-ux.md` — 修改：tasks 标记完成、Dev Agent Record
 
 ### Change Log
 
 - 2026-03-24: validate-create-story 修订 —— 明确 1.4b 只消费批量 `run_preflight()` 结果而不修改引擎做 streaming；补充 `check_item` → hint 渲染契约；修正 `Abort` 透传规则；统一 `run_preflight` mock/console 注入测试策略；禁止根据 UX 示例合成不存在的检查行
+- 2026-03-24: 实现 Story 1.4b — ato init CLI 命令 + rich Preflight 渲染 + 26 个单元测试
+- 2026-03-24: Code review 修复 — HALT stderr 输出、python_version hint、WARN 摘要格式 + 3 个新测试
