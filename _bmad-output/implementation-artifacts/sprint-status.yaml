@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-24
-last_updated: 2026-03-24
+last_updated: 2026-03-24T21:00:00
 project: AgentTeamOrchestrator
 project_key: NOKEY
 tracking_system: file-system
@@ -55,7 +55,7 @@ development_status:
   # ===== Epic 2A: 编排引擎核心 =====
   epic-2a: in-progress
   2a-1-story-state-machine-progression: done
-  2a-2-serial-transition-queue: backlog
+  2a-2-serial-transition-queue: ready-for-dev
   2a-3-orchestrator-start-stop: backlog
   epic-2a-retrospective: optional
 
