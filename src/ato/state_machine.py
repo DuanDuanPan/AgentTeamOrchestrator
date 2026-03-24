@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import aiosqlite
 import structlog
@@ -96,7 +96,7 @@ CANONICAL_TRANSITIONS: dict[str, tuple[str, str | None]] = {
 # ---------------------------------------------------------------------------
 
 
-class StoryLifecycle(StateMachine):  # type: ignore[misc]
+class StoryLifecycle(StateMachine):
     """Story 生命周期状态机。
 
     13 个规范状态，覆盖从 queued（等待启动）到 done（完成）的完整流程，
@@ -188,12 +188,27 @@ class StoryLifecycle(StateMachine):  # type: ignore[misc]
             target=target.id,
         )
 
-    async def send(self, event: str, *args: object, **kwargs: object) -> object:
+    async def send(
+        self,
+        event: str,
+        *args: object,
+        delay: float = 0,
+        send_id: str | None = None,
+        internal: bool = False,
+        **kwargs: object,
+    ) -> Any:
         """发送事件，非法 transition 时记录拒绝日志后重新抛出（AC #3）。"""
         from statemachine.exceptions import TransitionNotAllowed
 
         try:
-            result: object = await super().send(event, *args, **kwargs)
+            result: Any = await super().send(
+                event,
+                *args,
+                delay=delay,
+                send_id=send_id,
+                internal=internal,
+                **kwargs,
+            )
             return result
         except TransitionNotAllowed:
             logger.warning(

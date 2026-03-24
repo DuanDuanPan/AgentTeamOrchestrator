@@ -232,7 +232,7 @@ class TestEscalateTransitions:
         "regression",
     ]
 
-    @pytest.mark.parametrize("state", _ESCALATABLE_STATES)  # type: ignore[untyped-decorator]
+    @pytest.mark.parametrize("state", _ESCALATABLE_STATES)
     async def test_escalate_from_state(self, state: str) -> None:
         sm = await _make_sm()
         if state == "fixing":
