@@ -19,6 +19,7 @@ from ato.models.schemas import (
     BatchRecord,
     BatchStatus,
     BatchStoryLink,
+    CheckResult,
     CostLogRecord,
     StoryRecord,
     StoryStatus,
@@ -644,3 +645,27 @@ async def get_cost_summary(
         "total_output_tokens": int(row[2]),
         "call_count": int(row[3]),
     }
+
+
+# ---------------------------------------------------------------------------
+# CRUD — Preflight Results (Story 1.4a)
+# ---------------------------------------------------------------------------
+
+
+async def insert_preflight_results(
+    db: aiosqlite.Connection,
+    run_id: str,
+    results: list[CheckResult],
+) -> None:
+    """批量插入 preflight 检查结果。"""
+    if not results:
+        return
+    await db.executemany(
+        "INSERT INTO preflight_results (run_id, layer, check_item, status, message) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (run_id, r.layer, r.check_item, r.status, r.message)
+            for r in results
+        ],
+    )
+    await db.commit()

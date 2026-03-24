@@ -9,6 +9,7 @@ from ato.models.db import (
     init_db,
     insert_batch,
     insert_batch_story_links,
+    insert_preflight_results,
 )
 from ato.models.schemas import (
     SCHEMA_VERSION,
@@ -16,6 +17,7 @@ from ato.models.schemas import (
     ATOError,
     BatchRecord,
     BatchStoryLink,
+    CheckResult,
     CLIAdapterError,
     ConfigError,
     RecoveryError,
@@ -32,6 +34,7 @@ __all__ = [
     "BatchProgress",
     "BatchRecord",
     "BatchStoryLink",
+    "CheckResult",
     "CLIAdapterError",
     "ConfigError",
     "RecoveryError",
@@ -46,4 +49,5 @@ __all__ = [
     "init_db",
     "insert_batch",
     "insert_batch_story_links",
+    "insert_preflight_results",
 ]

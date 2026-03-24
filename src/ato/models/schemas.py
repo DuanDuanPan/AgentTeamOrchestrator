@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,26 @@ class _StrictBase(BaseModel):
     """
 
     model_config = ConfigDict(strict=True, extra="forbid")
+
+
+# ---------------------------------------------------------------------------
+# Preflight 检查类型
+# ---------------------------------------------------------------------------
+
+CheckStatus = Literal["PASS", "HALT", "WARN", "INFO"]
+"""Preflight 检查结果状态：PASS 通过 / HALT 阻塞 / WARN 警告 / INFO 信息。"""
+
+CheckLayer = Literal["system", "project", "artifact"]
+"""Preflight 检查层级：system 系统环境 / project 项目结构 / artifact 编排前置。"""
+
+
+class CheckResult(_StrictBase):
+    """单项 preflight 检查结果。"""
+
+    layer: CheckLayer
+    check_item: str
+    status: CheckStatus
+    message: str
 
 
 # ---------------------------------------------------------------------------

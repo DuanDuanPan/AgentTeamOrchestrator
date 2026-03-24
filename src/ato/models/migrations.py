@@ -157,6 +157,26 @@ async def _migrate_v2_to_v3(db: aiosqlite.Connection) -> None:
     )
 
 
+@_register(4)
+async def _migrate_v3_to_v4(db: aiosqlite.Connection) -> None:
+    """v3 → v4: 新增 preflight_results 表（Story 1.4a）。"""
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS preflight_results (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id      TEXT    NOT NULL,
+            layer       TEXT    NOT NULL,
+            check_item  TEXT    NOT NULL,
+            status      TEXT    NOT NULL,
+            message     TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+        )"""
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_preflight_run_id ON preflight_results(run_id)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

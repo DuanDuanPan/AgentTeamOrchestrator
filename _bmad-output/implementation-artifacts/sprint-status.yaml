@@ -47,7 +47,7 @@ development_status:
   1-1-project-scaffolding-dev-toolchain: done
   1-2-sqlite-state-persistence: done
   1-3-declarative-config-engine: done
-  1-4a-preflight-check-engine: ready-for-dev
+  1-4a-preflight-check-engine: done
   1-4b-ato-init-cli-ux: backlog
   1-5-ato-plan-phase-preview: backlog
   epic-1-retrospective: optional
