@@ -19,6 +19,7 @@ from ato.models.schemas import (
     BatchRecord,
     BatchStatus,
     BatchStoryLink,
+    CheckResult,
     StoryRecord,
     StoryStatus,
     TaskRecord,
@@ -552,3 +553,27 @@ def _row_to_batch(row: aiosqlite.Row) -> BatchRecord:
     data["created_at"] = _iso_to_dt(data["created_at"])
     data["completed_at"] = _iso_to_dt(data["completed_at"])
     return BatchRecord.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# CRUD — Preflight Results (Story 1.4a)
+# ---------------------------------------------------------------------------
+
+
+async def insert_preflight_results(
+    db: aiosqlite.Connection,
+    run_id: str,
+    results: list[CheckResult],
+) -> None:
+    """批量插入 preflight 检查结果。"""
+    if not results:
+        return
+    await db.executemany(
+        "INSERT INTO preflight_results (run_id, layer, check_item, status, message) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (run_id, r.layer, r.check_item, r.status, r.message)
+            for r in results
+        ],
+    )
+    await db.commit()
