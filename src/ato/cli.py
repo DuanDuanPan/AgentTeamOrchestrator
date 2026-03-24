@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
+import time
 from pathlib import Path
 
 import click.exceptions
@@ -474,3 +477,145 @@ async def _batch_status_async(db_path: Path, output_json: bool) -> None:
 
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# ato start
+# ---------------------------------------------------------------------------
+
+_STOP_POLL_INTERVAL = 0.3
+_STOP_TIMEOUT = 15.0
+
+
+@app.command("start")
+def start_cmd(
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    config_path: Path | None = typer.Option(None, "--config", help="ato.yaml 配置文件路径"),
+) -> None:
+    """启动 Orchestrator 事件循环。"""
+    from ato.core import is_orchestrator_running
+
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    pid_path = resolved_db.parent / "orchestrator.pid"
+
+    # 重复启动防护
+    if is_orchestrator_running(pid_path):
+        typer.echo("错误：Orchestrator 已在运行中。", err=True)
+        raise typer.Exit(code=1)
+
+    # 初始化日志
+    from ato.logging import configure_logging
+
+    configure_logging(log_dir=str(resolved_db.parent / "logs"))
+
+    # Preflight 快速检查
+    from ato.preflight import run_preflight
+
+    try:
+        preflight_results = asyncio.run(
+            run_preflight(Path.cwd(), resolved_db, include_auth=False)
+        )
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(f"错误：Preflight 检查失败: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    if any(r.status == "HALT" for r in preflight_results):
+        typer.echo("错误：Preflight 检查存在 HALT 项，无法启动。", err=True)
+        raise typer.Exit(code=2)
+
+    # 加载配置
+    from ato.config import load_config
+
+    resolved_config = config_path or Path("ato.yaml")
+    try:
+        settings = load_config(resolved_config)
+    except Exception as exc:
+        typer.echo(f"错误：配置加载失败: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    # 启动 Orchestrator
+    from ato.core import Orchestrator
+
+    orchestrator = Orchestrator(settings=settings, db_path=resolved_db)
+    asyncio.run(orchestrator.run())
+
+
+# ---------------------------------------------------------------------------
+# ato stop
+# ---------------------------------------------------------------------------
+
+
+@app.command("stop")
+def stop_cmd(
+    pid_file: Path | None = typer.Option(None, "--pid-file", help="PID 文件路径"),
+) -> None:
+    """优雅停止 Orchestrator。"""
+    from ato.core import read_pid_file, remove_pid_file
+
+    pid_path = pid_file or Path(".ato/orchestrator.pid")
+    pid = read_pid_file(pid_path)
+
+    if pid is None:
+        typer.echo("Orchestrator 未在运行（无 PID 文件）。")
+        return
+
+    # 检查进程是否存活
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        typer.echo("Orchestrator 进程已不存在，清理 PID 文件。")
+        remove_pid_file(pid_path)
+        return
+    except PermissionError:
+        pass  # 进程存在但无权检查——继续尝试发 SIGTERM
+
+    # 发送 SIGTERM
+    try:
+        os.kill(pid, signal.SIGTERM)
+        typer.echo(f"已向 Orchestrator (PID {pid}) 发送停止信号。")
+    except ProcessLookupError:
+        typer.echo("Orchestrator 进程已不存在，清理 PID 文件。")
+        remove_pid_file(pid_path)
+        return
+    except PermissionError as exc:
+        typer.echo("错误：无权向 Orchestrator 进程发送信号。", err=True)
+        raise typer.Exit(code=1) from exc
+
+    # 轮询等待进程退出
+    deadline = time.monotonic() + _STOP_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            # 进程已退出——可能是默认 SIGTERM 行为（handler 尚未注册），
+            # 此时 Orchestrator 不会自行清理 PID 文件，由 stop 负责。
+            remove_pid_file(pid_path)
+            typer.echo("Orchestrator 已停止。")
+            return
+        except PermissionError:
+            pass
+        time.sleep(_STOP_POLL_INTERVAL)
+
+    # 超时——升级为 SIGKILL
+    typer.echo("等待超时，尝试强制终止 (SIGKILL)...", err=True)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        remove_pid_file(pid_path)
+        typer.echo("Orchestrator 已停止。")
+        return
+    except PermissionError as exc:
+        typer.echo("错误：无权强制终止 Orchestrator 进程。", err=True)
+        raise typer.Exit(code=1) from exc
+
+    # 等待 SIGKILL 生效
+    time.sleep(1.0)
+    try:
+        os.kill(pid, 0)
+        typer.echo("错误：Orchestrator 进程仍未退出。", err=True)
+        raise typer.Exit(code=1)
+    except ProcessLookupError:
+        typer.echo("Orchestrator 已强制停止。")
+        remove_pid_file(pid_path)
