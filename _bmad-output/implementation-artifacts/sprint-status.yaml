@@ -1,0 +1,117 @@
+# generated: 2026-03-24
+# last_updated: 2026-03-24
+# project: AgentTeamOrchestrator
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-03-24
+last_updated: 2026-03-24
+project: AgentTeamOrchestrator
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  # ===== Epic 1: 项目初始化与配置引擎 =====
+  epic-1: backlog
+  1-1-project-scaffolding-dev-toolchain: backlog
+  1-2-sqlite-state-persistence: backlog
+  1-3-declarative-config-engine: backlog
+  1-4a-preflight-check-engine: backlog
+  1-4b-ato-init-cli-ux: backlog
+  1-5-ato-plan-phase-preview: backlog
+  epic-1-retrospective: optional
+
+  # ===== Epic 2A: 编排引擎核心 =====
+  epic-2a: backlog
+  2a-1-story-state-machine-progression: backlog
+  2a-2-serial-transition-queue: backlog
+  2a-3-orchestrator-start-stop: backlog
+  epic-2a-retrospective: optional
+
+  # ===== Epic 2B: Agent 集成与工作空间 =====
+  epic-2b: backlog
+  2b-1-claude-agent-dispatch: backlog
+  2b-2-codex-agent-review: backlog
+  2b-3-bmad-skill-parsing: backlog
+  2b-4-worktree-isolation: backlog
+  2b-5-batch-select-status: backlog
+  2b-6-interactive-session: backlog
+  epic-2b-retrospective: optional
+
+  # ===== Epic 3: Convergent Loop 质量门控 =====
+  epic-3: backlog
+  3-1-deterministic-validation-finding-tracking: backlog
+  3-2a-convergent-loop-full-review: backlog
+  3-2b-fix-dispatch-artifact-verification: backlog
+  3-2c-re-review-scope-narrowing: backlog
+  3-2d-convergence-termination: backlog
+  3-3-convergence-trust-escalation: backlog
+  epic-3-retrospective: optional
+
+  # ===== Epic 4: 人机协作与审批队列 =====
+  epic-4: backlog
+  4-1-approval-queue-nudge: backlog
+  4-2-merge-queue-regression-safety: backlog
+  4-3-uat-interactive-session-completion: backlog
+  4-4-notification-cli-quality: backlog
+  4-5-regression-test-merge-integration: backlog
+  epic-4-retrospective: optional
+
+  # ===== Epic 5: 崩溃恢复与可观测性 =====
+  epic-5: backlog
+  5-1a-crash-recovery-auto-resume: backlog
+  5-1b-crash-recovery-performance-testing: backlog
+  5-2-recovery-summary-execution-history: backlog
+  epic-5-retrospective: optional
+
+  # ===== Epic 6: TUI 指挥台 =====
+  epic-6: backlog
+  6-1a-tui-launch-sqlite-connection: backlog
+  6-1b-dark-theme-responsive-layout: backlog
+  6-2a-three-question-header: backlog
+  6-2b-dashboard-story-list: backlog
+  6-3a-standard-approval-interaction: backlog
+  6-3b-exception-approval-multi-select: backlog
+  6-4-story-detail-drill-navigation: backlog
+  6-5-search-panel-responsive: backlog
+  epic-6-retrospective: optional
+
+  # ===== Epic 7: Growth — 多项目并行与系统智能 (Phase 2) =====
+  epic-7: backlog
+  7-1-gradient-degradation: backlog
+  7-2-multi-project-parallel: backlog
+  7-3a-memory-layer-parameter-recommendation: backlog
+  7-3b-manual-finding-severity-override: backlog
+  7-3c-tui-cost-panel-uat-trend: backlog
+  epic-7-retrospective: optional
