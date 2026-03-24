@@ -19,6 +19,7 @@ from ato.models.schemas import (
     BatchRecord,
     BatchStatus,
     BatchStoryLink,
+    CostLogRecord,
     StoryRecord,
     StoryStatus,
     TaskRecord,
@@ -552,3 +553,94 @@ def _row_to_batch(row: aiosqlite.Row) -> BatchRecord:
     data["created_at"] = _iso_to_dt(data["created_at"])
     data["completed_at"] = _iso_to_dt(data["completed_at"])
     return BatchRecord.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# CRUD — Cost Log (Story 2B.1)
+# ---------------------------------------------------------------------------
+
+_COST_LOG_DDL = """\
+CREATE TABLE IF NOT EXISTS cost_log (
+    cost_log_id TEXT PRIMARY KEY,
+    story_id    TEXT NOT NULL,
+    task_id     TEXT,
+    cli_tool    TEXT NOT NULL,
+    model       TEXT,
+    phase       TEXT NOT NULL,
+    role        TEXT,
+    input_tokens   INTEGER NOT NULL,
+    output_tokens  INTEGER NOT NULL,
+    cache_read_input_tokens INTEGER DEFAULT 0,
+    cost_usd    REAL NOT NULL,
+    duration_ms INTEGER,
+    session_id  TEXT,
+    exit_code   INTEGER,
+    error_category TEXT,
+    created_at  TEXT NOT NULL
+)"""
+
+
+async def insert_cost_log(db: aiosqlite.Connection, record: CostLogRecord) -> None:
+    """插入一条 cost_log 记录。"""
+    await db.execute(
+        "INSERT INTO cost_log (cost_log_id, story_id, task_id, cli_tool, model, "
+        "phase, role, input_tokens, output_tokens, cache_read_input_tokens, "
+        "cost_usd, duration_ms, session_id, exit_code, error_category, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            record.cost_log_id,
+            record.story_id,
+            record.task_id,
+            record.cli_tool,
+            record.model,
+            record.phase,
+            record.role,
+            record.input_tokens,
+            record.output_tokens,
+            record.cache_read_input_tokens,
+            record.cost_usd,
+            record.duration_ms,
+            record.session_id,
+            record.exit_code,
+            record.error_category,
+            _dt_to_iso(record.created_at),
+        ),
+    )
+    await db.commit()
+
+
+async def get_cost_summary(
+    db: aiosqlite.Connection,
+    *,
+    story_id: str | None = None,
+) -> dict[str, float | int]:
+    """聚合成本摘要。
+
+    Returns:
+        包含 total_cost_usd, total_input_tokens, total_output_tokens, call_count 的字典。
+    """
+    if story_id:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0), "
+            "COALESCE(SUM(input_tokens), 0), "
+            "COALESCE(SUM(output_tokens), 0), "
+            "COUNT(*) "
+            "FROM cost_log WHERE story_id = ?",
+            (story_id,),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0), "
+            "COALESCE(SUM(input_tokens), 0), "
+            "COALESCE(SUM(output_tokens), 0), "
+            "COUNT(*) "
+            "FROM cost_log",
+        )
+    row = await cursor.fetchone()
+    assert row is not None
+    return {
+        "total_cost_usd": float(row[0]),
+        "total_input_tokens": int(row[1]),
+        "total_output_tokens": int(row[2]),
+        "call_count": int(row[3]),
+    }

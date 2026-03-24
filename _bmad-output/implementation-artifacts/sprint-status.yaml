@@ -61,7 +61,7 @@ development_status:
 
   # ===== Epic 2B: Agent 集成与工作空间 =====
   epic-2b: in-progress
-  2b-1-claude-agent-dispatch: ready-for-dev
+  2b-1-claude-agent-dispatch: done
   2b-2-codex-agent-review: backlog
   2b-3-bmad-skill-parsing: backlog
   2b-4-worktree-isolation: backlog

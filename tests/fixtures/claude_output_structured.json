@@ -1,0 +1,25 @@
+{
+  "type": "text",
+  "subtype": "text_response",
+  "result": "Analysis complete.",
+  "structured_output": {
+    "findings": [
+      {"severity": "high", "description": "Missing null check", "file": "src/main.py", "line": 42},
+      {"severity": "suggestion", "description": "Consider renaming variable", "file": "src/utils.py", "line": 10}
+    ],
+    "summary": "Found 2 issues"
+  },
+  "session_id": "sess-struct-789",
+  "total_cost_usd": 0.035,
+  "usage": {
+    "input_tokens": 2048,
+    "output_tokens": 512,
+    "cache_read_input_tokens": 1024
+  },
+  "modelUsage": {
+    "model": "claude-sonnet-4-6",
+    "inputTokens": 2048,
+    "outputTokens": 512
+  },
+  "duration_ms": 5200
+}
