@@ -1,6 +1,6 @@
 # Story 2A.2: 串行状态转换队列 (Serial Transition Queue)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
