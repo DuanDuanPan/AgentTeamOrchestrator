@@ -112,37 +112,37 @@ class TestCheckStatusAndLayerTypes:
         assert result.layer == "artifact"
 
 
-class TestMigrationV3:
-    """MIGRATIONS[3] — preflight_results 表迁移测试。"""
+class TestMigrationV4:
+    """MIGRATIONS[4] — preflight_results 表迁移测试。"""
 
-    async def test_v3_migration_registered(self) -> None:
-        """v3 迁移函数已注册。"""
-        assert 3 in MIGRATIONS
+    async def test_v4_migration_registered(self) -> None:
+        """v4 迁移函数已注册。"""
+        assert 4 in MIGRATIONS
 
-    async def test_schema_version_is_3(self) -> None:
-        """SCHEMA_VERSION 已更新为 3。"""
-        assert SCHEMA_VERSION == 3
+    async def test_schema_version_is_4(self) -> None:
+        """SCHEMA_VERSION 已更新为 4。"""
+        assert SCHEMA_VERSION == 4
 
-    async def test_v2_to_v3_creates_preflight_results_table(self, db_path: Path) -> None:
-        """v2→v3 迁移成功创建 preflight_results 表。"""
+    async def test_v3_to_v4_creates_preflight_results_table(self, db_path: Path) -> None:
+        """v3→v4 迁移成功创建 preflight_results 表。"""
         db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(db_path) as db:
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA foreign_keys = ON")
-            await run_migrations(db, 0, 3)
+            await run_migrations(db, 0, 4)
 
             cursor = await db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='preflight_results'"
             )
             assert await cursor.fetchone() is not None
 
-    async def test_v2_to_v3_creates_run_id_index(self, db_path: Path) -> None:
-        """v2→v3 迁移创建 idx_preflight_run_id 索引。"""
+    async def test_v3_to_v4_creates_run_id_index(self, db_path: Path) -> None:
+        """v3→v4 迁移创建 idx_preflight_run_id 索引。"""
         db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(db_path) as db:
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA foreign_keys = ON")
-            await run_migrations(db, 0, 3)
+            await run_migrations(db, 0, 4)
 
             cursor = await db.execute(
                 "SELECT name FROM sqlite_master "
@@ -150,25 +150,25 @@ class TestMigrationV3:
             )
             assert await cursor.fetchone() is not None
 
-    async def test_v2_to_v3_incremental(self, db_path: Path) -> None:
-        """从 v2 增量迁移到 v3 成功。"""
+    async def test_v3_to_v4_incremental(self, db_path: Path) -> None:
+        """从 v3 增量迁移到 v4 成功。"""
         db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(db_path) as db:
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA foreign_keys = ON")
-            # 先迁移到 v2
-            await run_migrations(db, 0, 2)
-            cursor = await db.execute("PRAGMA user_version")
-            row = await cursor.fetchone()
-            assert row is not None
-            assert row[0] == 2
-
-            # 再迁移到 v3
-            await run_migrations(db, 2, 3)
+            # 先迁移到 v3
+            await run_migrations(db, 0, 3)
             cursor = await db.execute("PRAGMA user_version")
             row = await cursor.fetchone()
             assert row is not None
             assert row[0] == 3
+
+            # 再迁移到 v4
+            await run_migrations(db, 3, 4)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 4
 
     async def test_preflight_results_table_schema(self, db_path: Path) -> None:
         """preflight_results 表有正确的列。"""
@@ -176,7 +176,7 @@ class TestMigrationV3:
         async with aiosqlite.connect(db_path) as db:
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA foreign_keys = ON")
-            await run_migrations(db, 0, 3)
+            await run_migrations(db, 0, 4)
 
             cursor = await db.execute("PRAGMA table_info(preflight_results)")
             columns = {row[1] for row in await cursor.fetchall()}
