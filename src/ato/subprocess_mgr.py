@@ -20,6 +20,7 @@ from ato.models.schemas import (
     AdapterResult,
     ClaudeOutput,
     CLIAdapterError,
+    CodexOutput,
     CostLogRecord,
     TaskRecord,
 )
@@ -196,13 +197,16 @@ class SubprocessManager:
                 raise
             else:
                 completed_at = datetime.now(tz=UTC)
-                # Fix #4: 从 ClaudeOutput 提取 cache_read_input_tokens 和 model
+                # Fix #4: 从 ClaudeOutput/CodexOutput 提取 cache_read_input_tokens 和 model
                 cache_tokens = 0
                 model_name: str | None = None
                 if isinstance(result, ClaudeOutput):
                     cache_tokens = result.cache_read_input_tokens
                     if result.model_usage and isinstance(result.model_usage, dict):
                         model_name = result.model_usage.get("model")
+                elif isinstance(result, CodexOutput):
+                    cache_tokens = result.cache_read_input_tokens
+                    model_name = result.model_name
 
                 db = await get_connection(self._db_path)
                 try:

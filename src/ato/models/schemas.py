@@ -279,6 +279,67 @@ class ClaudeOutput(AdapterResult):
         )
 
 
+class CodexOutput(AdapterResult):
+    """Codex CLI 专用输出模型。"""
+
+    cache_read_input_tokens: int = 0
+    model_name: str | None = None
+
+    @classmethod
+    def from_events(
+        cls,
+        events: list[dict[str, Any]],
+        *,
+        exit_code: int = 0,
+        output_file_content: str | None = None,
+        model_name: str | None = None,
+        cost_usd: float = 0.0,
+    ) -> CodexOutput:
+        """从解析后的 JSONL 事件列表构建验证后的模型。
+
+        字段映射：
+        - ``item.completed`` → ``text_result``（兼容 item.text 与 item.content[].text）
+        - ``turn.completed.usage`` → token 聚合
+        - ``output_file_content`` → ``structured_output``（JSON 解析成功时）
+        - ``thread.started.thread_id`` → ``session_id``
+        """
+        from ato.adapters.codex_cli import _aggregate_usage, _extract_text_result
+
+        input_tokens, cached_input_tokens, output_tokens = _aggregate_usage(events)
+        text_result = _extract_text_result(events)
+
+        # session_id from thread.started
+        session_id: str | None = None
+        for ev in events:
+            if ev.get("type") == "thread.started":
+                session_id = ev.get("thread_id")
+                break
+
+        # Parse output file content
+        structured_output: dict[str, Any] | None = None
+        if output_file_content is not None:
+            from ato.adapters.codex_cli import _parse_output_file
+
+            structured_output, parsed_text = _parse_output_file(output_file_content)
+            if not text_result:
+                text_result = parsed_text
+
+        return cls.model_validate(
+            {
+                "status": "success" if exit_code == 0 else "failure",
+                "exit_code": exit_code,
+                "text_result": text_result,
+                "structured_output": structured_output,
+                "cost_usd": cost_usd,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cached_input_tokens,
+                "session_id": session_id,
+                "model_name": model_name,
+            }
+        )
+
+
 class CostLogRecord(_StrictBase):
     """cost_log 表对应的 Pydantic 模型。"""
 

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread-codex-abc-123"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"findings\":[{\"file\":\"src/main.py\",\"line\":42,\"severity\":\"suggestion\",\"message\":\"Consider using a context manager here.\"}]}"}}
+{"type":"turn.completed","usage":{"input_tokens":26024,"cached_input_tokens":10624,"output_tokens":29}}
