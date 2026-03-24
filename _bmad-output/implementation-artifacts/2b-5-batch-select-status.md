@@ -1,6 +1,6 @@
 # Story 2B.5: 操作者可选择 story batch 并查看状态
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -45,37 +45,37 @@ So that 可以按自己的节奏推进工作。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Schema 扩展 — 新增 `batches` 表和相关模型 (AC: #1, #2)
-  - [ ] 1.1 在 `src/ato/models/schemas.py` 中新增 `BatchStatus` Literal 类型和 `BatchRecord` Pydantic 模型
-  - [ ] 1.2 在 `src/ato/models/db.py` 中新增 `batches` 表 DDL、`batch_stories` 关联表 DDL、`sequence_no` 顺序列，以及“同一时间仅允许 1 个 active batch”的约束（partial unique index 或等价校验）
-  - [ ] 1.3 在 `src/ato/models/migrations.py` 中注册 `MIGRATIONS[2]` — 创建 `batches` 和 `batch_stories` 两张表
-  - [ ] 1.4 更新 `SCHEMA_VERSION = 2`
-  - [ ] 1.5 在 `db.py` 中新增 Batch 相关 DB 辅助函数：`insert_batch`、`insert_batch_story_links`、`get_active_batch`、`get_batch_stories`、`get_batch_progress`
-  - [ ] 1.6 更新 `src/ato/models/__init__.py` 导出新增公共接口
+- [x] Task 1: Schema 扩展 — 新增 `batches` 表和相关模型 (AC: #1, #2)
+  - [x] 1.1 在 `src/ato/models/schemas.py` 中新增 `BatchStatus` Literal 类型和 `BatchRecord` Pydantic 模型
+  - [x] 1.2 在 `src/ato/models/db.py` 中新增 `batches` 表 DDL、`batch_stories` 关联表 DDL、`sequence_no` 顺序列，以及”同一时间仅允许 1 个 active batch”的约束（partial unique index 或等价校验）
+  - [x] 1.3 在 `src/ato/models/migrations.py` 中注册 `MIGRATIONS[2]` — 创建 `batches` 和 `batch_stories` 两张表
+  - [x] 1.4 更新 `SCHEMA_VERSION = 2`
+  - [x] 1.5 在 `db.py` 中新增 Batch 相关 DB 辅助函数：`insert_batch`、`insert_batch_story_links`、`get_active_batch`、`get_batch_stories`、`get_batch_progress`
+  - [x] 1.6 更新 `src/ato/models/__init__.py` 导出新增公共接口
 
-- [ ] Task 2: Batch 推荐引擎 — 纯逻辑的 story 分析与 batch 构建 (AC: #1)
-  - [ ] 2.1 创建 `src/ato/batch.py` — batch 选择核心逻辑模块
-  - [ ] 2.2 实现 `load_epics(epics_path) -> list[EpicInfo]` — 从 epics.md 解析 canonical story key（如 `2b-5-batch-select-status`）、标题、依赖关系、推荐顺序元数据
-  - [ ] 2.3 实现 `recommend_batch(stories_state, epics_info, max_stories) -> BatchProposal` — 基于依赖图和当前状态生成推荐 batch 方案；`max_stories` 来自 CLI 显式参数或模块默认值 5，不依赖 Story 1.3 配置引擎
-  - [ ] 2.4 实现 `confirm_batch(db, proposal, selected_ids) -> BatchRecord` — 用单个 SQLite 事务完成 batch 创建、缺失 `StoryRecord` 补齐、顺序化 `batch_stories` 写入，以及 story 状态/`current_phase` 更新
-  - [ ] 2.5 明确定义批次状态聚合规则：头部 story 写入 `status="planning", current_phase="creating"`；后续 story 写入 `status="backlog", current_phase="queued"`；`ato batch status` 按 AC2 规则聚合 4 个进度桶
-  - [ ] 2.6 在 `batch.py` 中定义 `BatchRecommender` 协议（Protocol），本地推荐为默认实现，后续 AI 推荐可插拔替换
+- [x] Task 2: Batch 推荐引擎 — 纯逻辑的 story 分析与 batch 构建 (AC: #1)
+  - [x] 2.1 创建 `src/ato/batch.py` — batch 选择核心逻辑模块
+  - [x] 2.2 实现 `load_epics(epics_path) -> list[EpicInfo]` — 从 epics.md 解析 canonical story key（如 `2b-5-batch-select-status`）、标题、依赖关系、推荐顺序元数据
+  - [x] 2.3 实现 `recommend_batch(stories_state, epics_info, max_stories) -> BatchProposal` — 基于依赖图和当前状态生成推荐 batch 方案；`max_stories` 来自 CLI 显式参数或模块默认值 5，不依赖 Story 1.3 配置引擎
+  - [x] 2.4 实现 `confirm_batch(db, proposal, selected_ids) -> BatchRecord` — 用单个 SQLite 事务完成 batch 创建、缺失 `StoryRecord` 补齐、顺序化 `batch_stories` 写入，以及 story 状态/`current_phase` 更新
+  - [x] 2.5 明确定义批次状态聚合规则：头部 story 写入 `status=”planning”, current_phase=”creating”`；后续 story 写入 `status=”backlog”, current_phase=”queued”`；`ato batch status` 按 AC2 规则聚合 4 个进度桶
+  - [x] 2.6 在 `batch.py` 中定义 `BatchRecommender` 协议（Protocol），本地推荐为默认实现，后续 AI 推荐可插拔替换
 
-- [ ] Task 3: CLI 命令实现 (AC: #1, #2, #3, #4, #5)
-  - [ ] 3.1 在 `src/ato/cli.py` 中创建 `batch_app = typer.Typer()` 子命令组，注册到主 `app`
-  - [ ] 3.2 实现 `ato batch select` 命令 — 通过显式 CLI 参数和约定默认路径工作（至少支持 `--epics-file`、`--db-path`、`--max-stories`、`--story-ids`），不要求 Story 1.3 的 `load_config()`
-  - [ ] 3.3 实现 `ato batch status` 命令 — 仅依赖 SQLite 查询 active batch、汇总进度、格式化输出；已存在 active batch 时不需要 epics 文件
-  - [ ] 3.4 支持 `--json` 标志输出结构化 JSON 到 stdout
-  - [ ] 3.5 实现空状态处理和错误处理：缺 DB 对所有 batch 子命令报错；缺 epics 仅阻止 `select`
-  - [ ] 3.6 若已有 active batch，`ato batch select` 默认拒绝创建新 batch，并输出明确提示（本 story 不实现 replace/cancel CLI）
+- [x] Task 3: CLI 命令实现 (AC: #1, #2, #3, #4, #5)
+  - [x] 3.1 在 `src/ato/cli.py` 中创建 `batch_app = typer.Typer()` 子命令组，注册到主 `app`
+  - [x] 3.2 实现 `ato batch select` 命令 — 通过显式 CLI 参数和约定默认路径工作（至少支持 `--epics-file`、`--db-path`、`--max-stories`、`--story-ids`），不要求 Story 1.3 的 `load_config()`
+  - [x] 3.3 实现 `ato batch status` 命令 — 仅依赖 SQLite 查询 active batch、汇总进度、格式化输出；已存在 active batch 时不需要 epics 文件
+  - [x] 3.4 支持 `--json` 标志输出结构化 JSON 到 stdout
+  - [x] 3.5 实现空状态处理和错误处理：缺 DB 对所有 batch 子命令报错；缺 epics 仅阻止 `select`
+  - [x] 3.6 若已有 active batch，`ato batch select` 默认拒绝创建新 batch，并输出明确提示（本 story 不实现 replace/cancel CLI）
 
-- [ ] Task 4: 测试 (AC: #1-#5)
-  - [ ] 4.1 `tests/unit/test_batch.py` — batch 推荐逻辑单元测试（epics 解析、依赖分析、推荐算法）
-  - [ ] 4.2 `tests/unit/test_db.py` 追加 — batch 相关 CRUD 测试（insert_batch、insert_batch_story_links、顺序保持、单 active batch 约束、get_batch_progress）
-  - [ ] 4.3 `tests/unit/test_migrations.py` 追加 — MIGRATIONS[2] 迁移测试
-  - [ ] 4.4 `tests/unit/test_cli_batch.py` — CLI 命令测试，使用 `typer.testing.CliRunner` 验证退出码和输出格式
-  - [ ] 4.5 为 `confirm_batch()` 编写事务性测试：缺失 story 自动补齐；任一步骤失败时 batch/link/story 更新整体回滚
-  - [ ] 4.6 为 `ato batch status` 编写状态映射测试：`queued` 语义显示为待执行、`blocked` 显示为失败，且无 epics 文件时仍可读取已有 active batch
+- [x] Task 4: 测试 (AC: #1-#5)
+  - [x] 4.1 `tests/unit/test_batch.py` — batch 推荐逻辑单元测试（epics 解析、依赖分析、推荐算法）
+  - [x] 4.2 `tests/unit/test_db.py` 追加 — batch 相关 CRUD 测试（insert_batch、insert_batch_story_links、顺序保持、单 active batch 约束、get_batch_progress）
+  - [x] 4.3 `tests/unit/test_migrations.py` 追加 — MIGRATIONS[2] 迁移测试
+  - [x] 4.4 `tests/unit/test_cli_batch.py` — CLI 命令测试，使用 `typer.testing.CliRunner` 验证退出码和输出格式
+  - [x] 4.5 为 `confirm_batch()` 编写事务性测试：缺失 story 自动补齐；任一步骤失败时 batch/link/story 更新整体回滚
+  - [x] 4.6 为 `ato batch status` 编写状态映射测试：`queued` 语义显示为待执行、`blocked` 显示为失败，且无 epics 文件时仍可读取已有 active batch
 
 ## Dev Notes
 
@@ -310,10 +310,38 @@ Batch #1 (2026-03-24 创建)  状态: active
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- 修复 confirm_batch 中 SAVEPOINT 与 aiosqlite autocommit 冲突问题：改用 try/rollback 替代 SAVEPOINT
+
 ### Completion Notes List
 
+- Task 1: SCHEMA_VERSION 升至 2，新增 BatchStatus/BatchRecord/BatchStoryLink Pydantic models，batches/batch_stories DDL (含 partial unique index 限制单 active batch)，MIGRATIONS[2] 注册，5 个 Batch CRUD 函数 + BatchProgress 聚合类
+- Task 2: 创建 src/ato/batch.py，实现 load_epics（正则解析 epics.md story 标题和依赖表）、LocalBatchRecommender（依赖图 + 拓扑排序推荐）、confirm_batch（原子事务创建 batch + 补齐 stories + 写入关联 + 更新状态）、BatchRecommender Protocol
+- Task 3: 在 cli.py 中新增 batch 子命令组，实现 `ato batch select`（交互/非交互 --story-ids）和 `ato batch status`（人类可读 + --json），完整错误处理和空状态引导
+- Task 4: 144 测试全部通过。test_batch.py (38 tests: 解析、推荐、事务、canonical key 映射、不可回退 story 排除), test_db.py (追加 batch CRUD + progress), test_migrations.py (追加 v2 迁移), test_cli_batch.py (14 tests: CLI 命令、退出码、JSON 输出、输入顺序保留、unmatched key 拒绝)
+- Code Review 修复: canonical key 通过 sprint-status.yaml 映射（非 slug 推导）、不可回退 story 排除出 batch（sequence_no 连续）、--story-ids 保留用户输入顺序、交互模式按编号选择子集、unmatched key 严格报错、typer.Exit 不被 except Exception 二次包装
+
+### Change Log
+
+- 2026-03-24: Story 2B.5 完整实现 — Batch 选择与状态查看功能
+- 2026-03-24: Code Review 修复 — canonical key 映射、状态保护、输入顺序保留、错误处理收口
+
 ### File List
+
+**新增文件：**
+- `src/ato/batch.py` — batch 选择核心逻辑（epics 解析、推荐算法、确认流程）
+- `tests/unit/test_batch.py` — batch 推荐逻辑 + confirm_batch 事务性测试
+- `tests/unit/test_cli_batch.py` — CLI batch 命令测试
+
+**修改文件：**
+- `src/ato/models/schemas.py` — 新增 BatchStatus, BatchRecord, BatchStoryLink; SCHEMA_VERSION=2
+- `src/ato/models/db.py` — 新增 batches/batch_stories DDL, idx_batches_single_active, insert_batch, insert_batch_story_links, get_active_batch, get_batch_stories, get_batch_progress, BatchProgress
+- `src/ato/models/migrations.py` — 新增 MIGRATIONS[2] (_migrate_v1_to_v2)
+- `src/ato/models/__init__.py` — 更新导出
+- `src/ato/cli.py` — 新增 batch 子命令组 (select, status)
+- `pyproject.toml` — ruff ignore 新增 B008 (typer 模式)
+- `tests/unit/test_db.py` — 追加 Batch CRUD 测试
+- `tests/unit/test_migrations.py` — 追加 MigrationV2 测试

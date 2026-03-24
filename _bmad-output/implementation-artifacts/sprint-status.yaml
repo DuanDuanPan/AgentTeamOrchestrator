@@ -1,5 +1,5 @@
 # generated: 2026-03-24
-# last_updated: 2026-03-24T12:00:00
+# last_updated: 2026-03-24T14:00:00
 # project: AgentTeamOrchestrator
 # project_key: NOKEY
 # tracking_system: file-system
@@ -65,7 +65,7 @@ development_status:
   2b-2-codex-agent-review: backlog
   2b-3-bmad-skill-parsing: backlog
   2b-4-worktree-isolation: backlog
-  2b-5-batch-select-status: ready-for-dev
+  2b-5-batch-select-status: done
   2b-6-interactive-session: backlog
   epic-2b-retrospective: optional
 

@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -125,3 +125,28 @@ class ApprovalRecord(_StrictBase):
     decision: str | None = None
     decided_at: datetime | None = None
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Batch 相关模型 (Story 2B.5)
+# ---------------------------------------------------------------------------
+
+# Batch 生命周期状态
+BatchStatus = Literal["active", "completed", "cancelled"]
+
+
+class BatchRecord(_StrictBase):
+    """batches 表对应的 Pydantic 模型。"""
+
+    batch_id: str
+    status: BatchStatus
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class BatchStoryLink(_StrictBase):
+    """batch_stories 关联表对应的 Pydantic 模型。"""
+
+    batch_id: str
+    story_id: str
+    sequence_no: int
