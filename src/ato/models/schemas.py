@@ -128,6 +128,23 @@ class ApprovalRecord(_StrictBase):
 
 
 # ---------------------------------------------------------------------------
+# Transition 事件模型 (Story 2A.2)
+# ---------------------------------------------------------------------------
+
+# Transition 事件来源
+TransitionSource = Literal["agent", "tui", "cli"]
+
+
+class TransitionEvent(_StrictBase):
+    """TransitionQueue 接收的状态转换事件。"""
+
+    story_id: str
+    event_name: str
+    source: TransitionSource
+    submitted_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Batch 相关模型 (Story 2B.5)
 # ---------------------------------------------------------------------------
 

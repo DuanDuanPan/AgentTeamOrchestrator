@@ -1,6 +1,6 @@
 # Story 2A.2: 串行状态转换队列 (Serial Transition Queue)
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -57,66 +57,66 @@ And no state conflicts detected in SQLite
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 定义 TransitionEvent Pydantic 模型 (AC: #1)
-  - [ ] 1.1 在 `src/ato/models/schemas.py` 中定义 `TransitionEvent(_StrictBase)`，字段：`story_id: str`, `event_name: str`, `source: Literal["agent", "tui", "cli"]`, `submitted_at: datetime`
-  - [ ] 1.2 在 `src/ato/models/__init__.py` 导出 `TransitionEvent`
+- [x] Task 1: 定义 TransitionEvent Pydantic 模型 (AC: #1)
+  - [x] 1.1 在 `src/ato/models/schemas.py` 中定义 `TransitionEvent(_StrictBase)`，字段：`story_id: str`, `event_name: str`, `source: Literal["agent", "tui", "cli"]`, `submitted_at: datetime`
+  - [x] 1.2 在 `src/ato/models/__init__.py` 导出 `TransitionEvent`
 
-- [ ] Task 2: 实现 TransitionQueue 核心 (AC: #1, #2)
-  - [ ] 2.1 在 `src/ato/transition_queue.py` 中实现 `TransitionQueue` 类
-  - [ ] 2.2 构造函数接收 `db_path: Path` 和可选 `nudge: Nudge | None = None`，内部创建 `asyncio.Queue[TransitionEvent | None]`、`_machines` 缓存和 `_consumer_task`
-  - [ ] 2.3 实现 `async submit(event: TransitionEvent) -> None`——将事件放入 asyncio.Queue
-  - [ ] 2.4 实现 `async start() -> None`——使用 `get_connection(db_path)` 打开长连接，启动单个 consumer 后台任务；若重复 `start()`，不得创建第二个 consumer
-  - [ ] 2.5 实现 `async stop() -> None`——标记队列关闭，发送哨兵（`None`），等待 consumer 任务完成并关闭连接；`stop()` 后拒绝新的 `submit()`
-  - [ ] 2.6 实现 `async _consumer() -> None`——循环 `queue.get()`，对每个事件执行三步序列：
+- [x] Task 2: 实现 TransitionQueue 核心 (AC: #1, #2)
+  - [x] 2.1 在 `src/ato/transition_queue.py` 中实现 `TransitionQueue` 类
+  - [x] 2.2 构造函数接收 `db_path: Path` 和可选 `nudge: Nudge | None = None`，内部创建 `asyncio.Queue[TransitionEvent | None]`、`_machines` 缓存和 `_consumer_task`
+  - [x] 2.3 实现 `async submit(event: TransitionEvent) -> None`——将事件放入 asyncio.Queue
+  - [x] 2.4 实现 `async start() -> None`——使用 `get_connection(db_path)` 打开长连接，启动单个 consumer 后台任务；若重复 `start()`，不得创建第二个 consumer
+  - [x] 2.5 实现 `async stop() -> None`——标记队列关闭，发送哨兵（`None`），等待 consumer 任务完成并关闭连接；`stop()` 后拒绝新的 `submit()`
+  - [x] 2.6 实现 `async _consumer() -> None`——循环 `queue.get()`，对每个事件执行三步序列：
     1. 获取/创建该 story_id 的 `StoryLifecycle` 实例
     2. `await sm.send(event.event_name)` — 内存状态更新
     3. `await save_story_state(db, event.story_id, sm.current_state_value)` — 显式持久化
     4. `await db.commit()` — 统一提交
-  - [ ] 2.7 consumer 内单个事件失败不 crash 队列——捕获异常、`await db.rollback()`、structlog 记录、继续处理下一个事件
-  - [ ] 2.8 若失败发生在 `sm.send()` 之后，必须驱逐该 story 的缓存状态机（下次从 SQLite 重建），避免内存状态与已回滚数据库分叉
-  - [ ] 2.9 使用 `structlog.contextvars` 绑定 `story_id` / `event_name` / `source`，并记录 `queue_depth`、`processing_start`、`processing_end`、`latency_ms`
+  - [x] 2.7 consumer 内单个事件失败不 crash 队列——捕获异常、`await db.rollback()`、structlog 记录、继续处理下一个事件
+  - [x] 2.8 若失败发生在 `sm.send()` 之后，必须驱逐该 story 的缓存状态机（下次从 SQLite 重建），避免内存状态与已回滚数据库分叉
+  - [x] 2.9 使用 `structlog.contextvars` 绑定 `story_id` / `event_name` / `source`，并记录 `queue_depth`、`processing_start`、`processing_end`、`latency_ms`
 
-- [ ] Task 3: 实现状态机实例管理 (AC: #1, #4)
-  - [ ] 3.1 TransitionQueue 内部维护 `_machines: dict[str, StoryLifecycle]`（story_id → 状态机实例）
-  - [ ] 3.2 实现 `async _get_or_create_machine(story_id: str) -> StoryLifecycle`——缓存命中直接返回；缓存未命中时从 SQLite 读取 `current_phase`，创建状态机并恢复到对应状态；未知 phase 直接抛 `StateTransitionError`
-  - [ ] 3.3 恢复逻辑：`StoryLifecycle.create()` → `queued` 无操作；happy path 使用 `CANONICAL_PHASES` replay；`fixing` / `blocked` / `done` 走显式特殊分支
-  - [ ] 3.4 若 story 不存在于 SQLite，抛出 `StateTransitionError`
-  - [ ] 3.5 恢复失败时不得缓存半初始化状态机实例
+- [x] Task 3: 实现状态机实例管理 (AC: #1, #4)
+  - [x] 3.1 TransitionQueue 内部维护 `_machines: dict[str, StoryLifecycle]`（story_id → 状态机实例）
+  - [x] 3.2 实现 `async _get_or_create_machine(story_id: str) -> StoryLifecycle`——缓存命中直接返回；缓存未命中时从 SQLite 读取 `current_phase`，创建状态机并恢复到对应状态；未知 phase 直接抛 `StateTransitionError`
+  - [x] 3.3 恢复逻辑：`StoryLifecycle.create()` → `queued` 无操作；happy path 使用 `CANONICAL_PHASES` replay；`fixing` / `blocked` / `done` 走显式特殊分支
+  - [x] 3.4 若 story 不存在于 SQLite，抛出 `StateTransitionError`
+  - [x] 3.5 恢复失败时不得缓存半初始化状态机实例
 
-- [ ] Task 4: 实现 Nudge 基础设施 (AC: #3)
-  - [ ] 4.1 在 `src/ato/nudge.py` 中实现 `Nudge` 抽象，作为 Orchestrator wait-side 和外部 writer send-side 的统一入口
-  - [ ] 4.2 wait-side 基于 `asyncio.Event` 实现：`notify()` 设置本进程 event，`wait(timeout)` 等待 event 或超时
-  - [ ] 4.3 在同一模块暴露未来给 TUI / `ato submit` 调用的外部 sender helper（封装 `SIGUSR1` 或等价 transport；调用点在 Story 2A.3 / 2B.6 接入）
-  - [ ] 4.4 `TransitionQueue.submit()` 只负责触发 same-process nudge；不要把它当成 TUI / `ato submit` 路径的唯一实现
-  - [ ] 4.5 `wait()` 返回后自动 clear event，支持下次等待
+- [x] Task 4: 实现 Nudge 基础设施 (AC: #3)
+  - [x] 4.1 在 `src/ato/nudge.py` 中实现 `Nudge` 抽象，作为 Orchestrator wait-side 和外部 writer send-side 的统一入口
+  - [x] 4.2 wait-side 基于 `asyncio.Event` 实现：`notify()` 设置本进程 event，`wait(timeout)` 等待 event 或超时
+  - [x] 4.3 在同一模块暴露未来给 TUI / `ato submit` 调用的外部 sender helper（封装 `SIGUSR1` 或等价 transport；调用点在 Story 2A.3 / 2B.6 接入）
+  - [x] 4.4 `TransitionQueue.submit()` 只负责触发 same-process nudge；不要把它当成 TUI / `ato submit` 路径的唯一实现
+  - [x] 4.5 `wait()` 返回后自动 clear event，支持下次等待
 
-- [ ] Task 5: 单元测试——TransitionQueue 核心行为 (AC: #1, #2, #4)
-  - [ ] 5.1 创建 `tests/unit/test_transition_queue.py`
-  - [ ] 5.2 测试 FIFO 顺序：提交 N 个事件，验证处理顺序一致
-  - [ ] 5.3 测试串行化：并发提交多个事件，验证同一时刻只有一个在处理（通过回调计时验证）
-  - [ ] 5.4 测试错误隔离：覆盖非法 transition 和持久化 / commit 失败两类错误，验证 rollback、生存性，以及失败 story 的状态机缓存被驱逐
-  - [ ] 5.5 测试 start/stop 生命周期：重复 `start()` 不得产生第二个 consumer；`stop()` 后 consumer 优雅退出且新 `submit()` 被拒绝
-  - [ ] 5.6 测试状态机恢复：从 SQLite 恢复中间状态的状态机实例，覆盖 `fixing` / `blocked` / `done` 等边界 phase
+- [x] Task 5: 单元测试——TransitionQueue 核心行为 (AC: #1, #2, #4)
+  - [x] 5.1 创建 `tests/unit/test_transition_queue.py`
+  - [x] 5.2 测试 FIFO 顺序：提交 N 个事件，验证处理顺序一致
+  - [x] 5.3 测试串行化：并发提交多个事件，验证同一时刻只有一个在处理（通过回调计时验证）
+  - [x] 5.4 测试错误隔离：覆盖非法 transition 和持久化 / commit 失败两类错误，验证 rollback、生存性，以及失败 story 的状态机缓存被驱逐
+  - [x] 5.5 测试 start/stop 生命周期：重复 `start()` 不得产生第二个 consumer；`stop()` 后 consumer 优雅退出且新 `submit()` 被拒绝
+  - [x] 5.6 测试状态机恢复：从 SQLite 恢复中间状态的状态机实例，覆盖 `fixing` / `blocked` / `done` 等边界 phase
 
-- [ ] Task 6: 单元测试——Nudge 通知机制 (AC: #3)
-  - [ ] 6.1 创建 `tests/unit/test_nudge.py`
-  - [ ] 6.2 测试 notify 后 wait 立即返回
-  - [ ] 6.3 测试无 notify 时 wait 超时返回
-  - [ ] 6.4 测试多次 notify 后 event 自动 clear，可继续下一轮等待
-  - [ ] 6.5 测试外部 sender helper 会委托给约定的进程通知 transport（用 monkeypatch / fake PID 验证，无需真实 TUI / CLI）
+- [x] Task 6: 单元测试——Nudge 通知机制 (AC: #3)
+  - [x] 6.1 创建 `tests/unit/test_nudge.py`
+  - [x] 6.2 测试 notify 后 wait 立即返回
+  - [x] 6.3 测试无 notify 时 wait 超时返回
+  - [x] 6.4 测试多次 notify 后 event 自动 clear，可继续下一轮等待
+  - [x] 6.5 测试外部 sender helper 会委托给约定的进程通知 transport（用 monkeypatch / fake PID 验证，无需真实 TUI / CLI）
 
-- [ ] Task 7: 集成测试——并发 Transition 串行化 (AC: #1, #2, #4)
-  - [ ] 7.1 创建 `tests/integration/test_transition_queue.py`
-  - [ ] 7.2 测试 BDD 场景：两个 story 几乎同时提交 transition，验证串行处理 + SQLite 最终状态正确
-  - [ ] 7.3 测试延迟：transition 处理 ≤5 秒（NFR2）
-  - [ ] 7.4 测试端到端：submit → queue → state machine send → save_story_state → commit → `get_story()` / SQLite 读回验证
-  - [ ] 7.5 明确本 story 不新增 `ato status` / `ato submit` 命令；AC #3 / #4 的 CLI/TUI 观测以持久化状态和 nudge contract 作为可执行验收代理
+- [x] Task 7: 集成测试——并发 Transition 串行化 (AC: #1, #2, #4)
+  - [x] 7.1 创建 `tests/integration/test_transition_queue.py`
+  - [x] 7.2 测试 BDD 场景：两个 story 几乎同时提交 transition，验证串行处理 + SQLite 最终状态正确
+  - [x] 7.3 测试延迟：transition 处理 ≤5 秒（NFR2）
+  - [x] 7.4 测试端到端：submit → queue → state machine send → save_story_state → commit → `get_story()` / SQLite 读回验证
+  - [x] 7.5 明确本 story 不新增 `ato status` / `ato submit` 命令；AC #3 / #4 的 CLI/TUI 观测以持久化状态和 nudge contract 作为可执行验收代理
 
-- [ ] Task 8: 代码质量验证
-  - [ ] 8.1 `uv run ruff check src/ato/transition_queue.py src/ato/nudge.py` — 通过
-  - [ ] 8.2 `uv run mypy src/ato/transition_queue.py src/ato/nudge.py` — 通过
-  - [ ] 8.3 `uv run pytest tests/unit/test_transition_queue.py tests/unit/test_nudge.py tests/integration/test_transition_queue.py -v` — 全部通过
-  - [ ] 8.4 `uv run pytest` — 确认零回归（当前基线 225 passed）
+- [x] Task 8: 代码质量验证
+  - [x] 8.1 `uv run ruff check src/ato/transition_queue.py src/ato/nudge.py` — 通过
+  - [x] 8.2 `uv run mypy src/ato/transition_queue.py src/ato/nudge.py` — 通过
+  - [x] 8.3 `uv run pytest tests/unit/test_transition_queue.py tests/unit/test_nudge.py tests/integration/test_transition_queue.py -v` — 全部通过
+  - [x] 8.4 `uv run pytest` — 确认零回归（当前基线 225 passed）
 
 ## Dev Notes
 
@@ -352,10 +352,37 @@ class TransitionQueue:
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- `get_connection()` 返回已打开的连接（非 context manager）——测试中不能用 `async with (await get_connection(...)) as db:`，需要 `db = await get_connection(...)` + `try/finally: await db.close()`
+- `_replay_to_phase()` 对 `fixing` 使用最短路径 `reviewing → review_fail`；对 `blocked` 使用 `queued → escalate`
+- 哨兵类型为 `None`，Queue 类型标注为 `asyncio.Queue[TransitionEvent | None]`
+
 ### Completion Notes List
 
+- TransitionQueue 核心实现：asyncio.Queue consumer pattern，单 consumer 串行化所有状态转换
+- 状态机实例管理：内存缓存 + SQLite 恢复（replay to phase），覆盖全部 13 个阶段
+- 错误隔离：失败事件 rollback + 驱逐缓存状态机，队列继续处理后续事件
+- Nudge 通知：asyncio.Event wait/notify + send_external_nudge(SIGUSR1) 外部 sender
+- TransitionEvent Pydantic 模型 + models/__init__.py 导出
+- 单元测试 35 个 + 集成测试 5 个 = 40 个新测试（含 13 个 parametrize phase 恢复测试）
+- 全套件 340 passed，0 regressions（基线 225 → 340）
+- ruff check + mypy 全部通过
+
 ### File List
+
+- `src/ato/transition_queue.py` — **重写**：TransitionQueue 类（submit/start/stop/_consumer/_get_or_create_machine）、_replay_to_phase 恢复逻辑
+- `src/ato/nudge.py` — **重写**：Nudge 类（notify/wait）、send_external_nudge(SIGUSR1)
+- `src/ato/models/schemas.py` — **修改**：新增 TransitionEvent、TransitionSource
+- `src/ato/models/__init__.py` — **修改**：导出 TransitionEvent
+- `tests/unit/test_transition_queue.py` — **新建**：35 个单元测试
+- `tests/unit/test_nudge.py` — **新建**：7 个单元测试
+- `tests/integration/test_transition_queue.py` — **新建**：5 个集成测试（BDD 并发、NFR2 延迟、端到端、Convergent Loop、Nudge 合约）
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — **修改**：2a-2 状态更新
+- `_bmad-output/implementation-artifacts/2a-2-serial-transition-queue.md` — **修改**：任务标记、Dev Agent Record
+
+### Change Log
+
+- 2026-03-24: Story 2A.2 完整实现——TransitionQueue 串行状态转换队列 + Nudge 通知机制 + 状态机恢复 + 47 个测试
