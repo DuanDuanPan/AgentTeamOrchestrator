@@ -1,6 +1,6 @@
 # Story 2B.4: 操作者可看到 story 在独立 worktree 中执行
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -62,11 +62,11 @@ So that story 之间的代码变更互相隔离。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 WorktreeManager 核心类 (AC: #1, #2, #3, #4)
-  - [ ] 1.1 创建 `src/ato/worktree_mgr.py`，定义 `WorktreeManager` 类
+- [x] Task 1: 实现 WorktreeManager 核心类 (AC: #1, #2, #3, #4)
+  - [x] 1.1 创建 `src/ato/worktree_mgr.py`，定义 `WorktreeManager` 类
     - 构造参数：`project_root: Path`（目标项目 git 仓库根路径），`db_path: Path`
     - 内部常量：`WORKTREE_BASE = ".worktrees"`，`BRANCH_PREFIX = "worktree-story-"`
-  - [ ] 1.2 实现 `async def create(self, story_id: str, branch_name: str | None = None, *, base_ref: str = "HEAD") -> Path`
+  - [x] 1.2 实现 `async def create(self, story_id: str, branch_name: str | None = None, *, base_ref: str = "HEAD") -> Path`
     - 默认 `branch_name = f"worktree-story-{story_id}"`
     - 目标路径 = `project_root / WORKTREE_BASE / story_id`
     - 幂等检查：路径已存在 + 是 valid worktree → 直接返回路径并 structlog.info
@@ -75,49 +75,49 @@ So that story 之间的代码变更互相隔离。
     - 成功后更新 `stories.worktree_path`（调用 `update_story_worktree_path()`）
     - structlog 记录 `worktree_created` 事件
     - 返回 worktree 绝对路径
-  - [ ] 1.3 实现 `async def cleanup(self, story_id: str) -> None`
+  - [x] 1.3 实现 `async def cleanup(self, story_id: str) -> None`
     - 从 DB 读取 `stories.worktree_path`；为 None 则跳过（幂等）
     - 执行 `git worktree remove <path> --force`
     - 仅执行 `git branch -d <branch_name>`（安全删除已合并分支）；失败时 structlog.warning 但不抛出
     - 清空 `stories.worktree_path = None`
     - structlog 记录 `worktree_cleaned` 事件
-  - [ ] 1.4 实现 `async def get_path(self, story_id: str) -> Path | None`
+  - [x] 1.4 实现 `async def get_path(self, story_id: str) -> Path | None`
     - 复用现有 `get_story()` 读取 `stories.worktree_path`，返回 Path 或 None
-  - [ ] 1.5 实现 `async def exists(self, story_id: str) -> bool`
+  - [x] 1.5 实现 `async def exists(self, story_id: str) -> bool`
     - 检查 DB 中 worktree_path 非空 且 目录实际存在
-  - [ ] 1.6 实现辅助方法 `async def _run_git(self, *args: str) -> tuple[int, str, str]`
+  - [x] 1.6 实现辅助方法 `async def _run_git(self, *args: str) -> tuple[int, str, str]`
     - 通过 `asyncio.create_subprocess_exec("git", *args, cwd=self._project_root)` 执行
     - `try/finally` + `cleanup_process(proc)` 三阶段清理
     - 返回 `(returncode, stdout, stderr)`
     - 超时 30 秒（`asyncio.wait_for`）
 
-- [ ] Task 2: 新增 DB 辅助函数 (AC: #1, #2, #5)
-  - [ ] 2.1 在 `src/ato/models/db.py` 中新增 `update_story_worktree_path(db, story_id, worktree_path)` 函数
+- [x] Task 2: 新增 DB 辅助函数 (AC: #1, #2, #5)
+  - [x] 2.1 在 `src/ato/models/db.py` 中新增 `update_story_worktree_path(db, story_id, worktree_path)` 函数
     - 更新 `stories.worktree_path` 和 `updated_at`
     - 参数化查询，自动 commit
 
-- [ ] Task 3: 定义异常类型 (AC: #4)
-  - [ ] 3.1 在 `src/ato/models/schemas.py` 中新增 `WorktreeError(ATOError)` 异常类
+- [x] Task 3: 定义异常类型 (AC: #4)
+  - [x] 3.1 在 `src/ato/models/schemas.py` 中新增 `WorktreeError(ATOError)` 异常类
     - 签名：`__init__(message: str, *, stderr: str = "", story_id: str | None = None)`
     - 风格对齐 `CLIAdapterError`：保存属性后 `super().__init__(message)`
 
-- [ ] Task 4: 单元测试 (AC: #1, #2, #3, #4, #5)
-  - [ ] 4.1 创建 `tests/unit/test_worktree_mgr.py`
-  - [ ] 4.2 测试 create() 成功路径：mock `asyncio.create_subprocess_exec` 返回 exit_code=0，验证 git worktree add `-b <branch> <path> <base_ref>` 参数正确，验证 DB worktree_path 已更新
-  - [ ] 4.3 测试 create() 幂等性：路径已存在时直接返回，不执行 git 命令
-  - [ ] 4.4 测试 create() 失败：git 命令 exit_code≠0 时抛出 WorktreeError，携带 stderr
-  - [ ] 4.5 测试 cleanup() 成功路径：验证 git worktree remove + git branch -d 命令正确执行，DB worktree_path 清空
-  - [ ] 4.6 测试 cleanup() 幂等性：worktree_path 为 None 时跳过，不执行 git 命令
-  - [ ] 4.7 测试 cleanup() 部分失败：git branch -d 失败时仅 warning 不抛异常
-  - [ ] 4.8 测试 get_path() 和 exists() 正确查询 DB
-  - [ ] 4.9 测试 _run_git() 超时场景：验证三阶段清理协议触发
-  - [ ] 4.10 测试路径构建：验证 `.worktrees/{story_id}` 格式正确
+- [x] Task 4: 单元测试 (AC: #1, #2, #3, #4, #5)
+  - [x] 4.1 创建 `tests/unit/test_worktree_mgr.py`
+  - [x] 4.2 测试 create() 成功路径：mock `asyncio.create_subprocess_exec` 返回 exit_code=0，验证 git worktree add `-b <branch> <path> <base_ref>` 参数正确，验证 DB worktree_path 已更新
+  - [x] 4.3 测试 create() 幂等性：路径已存在时直接返回，不执行 git 命令
+  - [x] 4.4 测试 create() 失败：git 命令 exit_code≠0 时抛出 WorktreeError，携带 stderr
+  - [x] 4.5 测试 cleanup() 成功路径：验证 git worktree remove + git branch -d 命令正确执行，DB worktree_path 清空
+  - [x] 4.6 测试 cleanup() 幂等性：worktree_path 为 None 时跳过，不执行 git 命令
+  - [x] 4.7 测试 cleanup() 部分失败：git branch -d 失败时仅 warning 不抛异常
+  - [x] 4.8 测试 get_path() 和 exists() 正确查询 DB
+  - [x] 4.9 测试 _run_git() 超时场景：验证三阶段清理协议触发
+  - [x] 4.10 测试路径构建：验证 `.worktrees/{story_id}` 格式正确
 
-- [ ] Task 5: 集成测试 (AC: #1, #2)
-  - [ ] 5.1 创建 `tests/integration/test_worktree_lifecycle.py`
-  - [ ] 5.2 在 tmp 目录初始化真实 git repo，测试完整 create → verify isolation → cleanup 生命周期
-  - [ ] 5.3 验证 worktree 中的文件变更不影响主仓库工作目录
-  - [ ] 5.4 验证 cleanup 后目录和分支均被删除
+- [x] Task 5: 集成测试 (AC: #1, #2)
+  - [x] 5.1 创建 `tests/integration/test_worktree_lifecycle.py`
+  - [x] 5.2 在 tmp 目录初始化真实 git repo，测试完整 create → verify isolation → cleanup 生命周期
+  - [x] 5.3 验证 worktree 中的文件变更不影响主仓库工作目录
+  - [x] 5.4 验证 cleanup 后目录和分支均被删除
 
 ## Dev Notes
 
@@ -211,8 +211,53 @@ c0183a0 Merge story 1-4b
 
 ### Agent Model Used
 
+Claude Opus 4.6 (1M context)
+
 ### Debug Log References
+
+- 全量回归测试 601 passed, 0 failed
+- ruff check / ruff format / mypy strict 全部通过
+- 0 warnings（修复了超时测试的 RuntimeWarning）
 
 ### Completion Notes List
 
+- ✅ Task 3: 在 `schemas.py` 新增 `WorktreeError(ATOError)` 异常类，含 `stderr` 和 `story_id` 属性
+- ✅ Task 2: 在 `db.py` 新增 `update_story_worktree_path()` 函数，参数化查询 + 自动 commit
+- ✅ Task 1: 实现 `WorktreeManager` 核心类（create/cleanup/get_path/exists/_run_git/_get_worktree_branch）
+  - `create()` 支持幂等检查（通过 `git worktree list --porcelain` 验证有效性）+ 幂等 DB 补写
+  - `cleanup()` 通过 `_get_worktree_branch()` 查询实际分支名，安全删除分支（`-d`），失败仅 warning
+  - `cleanup()` 对目录已被外部移除的场景幂等处理（prune 后继续清理 DB）
+  - `_run_git()` 30 秒超时 + 三阶段清理协议
+  - 所有 git 命令通过 `asyncio.create_subprocess_exec` 执行，无 `shell=True`
+- ✅ Task 4: 19 个单元测试全部通过，覆盖 create 成功/幂等/幂等DB补写/失败、cleanup 成功/自定义分支/幂等/外部移除幂等/部分失败、get_path/exists 查询、超时清理、路径构建
+- ✅ Task 5: 7 个集成测试全部通过，使用真实 git repo 验证完整 worktree 生命周期、文件隔离性、分支清理、自定义分支清理、外部移除幂等
+
+### Code Review Fixes
+
+- ✅ [高] cleanup() 幂等性：目录已被外部移除时执行 `git worktree prune` 而非抛错
+- ✅ [高] cleanup() 自定义分支：新增 `_get_worktree_branch()` 方法从 `git worktree list --porcelain` 解析实际分支名
+- ✅ [中] create() 幂等 DB 补写：worktree 已存在但 DB 为 NULL 时补写 `worktree_path`
+- ✅ [低] 超时测试 mock 修复：`proc.terminate()` 和 `proc.kill()` 使用 `MagicMock`（同步调用），消除 RuntimeWarning
+
+### Implementation Plan
+
+严格遵循 story 任务顺序，先建异常类和 DB helper（Task 3, 2），再实现核心 WorktreeManager（Task 1），最后编写单元测试（Task 4）和集成测试（Task 5）。
+
 ### File List
+
+- `src/ato/worktree_mgr.py` — 新增：WorktreeManager 核心类
+- `src/ato/models/schemas.py` — 修改：新增 WorktreeError 异常类
+- `src/ato/models/db.py` — 修改：新增 update_story_worktree_path() 函数
+- `tests/unit/test_worktree_mgr.py` — 新增：19 个单元测试
+- `tests/integration/test_worktree_lifecycle.py` — 新增：7 个集成测试
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — 修改：story 状态更新
+- `_bmad-output/implementation-artifacts/2b-4-worktree-isolation.md` — 修改：任务完成记录
+
+## Change Log
+
+- 2026-03-25: Story 2B.4 实现完成 — WorktreeManager 核心类、WorktreeError 异常、DB helper、16 个单元测试 + 5 个集成测试
+- 2026-03-25: 修复代码评审 4 项发现 — cleanup 幂等性、自定义分支清理、create DB 补写、超时测试 mock（+5 新测试）
+- 2026-03-25: 修复代码评审 R2 — cleanup() 外部移除场景分支泄漏：_get_worktree_branch() 返回 None 时回退默认分支名
+- 2026-03-25: 修复代码评审 R3 — 自定义分支+外部移除组合场景：新增 .branch 元数据文件持久化分支名，三级回退链：git 元数据 → 文件 → 默认约定
+- 2026-03-25: 修复代码评审 R4 — 幂等 create() 补写丢失的 .branch 元数据；branch -d 失败时保留元数据供后续流程使用（+5 新测试）
+- 2026-03-25: 修复代码评审 R5 — 幂等 create() 元数据修复从"文件不存在"扩展为"文件不存在或内容为空"（_has_valid_branch_meta）

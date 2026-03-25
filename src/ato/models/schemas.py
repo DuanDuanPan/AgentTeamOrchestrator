@@ -75,6 +75,21 @@ class ConfigError(ATOError):
     """配置解析错误。"""
 
 
+class WorktreeError(ATOError):
+    """Git worktree 操作失败。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: str = "",
+        story_id: str | None = None,
+    ) -> None:
+        self.stderr = stderr
+        self.story_id = story_id
+        super().__init__(message)
+
+
 # ---------------------------------------------------------------------------
 # 共享 Pydantic 配置
 # ---------------------------------------------------------------------------
