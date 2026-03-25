@@ -14,6 +14,7 @@ import pytest
 from ato.models.db import get_connection, init_db
 from ato.tui.app import ATOApp
 from ato.tui.dashboard import DashboardScreen, _FocusablePanel
+from ato.tui.widgets.three_question_header import ThreeQuestionHeader
 
 
 @pytest.fixture()
@@ -338,9 +339,83 @@ async def test_three_panel_shows_data(tui_db_with_data: Path) -> None:
 
 
 async def test_header_footer_always_visible(tui_db_path: Path) -> None:
-    """所有断点下 Header/Footer 始终可见。"""
+    """所有断点下 Header/Footer 始终可见（region 验证）。"""
     for width in (80, 120, 150, 200):
         app = ATOApp(db_path=tui_db_path)
         async with app.run_test(size=(width, 40)):
-            assert app.query_one("Header") is not None
-            assert app.query_one("Footer") is not None
+            header = app.query_one("Header")
+            footer = app.query_one("Footer")
+            assert header.region.height > 0, f"Header height=0 at width={width}"
+            assert footer.region.height > 0, f"Footer height=0 at width={width}"
+
+
+# ---------------------------------------------------------------------------
+# Story 6.2a: ThreeQuestionHeader 响应式 display_mode 测试
+# ---------------------------------------------------------------------------
+
+
+async def test_header_display_mode_full_at_200(tui_db_path: Path) -> None:
+    """200 列（180+）→ ThreeQuestionHeader display_mode = full。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test(size=(200, 40)):
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.display_mode == "full"
+
+
+async def test_header_display_mode_compact_at_150(tui_db_path: Path) -> None:
+    """150 列（140-179）→ ThreeQuestionHeader display_mode = compact。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test(size=(150, 40)):
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.display_mode == "compact"
+
+
+async def test_header_display_mode_minimal_at_120(tui_db_path: Path) -> None:
+    """120 列（100-139）→ ThreeQuestionHeader display_mode = minimal。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test(size=(120, 40)):
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.display_mode == "minimal"
+
+
+async def test_header_display_mode_minimal_at_80(tui_db_path: Path) -> None:
+    """80 列（<100 degraded）→ ThreeQuestionHeader display_mode = minimal。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test(size=(80, 40)):
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.display_mode == "minimal"
+
+
+async def test_header_display_mode_resize_cycle(tui_db_path: Path) -> None:
+    """resize 150→120→80→150 display_mode 正确切换。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test(size=(150, 40)) as pilot:
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.display_mode == "compact"
+
+        await pilot.resize_terminal(120, 40)
+        assert header.display_mode == "minimal"
+
+        await pilot.resize_terminal(80, 40)
+        assert header.display_mode == "minimal"
+
+        await pilot.resize_terminal(200, 40)
+        assert header.display_mode == "full"
+
+
+async def test_three_question_header_visible_all_modes(tui_db_path: Path) -> None:
+    """ThreeQuestionHeader 在所有布局模式下始终可见且不与 Header 重叠。"""
+    for width in (80, 120, 150, 200):
+        app = ATOApp(db_path=tui_db_path)
+        async with app.run_test(size=(width, 40)):
+            builtin_header = app.query_one("Header")
+            tqh = app.query_one(ThreeQuestionHeader)
+
+            # ThreeQuestionHeader 必须有实际高度
+            assert tqh.region.height > 0, f"ThreeQuestionHeader height=0 at width={width}"
+            # 不与 Textual 内置 Header 重叠：TQH 的 y 必须 >= Header 的 y + height
+            assert tqh.region.y >= builtin_header.region.y + builtin_header.region.height, (
+                f"ThreeQuestionHeader (y={tqh.region.y}) overlaps Header "
+                f"(y={builtin_header.region.y}, h={builtin_header.region.height}) "
+                f"at width={width}"
+            )

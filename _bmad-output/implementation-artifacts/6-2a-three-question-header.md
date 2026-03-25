@@ -1,6 +1,6 @@
 # Story 6.2a: ThreeQuestionHeader Widget
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -54,50 +54,50 @@ So that 无需任何操作即可掌握全局状态。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: ThreeQuestionHeader Widget 核心实现 (AC: #1, #4)
-  - [ ] 1.1 在 `src/ato/tui/widgets/three_question_header.py` 创建 `ThreeQuestionHeader(Widget)` 类
-  - [ ] 1.2 定义 reactive 属性：`running_count: reactive[int]`、`error_count: reactive[int]`、`pending_approvals: reactive[int]`、`today_cost_usd: reactive[float]`、`seconds_ago: reactive[int]`
-  - [ ] 1.3 实现 `render()` 方法，使用 `Rich.Text` 组装四区域内容，各区域用 `│` 分隔
-  - [ ] 1.4 实现状态逻辑：`error_count > 0` 显示异常状态（$error 红），否则 `running_count > 0` 显示正常（$success 绿）；`pending_approvals > 0` 显示等待（$warning），否则显示已完成（$success）；若没有显式 paused 信号，`running_count == 0 && error_count == 0` 只渲染空闲/无待处理，不得伪造 `⏸ 已暂停`
-  - [ ] 1.5 实现 `update_data()` 公共方法接收数据参数并更新 reactive 属性
-  - [ ] 1.6 使用 `theme.py` 中的 `StatusCode` 获取图标和颜色变量名，但因 Textual `render()` 用 Rich markup 而非 TCSS 类，需将 `$success` 等变量名转换为 Rich color name 或 hex 值
+- [x] Task 1: ThreeQuestionHeader Widget 核心实现 (AC: #1, #4)
+  - [x] 1.1 在 `src/ato/tui/widgets/three_question_header.py` 创建 `ThreeQuestionHeader(Widget)` 类
+  - [x] 1.2 定义 reactive 属性：`running_count: reactive[int]`、`error_count: reactive[int]`、`pending_approvals: reactive[int]`、`today_cost_usd: reactive[float]`、`seconds_ago: reactive[int]`
+  - [x] 1.3 实现 `render()` 方法，使用 `Rich.Text` 组装四区域内容，各区域用 `│` 分隔
+  - [x] 1.4 实现状态逻辑：`error_count > 0` 显示异常状态（$error 红），否则 `running_count > 0` 显示正常（$success 绿）；`pending_approvals > 0` 显示等待（$warning），否则显示已完成（$success）；若没有显式 paused 信号，`running_count == 0 && error_count == 0` 只渲染空闲/无待处理，不得伪造 `⏸ 已暂停`
+  - [x] 1.5 实现 `update_data()` 公共方法接收数据参数并更新 reactive 属性
+  - [x] 1.6 使用 `theme.py` 中的 `StatusCode` 获取图标和颜色变量名，但因 Textual `render()` 用 Rich markup 而非 TCSS 类，需将 `$success` 等变量名转换为 Rich color name 或 hex 值
 
-- [ ] Task 2: 响应式宽度适配 (AC: #2)
-  - [ ] 2.1 在 `ThreeQuestionHeader` 中添加 `display_mode: reactive[str]` 属性（值：`"full"` / `"compact"` / `"minimal"`）
-  - [ ] 2.2 `render()` 根据 `display_mode` 选择对应格式化模板
-  - [ ] 2.3 提供 `set_display_mode(mode: str)` 方法供外部调用（ATOApp 的 `on_resize` 或 `watch_layout_mode` 转发宽度信息）
-  - [ ] 2.4 "full" 模式（180+列）：`● 3 项运行中 │ ◆ 2 审批等待 │ $12.50 今日 │ 更新 2s前`
-  - [ ] 2.5 "compact" 模式（140-179列）：`● 3运行 │ ◆ 2审批 │ $12.50 │ 2s`
-  - [ ] 2.6 "minimal" 模式（100-139列）：`● 3 ◆ 2 $12.50 2s`
+- [x] Task 2: 响应式宽度适配 (AC: #2)
+  - [x] 2.1 在 `ThreeQuestionHeader` 中添加 `display_mode: reactive[str]` 属性（值：`”full”` / `”compact”` / `”minimal”`）
+  - [x] 2.2 `render()` 根据 `display_mode` 选择对应格式化模板
+  - [x] 2.3 提供 `set_display_mode(mode: str)` 方法供外部调用（ATOApp 的 `on_resize` 或 `watch_layout_mode` 转发宽度信息）
+  - [x] 2.4 “full” 模式（180+列）：`● 3 项运行中 │ ◆ 2 审批等待 │ $12.50 今日 │ 更新 2s前`
+  - [x] 2.5 “compact” 模式（140-179列）：`● 3运行 │ ◆ 2审批 │ $12.50 │ 2s`
+  - [x] 2.6 “minimal” 模式（100-139列）：`● 3 ◆ 2 $12.50 2s`
 
-- [ ] Task 3: ATOApp 数据集成 (AC: #3, #5)
-  - [ ] 3.1 扩展 `ATOApp._load_data()` 新增查询：`SELECT status, COUNT(*) FROM stories GROUP BY status`（获取各状态 story 计数），将 `in_progress` 计为 running_count，`blocked` 计为 error_count；同时继续维护现有 `story_count = sum(all grouped counts)`，避免破坏 `DashboardScreen.update_content(...)` 与现有 6.1a / 6.1b 测试契约
-  - [ ] 3.2 新增 reactive 属性 `running_count: reactive[int]` 和 `error_count: reactive[int]` 到 ATOApp；保留现有 `story_count`、`pending_approvals`、`today_cost_usd`、`last_updated`
-  - [ ] 3.3 在 `ATOApp.compose()` 中保持现有 `Header()`，并在其下方插入 `ThreeQuestionHeader()`；本 Story 不替换 Textual `Header`，也不把 header 逻辑塞回 `DashboardScreen`
-  - [ ] 3.4 在 `ATOApp._update_dashboard()` 中保留既有 `dashboard.update_content(...)` 调用，同时新增 `ThreeQuestionHeader.update_data()`，传入 running_count、error_count、pending_approvals、today_cost_usd、seconds_ago
-  - [ ] 3.5 `seconds_ago` 计算：在 `_load_data()` 中先基于“上一次” `_last_refresh_time` 计算 elapsed seconds，再用当前时间覆盖 `_last_refresh_time`；不要在刚写入新时间戳后立刻求差值，否则每轮都会接近 `0s`
+- [x] Task 3: ATOApp 数据集成 (AC: #3, #5)
+  - [x] 3.1 扩展 `ATOApp._load_data()` 新增查询：`SELECT status, COUNT(*) FROM stories GROUP BY status`（获取各状态 story 计数），将 `in_progress` 计为 running_count，`blocked` 计为 error_count；同时继续维护现有 `story_count = sum(all grouped counts)`，避免破坏 `DashboardScreen.update_content(...)` 与现有 6.1a / 6.1b 测试契约
+  - [x] 3.2 新增 reactive 属性 `running_count: reactive[int]` 和 `error_count: reactive[int]` 到 ATOApp；保留现有 `story_count`、`pending_approvals`、`today_cost_usd`、`last_updated`
+  - [x] 3.3 在 `ATOApp.compose()` 中保持现有 `Header()`，并在其下方插入 `ThreeQuestionHeader()`；本 Story 不替换 Textual `Header`，也不把 header 逻辑塞回 `DashboardScreen`
+  - [x] 3.4 在 `ATOApp._update_dashboard()` 中保留既有 `dashboard.update_content(...)` 调用，同时新增 `ThreeQuestionHeader.update_data()`，传入 running_count、error_count、pending_approvals、today_cost_usd、seconds_ago
+  - [x] 3.5 `seconds_ago` 计算：在 `_load_data()` 中先基于”上一次” `_last_refresh_time` 计算 elapsed seconds，再用当前时间覆盖 `_last_refresh_time`；不要在刚写入新时间戳后立刻求差值，否则每轮都会接近 `0s`
 
-- [ ] Task 4: ATOApp 宽度感知转发 (AC: #2)
-  - [ ] 4.1 在 `ATOApp.on_resize()` 中根据终端宽度确定 ThreeQuestionHeader 的 display_mode（180+→full, 140-179→compact, <140→minimal；其中 `<100` 的 degraded 模式仍需显示 minimal header）
-  - [ ] 4.2 调用 `ThreeQuestionHeader.set_display_mode(mode)` 传递模式
-  - [ ] 4.3 `_apply_layout()` 已有宽度转发逻辑，在其中或 `on_resize` 中增加 header 模式更新
+- [x] Task 4: ATOApp 宽度感知转发 (AC: #2)
+  - [x] 4.1 在 `ATOApp.on_resize()` 中根据终端宽度确定 ThreeQuestionHeader 的 display_mode（180+→full, 140-179→compact, <140→minimal；其中 `<100` 的 degraded 模式仍需显示 minimal header）
+  - [x] 4.2 调用 `ThreeQuestionHeader.set_display_mode(mode)` 传递模式
+  - [x] 4.3 `_apply_layout()` 已有宽度转发逻辑，在其中或 `on_resize` 中增加 header 模式更新
 
-- [ ] Task 5: TCSS 样式 (AC: #1)
-  - [ ] 5.1 在 `app.tcss` 添加 `ThreeQuestionHeader` 样式：固定高度 1 行、背景 `$surface`、水平居中/左对齐
-  - [ ] 5.2 确保 ThreeQuestionHeader 在所有布局模式（three-panel/tabbed/degraded）下始终可见
+- [x] Task 5: TCSS 样式 (AC: #1)
+  - [x] 5.1 在 `app.tcss` 添加 `ThreeQuestionHeader` 样式：固定高度 1 行、背景 `$surface`、水平居中/左对齐
+  - [x] 5.2 确保 ThreeQuestionHeader 在所有布局模式（three-panel/tabbed/degraded）下始终可见
 
-- [ ] Task 6: 单元测试 (AC: #1, #2, #4)
-  - [ ] 6.1 在 `tests/unit/test_three_question_header.py` 新建测试
-  - [ ] 6.2 测试四区域内容正确渲染（running/error/approvals/cost/time）
-  - [ ] 6.3 测试可判定状态显示逻辑（全正常/有异常/有审批/无审批）；若后续显式接入 paused 信号，再为 `⏸ 已暂停` 增补测试
-  - [ ] 6.4 测试三种 display_mode 格式输出（full/compact/minimal）
-  - [ ] 6.5 测试 `update_data()` 方法正确更新 reactive 属性
+- [x] Task 6: 单元测试 (AC: #1, #2, #4)
+  - [x] 6.1 在 `tests/unit/test_three_question_header.py` 新建测试
+  - [x] 6.2 测试四区域内容正确渲染（running/error/approvals/cost/time）
+  - [x] 6.3 测试可判定状态显示逻辑（全正常/有异常/有审批/无审批）；若后续显式接入 paused 信号，再为 `⏸ 已暂停` 增补测试
+  - [x] 6.4 测试三种 display_mode 格式输出（full/compact/minimal）
+  - [x] 6.5 测试 `update_data()` 方法正确更新 reactive 属性
 
-- [ ] Task 7: 集成测试 (AC: #3, #5)
-  - [ ] 7.1 在 `tests/integration/test_tui_pilot.py` 增加挂载 / 数据刷新集成测试，并在 `tests/integration/test_tui_responsive.py` 增加宽度切换相关测试
-  - [ ] 7.2 测试 ATOApp 启动后 ThreeQuestionHeader 显示初始数据
-  - [ ] 7.3 测试 mock SQLite 数据变化后 ThreeQuestionHeader 刷新显示
-  - [ ] 7.4 测试不同终端宽度下 ThreeQuestionHeader display_mode 切换，覆盖 `150 → 120 → 80 → 150` 的 three-panel / tabbed / degraded 往返路径
+- [x] Task 7: 集成测试 (AC: #3, #5)
+  - [x] 7.1 在 `tests/integration/test_tui_pilot.py` 增加挂载 / 数据刷新集成测试，并在 `tests/integration/test_tui_responsive.py` 增加宽度切换相关测试
+  - [x] 7.2 测试 ATOApp 启动后 ThreeQuestionHeader 显示初始数据
+  - [x] 7.3 测试 mock SQLite 数据变化后 ThreeQuestionHeader 刷新显示
+  - [x] 7.4 测试不同终端宽度下 ThreeQuestionHeader display_mode 切换，覆盖 `150 → 120 → 80 → 150` 的 three-panel / tabbed / degraded 往返路径
 
 ## Dev Notes
 
@@ -323,8 +323,35 @@ src/ato/tui/
 
 ### Agent Model Used
 
+Claude Opus 4.6 (1M context)
+
 ### Debug Log References
+
+- 全 1020 测试通过（0 failures），包含 18 新单元测试 + 12 新集成测试
+- ruff check + ruff format 通过
 
 ### Completion Notes List
 
+- ✅ ThreeQuestionHeader Widget 完整实现：四区域渲染 + 可判定状态逻辑（空闲/正常/异常/审批）
+- ✅ 三级响应式 display_mode（full/compact/minimal）独立于 layout_mode 断点
+- ✅ ATOApp 数据集成：GROUP BY status 查询保持 story_count 向后兼容
+- ✅ seconds_ago 正确计算：先基于上次刷新时间求差值，再更新时间戳
+- ✅ RICH_COLORS 统一在 theme.py 维护，TCSS 变量 → Rich hex 颜色映射
+- ✅ TCSS 样式：height 1, dock top, background $surface
+- ✅ 不伪造 ⏸ 已暂停（running=0 && error=0 显示"空闲"）
+- ✅ 保留 Header()，ThreeQuestionHeader 在其下方，不破坏 6.1a/6.1b 测试契约
+
 ### File List
+
+- `src/ato/tui/widgets/three_question_header.py` — 新建：ThreeQuestionHeader Widget
+- `src/ato/tui/widgets/__init__.py` — 修改：导出 ThreeQuestionHeader
+- `src/ato/tui/app.py` — 修改：compose() 添加 ThreeQuestionHeader、_load_data() 扩展 GROUP BY 查询、running_count/error_count reactive 属性、_update_dashboard() 推送 header 数据、_apply_header_mode() 宽度转发
+- `src/ato/tui/theme.py` — 修改：新增 RICH_COLORS 映射常量
+- `src/ato/tui/app.tcss` — 修改：添加 ThreeQuestionHeader 样式
+- `tests/unit/test_three_question_header.py` — 新建：18 个单元测试
+- `tests/integration/test_tui_pilot.py` — 修改：6 个 ThreeQuestionHeader 集成测试
+- `tests/integration/test_tui_responsive.py` — 修改：6 个 display_mode 响应式测试
+
+### Change Log
+
+- 2026-03-25: Story 6.2a 完整实现 — ThreeQuestionHeader Widget + 响应式适配 + ATOApp 数据集成 + TCSS 样式 + 30 个新测试

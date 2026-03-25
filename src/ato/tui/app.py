@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
@@ -15,6 +16,7 @@ from textual.reactive import reactive
 from textual.widgets import Footer, Header
 
 from ato.tui.dashboard import DashboardScreen
+from ato.tui.widgets.three_question_header import ThreeQuestionHeader
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
@@ -38,6 +40,8 @@ class ATOApp(App[None]):
 
     # Reactive 属性驱动 UI 更新
     story_count: reactive[int] = reactive(0)
+    running_count: reactive[int] = reactive(0)
+    error_count: reactive[int] = reactive(0)
     pending_approvals: reactive[int] = reactive(0)
     today_cost_usd: reactive[float] = reactive(0.0)
     last_updated: reactive[str] = reactive("")
@@ -49,15 +53,17 @@ class ATOApp(App[None]):
         super().__init__()
         self._db_path = db_path
         self._orchestrator_pid = orchestrator_pid
+        self._last_refresh_time: float = time.monotonic()
 
     def compose(self) -> ComposeResult:
-        """骨架布局：Header + DashboardScreen + Footer。"""
+        """骨架布局：Header + ThreeQuestionHeader + DashboardScreen + Footer。"""
         yield Header()
+        yield ThreeQuestionHeader()
         yield DashboardScreen()
         yield Footer()
 
     def on_resize(self, event: events.Resize) -> None:
-        """根据终端宽度切换布局模式 (AC3)。"""
+        """根据终端宽度切换布局模式 (AC3) 和 header display_mode。"""
         width = event.size.width
         if width >= 140:
             self.layout_mode = "three-panel"
@@ -67,6 +73,8 @@ class ATOApp(App[None]):
             self.layout_mode = "degraded"
         # 宽度传给 DashboardScreen 以调整面板比例
         self._apply_layout(width)
+        # ThreeQuestionHeader display_mode 使用独立断点
+        self._apply_header_mode(width)
 
     def watch_layout_mode(self, new_mode: str) -> None:
         """将布局模式变化转发给 DashboardScreen。"""
@@ -83,6 +91,24 @@ class ATOApp(App[None]):
         except NoMatches:
             return
         dashboard.adjust_panel_ratio(width)
+
+    def _apply_header_mode(self, width: int) -> None:
+        """根据终端宽度设置 ThreeQuestionHeader 的 display_mode。
+
+        独立断点（不复用 layout_mode）：
+        180+ → full, 140-179 → compact, <140 → minimal
+        """
+        if width >= 180:
+            mode = "full"
+        elif width >= 140:
+            mode = "compact"
+        else:
+            mode = "minimal"
+        try:
+            header = self.query_one(ThreeQuestionHeader)
+        except NoMatches:
+            return
+        header.set_display_mode(mode)
 
     def action_switch_tab(self, tab_number: int) -> None:
         """数字键切换 Tab（仅在 tabbed 模式下生效）。"""
@@ -112,12 +138,29 @@ class ATOApp(App[None]):
         """
         from ato.models.db import get_connection
 
+        # seconds_ago: 先基于上次成功刷新时间计算差值
+        now_mono = time.monotonic()
+        seconds_ago = int(now_mono - self._last_refresh_time)
+
         db = await get_connection(self._db_path)
         try:
-            # 1. Story 状态统计
-            cursor = await db.execute("SELECT COUNT(*) FROM stories")
-            row = await cursor.fetchone()
-            self.story_count = int(row[0]) if row else 0
+            # 1. Story 状态统计（分组查询获取 running/error 计数）
+            cursor = await db.execute("SELECT status, COUNT(*) as cnt FROM stories GROUP BY status")
+            rows = await cursor.fetchall()
+            total = 0
+            running = 0
+            error = 0
+            for row in rows:
+                status_val = row[0]
+                cnt = int(row[1])
+                total += cnt
+                if status_val == "in_progress":
+                    running += cnt
+                elif status_val == "blocked":
+                    error += cnt
+            self.story_count = total
+            self.running_count = running
+            self.error_count = error
 
             # 2. Pending approvals 计数
             cursor = await db.execute("SELECT COUNT(*) FROM approvals WHERE status = 'pending'")
@@ -137,10 +180,14 @@ class ATOApp(App[None]):
         finally:
             await db.close()
 
-        self._update_dashboard()
+        # 仅在成功加载后才更新基准时间，失败时保持旧值
+        # 这样恢复后 seconds_ago 反映的是"距上次成功加载"的真实间隔
+        self._last_refresh_time = now_mono
 
-    def _update_dashboard(self) -> None:
-        """根据当前数据更新 DashboardScreen 显示。"""
+        self._update_dashboard(seconds_ago=seconds_ago)
+
+    def _update_dashboard(self, *, seconds_ago: int = 0) -> None:
+        """根据当前数据更新 DashboardScreen 和 ThreeQuestionHeader 显示。"""
         try:
             dashboard = self.query_one(DashboardScreen)
             dashboard.update_content(
@@ -151,6 +198,18 @@ class ATOApp(App[None]):
             )
         except NoMatches:
             pass  # DashboardScreen 尚未挂载
+
+        try:
+            header = self.query_one(ThreeQuestionHeader)
+            header.update_data(
+                running_count=self.running_count,
+                error_count=self.error_count,
+                pending_approvals=self.pending_approvals,
+                today_cost_usd=self.today_cost_usd,
+                seconds_ago=seconds_ago,
+            )
+        except NoMatches:
+            pass  # ThreeQuestionHeader 尚未挂载
 
     async def refresh_data(self) -> None:
         """定时轮询回调——重新加载 SQLite 数据。

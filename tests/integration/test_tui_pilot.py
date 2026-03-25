@@ -15,6 +15,7 @@ import pytest
 from ato.models.db import get_connection, init_db
 from ato.tui.app import ATOApp
 from ato.tui.dashboard import DashboardScreen
+from ato.tui.widgets.three_question_header import ThreeQuestionHeader
 
 
 @pytest.fixture()
@@ -311,3 +312,127 @@ async def test_write_approval_stale_pid_no_crash(tui_db_path: Path) -> None:
         assert row[0] == "approved"
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Story 6.2a: ThreeQuestionHeader 集成测试
+# ---------------------------------------------------------------------------
+
+
+async def test_three_question_header_mounted(tui_db_path: Path) -> None:
+    """AC5: ATOApp 启动后 ThreeQuestionHeader 存在。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        header = app.query_one(ThreeQuestionHeader)
+        assert header is not None
+
+
+async def test_three_question_header_initial_data_empty_db(tui_db_path: Path) -> None:
+    """AC5: 空数据库时 ThreeQuestionHeader 显示空闲/无待处理。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.running_count == 0
+        assert header.error_count == 0
+        assert header.pending_approvals == 0
+        assert header.today_cost_usd == 0.0
+
+
+async def test_three_question_header_shows_running_count(tui_db_path: Path) -> None:
+    """AC1/AC5: in_progress stories 正确映射到 running_count。"""
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        for i in range(3):
+            await db.execute(
+                "INSERT INTO stories (story_id, title, status, current_phase, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (f"s{i}", f"Story {i}", "in_progress", "developing", now, now),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        assert app.running_count == 3
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.running_count == 3
+
+
+async def test_three_question_header_shows_error_count(tui_db_path: Path) -> None:
+    """AC4: blocked stories 正确映射到 error_count。"""
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        await db.execute(
+            "INSERT INTO stories (story_id, title, status, current_phase, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s1", "Story 1", "in_progress", "developing", now, now),
+        )
+        await db.execute(
+            "INSERT INTO stories (story_id, title, status, current_phase, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s2", "Story 2", "blocked", "review", now, now),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        assert app.running_count == 1
+        assert app.error_count == 1
+        assert app.story_count == 2
+
+
+async def test_three_question_header_refresh_updates(tui_db_path: Path) -> None:
+    """AC3: 数据刷新后 ThreeQuestionHeader 更新显示。"""
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        header = app.query_one(ThreeQuestionHeader)
+        assert header.running_count == 0
+
+        # 插入数据后刷新
+        db = await get_connection(tui_db_path)
+        try:
+            now = datetime.now(tz=UTC).isoformat()
+            await db.execute(
+                "INSERT INTO stories (story_id, title, status, current_phase, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("s1", "Story", "in_progress", "developing", now, now),
+            )
+            await db.execute(
+                "INSERT INTO approvals (approval_id, story_id, approval_type, "
+                "status, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("a1", "s1", "code_review", "pending", now),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        await app.refresh_data()
+        assert header.running_count == 1
+        assert header.pending_approvals == 1
+
+
+async def test_story_count_preserved_with_grouped_query(tui_db_path: Path) -> None:
+    """AC5: GROUP BY 查询仍然正确维护 story_count 总量。"""
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        for i, status in enumerate(["in_progress", "blocked", "done", "ready"]):
+            await db.execute(
+                "INSERT INTO stories (story_id, title, status, current_phase, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (f"s{i}", f"Story {i}", status, "phase", now, now),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        assert app.story_count == 4
+        assert app.running_count == 1
+        assert app.error_count == 1

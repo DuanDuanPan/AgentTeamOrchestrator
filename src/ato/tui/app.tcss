@@ -55,6 +55,15 @@ Screen {
     text-style: bold;
 }
 
+/* ===== ThreeQuestionHeader (Story 6.2a) ===== */
+
+ThreeQuestionHeader {
+    height: 1;
+    background: $surface;
+    color: $text;
+    padding: 0 1;
+}
+
 /* ===== DashboardScreen 容器 ===== */
 
 DashboardScreen {

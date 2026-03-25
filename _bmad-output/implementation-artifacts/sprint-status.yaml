@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-24
-last_updated: 2026-03-25
+last_updated: 2026-03-25T00:00:00
 project: AgentTeamOrchestrator
 project_key: NOKEY
 tracking_system: file-system
@@ -99,7 +99,7 @@ development_status:
   epic-6: in-progress
   6-1a-tui-launch-sqlite-connection: done
   6-1b-dark-theme-responsive-layout: done
-  6-2a-three-question-header: ready-for-dev
+  6-2a-three-question-header: done
   6-2b-dashboard-story-list: backlog
   6-3a-standard-approval-interaction: backlog
   6-3b-exception-approval-multi-select: backlog

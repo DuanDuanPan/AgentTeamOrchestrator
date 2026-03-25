@@ -83,3 +83,18 @@ def map_approval_to_visual_status(status: str) -> str:
 def map_task_to_visual_status(status: str) -> str:
     """将 TaskStatus 映射到展示语义。"""
     return _TASK_STATUS_MAP.get(status, "info")
+
+
+# ---------------------------------------------------------------------------
+# TCSS 变量 → Rich hex 颜色映射（ThreeQuestionHeader 等 render() 用）
+# ---------------------------------------------------------------------------
+
+RICH_COLORS: dict[str, str] = {
+    "$success": "#50fa7b",
+    "$warning": "#f1fa8c",
+    "$error": "#ff5555",
+    "$info": "#8be9fd",
+    "$accent": "#bd93f9",
+    "$muted": "#8390b7",
+    "$text": "#f8f8f2",
+}
