@@ -346,13 +346,17 @@ class SubprocessManager:
         prompt: str,
         options: dict[str, Any] | None = None,
         max_retries: int = 1,
+        task_id: str | None = None,
+        is_retry: bool = False,
     ) -> AdapterResult:
         """带自动重试的调度。retryable 错误最多重试 max_retries 次。
 
         Fix #1: task_id 在首次调用时生成，重试时传入同一 task_id。
+        crash recovery 可传入既有 task_id，并从首次尝试起按 retry/update 语义续跑。
         一个逻辑任务 → 一条 tasks 记录 + N 条 cost_log 记录。
         """
-        task_id = str(uuid.uuid4())
+        if task_id is None:
+            task_id = str(uuid.uuid4())
         last_exc: CLIAdapterError | None = None
         for attempt in range(max_retries + 1):
             try:
@@ -364,7 +368,7 @@ class SubprocessManager:
                     prompt=prompt,
                     options=options,
                     task_id=task_id,
-                    is_retry=attempt > 0,
+                    is_retry=is_retry or attempt > 0,
                 )
             except CLIAdapterError as exc:
                 last_exc = exc

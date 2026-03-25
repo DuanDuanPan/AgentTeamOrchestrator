@@ -110,7 +110,7 @@ class TestRecoveryDetection:
             await db.close()
 
     async def test_crash_recovery_running_tasks(self, initialized_db_path: Path) -> None:
-        """有 running tasks 时输出崩溃恢复日志。"""
+        """有 running tasks 时进入崩溃恢复模式并返回 RecoveryResult。"""
         from ato.models.db import get_connection
 
         await _insert_test_task(initialized_db_path, status="running")
@@ -119,14 +119,14 @@ class TestRecoveryDetection:
         orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
         db = await get_connection(initialized_db_path)
         try:
-            with patch("ato.core.logger") as mock_logger:
-                await orchestrator._detect_recovery_mode(db)
-                mock_logger.warning.assert_any_call("crash_recovery_detected", running_tasks=1)
+            result = await orchestrator._detect_recovery_mode(db)
+            assert result is not None
+            assert result.recovery_mode == "crash"
         finally:
             await db.close()
 
     async def test_graceful_recovery_paused_tasks(self, initialized_db_path: Path) -> None:
-        """有 paused tasks 时输出正常恢复日志。"""
+        """有 paused tasks 时进入正常恢复模式并返回 RecoveryResult。"""
         from ato.models.db import get_connection
 
         await _insert_test_task(initialized_db_path, status="paused")
@@ -135,9 +135,9 @@ class TestRecoveryDetection:
         orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
         db = await get_connection(initialized_db_path)
         try:
-            with patch("ato.core.logger") as mock_logger:
-                await orchestrator._detect_recovery_mode(db)
-                mock_logger.info.assert_any_call("graceful_recovery_detected", paused_tasks=1)
+            result = await orchestrator._detect_recovery_mode(db)
+            assert result is not None
+            assert result.recovery_mode == "normal"
         finally:
             await db.close()
 

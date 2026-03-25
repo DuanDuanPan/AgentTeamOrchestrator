@@ -494,6 +494,42 @@ class ContextBriefing(_StrictBase):
     created_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Recovery 相关类型 (Story 5.1a)
+# ---------------------------------------------------------------------------
+
+RecoveryAction = Literal["reattach", "complete", "reschedule", "needs_human"]
+"""恢复动作：reattach / complete / reschedule / needs_human。"""
+
+RecoveryMode = Literal["crash", "normal", "none"]
+"""恢复模式：crash 崩溃恢复 / normal 正常恢复（paused）/ none 无恢复。"""
+
+
+class RecoveryClassification(_StrictBase):
+    """单个 task 的恢复分类结果。"""
+
+    task_id: str
+    story_id: str
+    action: RecoveryAction
+    reason: str
+
+
+class RecoveryResult(_StrictBase):
+    """RecoveryEngine.run_recovery() 返回的恢复结果摘要。
+
+    计数语义：
+    - auto_recovered_count: 同步完成的恢复（reattach / complete）
+    - dispatched_count: 已启动后台恢复但结果待定（reschedule structured/convergent）
+    - needs_human_count: 需要人工决策
+    """
+
+    classifications: list[RecoveryClassification]
+    auto_recovered_count: int
+    dispatched_count: int = 0
+    needs_human_count: int
+    recovery_mode: RecoveryMode
+
+
 class BmadSkillType(StrEnum):
     """BMAD skill 类型枚举，支持 workflow 名称/别名归一化。"""
 

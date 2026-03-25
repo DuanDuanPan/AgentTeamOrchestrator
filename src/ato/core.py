@@ -17,13 +17,12 @@ from structlog.contextvars import bind_contextvars
 
 from ato.config import ATOSettings
 from ato.models.db import (
-    count_tasks_by_status,
     get_connection,
     get_tasks_by_status,
     insert_approval,
     mark_running_tasks_paused,
 )
-from ato.models.schemas import ApprovalRecord, TransitionEvent
+from ato.models.schemas import ApprovalRecord, RecoveryResult, TransitionEvent
 from ato.nudge import Nudge
 from ato.transition_queue import TransitionQueue
 
@@ -271,7 +270,11 @@ class Orchestrator:
                 count = await mark_running_tasks_paused(db)
                 await db.commit()
                 if count > 0:
-                    logger.info("shutdown_tasks_paused", count=count)
+                    logger.info(
+                        "shutdown_tasks_paused",
+                        count=count,
+                        stopped_at=datetime.now(tz=UTC).isoformat(),
+                    )
             finally:
                 await db.close()
         except Exception as exc:
@@ -366,25 +369,54 @@ class Orchestrator:
             finally:
                 await db.close()
 
-    async def _detect_recovery_mode(self, db: object) -> None:
-        """启动时扫描 tasks 表，检测恢复模式并输出日志。
+    async def _detect_recovery_mode(self, db: object) -> RecoveryResult | None:
+        """启动时扫描 tasks 表并执行恢复。
 
-        仅做检测和 structlog 输出，不执行实际恢复（Epic 5 范畴）。
+        基于 task 状态自动判断恢复模式：
+        - status='running' → 崩溃恢复路径（调用 RecoveryEngine 四路分类）
+        - status='paused'  → 正常恢复路径（直接重调度）
+        两条路径互斥。
+
+        Returns:
+            RecoveryResult 恢复结果，或 None（db 不可用时）。
         """
         import aiosqlite
 
         if not isinstance(db, aiosqlite.Connection):
-            return
+            return None
 
-        running = await count_tasks_by_status(db, "running")
-        paused = await count_tasks_by_status(db, "paused")
+        from ato.config import build_phase_definitions
+        from ato.recovery import RecoveryEngine
 
-        if running > 0:
-            logger.warning("crash_recovery_detected", running_tasks=running)
-        elif paused > 0:
-            logger.info("graceful_recovery_detected", paused_tasks=paused)
-        else:
+        # 构建 phase 类型集合
+        phase_defs = build_phase_definitions(self._settings)
+        interactive_phases = {
+            pd.name for pd in phase_defs if pd.phase_type == "interactive_session"
+        }
+        convergent_loop_phases = {
+            pd.name for pd in phase_defs if pd.phase_type == "convergent_loop"
+        }
+
+        engine = RecoveryEngine(
+            db_path=self._db_path,
+            subprocess_mgr=None,
+            transition_queue=self._tq if self._tq is not None else self._create_tq_stub(),
+            nudge=self._nudge,
+            interactive_phases=interactive_phases,
+            convergent_loop_phases=convergent_loop_phases,
+            settings=self._settings,
+        )
+
+        result = await engine.run_recovery()
+
+        if result.recovery_mode == "none":
             logger.info("fresh_start", message="无待恢复任务")
+
+        return result
+
+    def _create_tq_stub(self) -> TransitionQueue:
+        """为恢复阶段创建 TransitionQueue 占位（不应实际使用）。"""
+        return TransitionQueue(self._db_path, nudge=self._nudge)
 
     def _request_shutdown(self) -> None:
         """SIGTERM handler：标记停止并唤醒轮询循环。"""
