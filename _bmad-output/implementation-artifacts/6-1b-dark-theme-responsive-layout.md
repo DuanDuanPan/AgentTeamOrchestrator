@@ -1,6 +1,6 @@
 # Story 6.1b: 操作者可看到统一的深色主题和响应式布局
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -64,44 +64,44 @@ So that 视觉体验专业统一，不同终端宽度都可用。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 完整 TCSS 主题系统 (AC: #1, #5)
-  - [ ] 1.1 在 `src/ato/tui/app.tcss` 扩展 9 个语义色彩变量（当前仅有 3 个：$background/$surface/$text），新增 $success/$warning/$error/$info/$accent/$muted；`$muted` 必须选择能通过对比度测试的可访问变体，不要直接照抄 `#6272a4`
-  - [ ] 1.2 添加全局排版规则：Screen 背景色、默认文字色、焦点/选中样式
-  - [ ] 1.3 添加面板基础样式：边框色（默认 `$muted`，焦点 `$accent`）、padding/margin 间距
-  - [ ] 1.4 添加文字层级 CSS 类：`.h1`（大写粗体 accent）、`.h2`（粗体 text）、`.body`（常规 text）、`.secondary`（muted）、`.emphasis`（粗体+语义色）
-  - [ ] 1.5 编写 WCAG 对比度验证测试：`tests/unit/test_theme_contrast.py`——使用纯 Python 计算 `$success/$warning/$error/$info/$accent/$muted/$text` 与 `$background` 的相对亮度比值 ≥ 4.5:1；若 Dracula 原值不满足，则以测试通过后的可访问变体为准
+- [x] Task 1: 完整 TCSS 主题系统 (AC: #1, #5)
+  - [x] 1.1 在 `src/ato/tui/app.tcss` 扩展 9 个语义色彩变量（当前仅有 3 个：$background/$surface/$text），新增 $success/$warning/$error/$info/$accent/$muted；`$muted` 必须选择能通过对比度测试的可访问变体，不要直接照抄 `#6272a4`
+  - [x] 1.2 添加全局排版规则：Screen 背景色、默认文字色、焦点/选中样式
+  - [x] 1.3 添加面板基础样式：边框色（默认 `$muted`，焦点 `$accent`）、padding/margin 间距
+  - [x] 1.4 添加文字层级 CSS 类：`.h1`（大写粗体 accent）、`.h2`（粗体 text）、`.body`（常规 text）、`.secondary`（muted）、`.emphasis`（粗体+语义色）
+  - [x] 1.5 编写 WCAG 对比度验证测试：`tests/unit/test_theme_contrast.py`——使用纯 Python 计算 `$success/$warning/$error/$info/$accent/$muted/$text` 与 `$background` 的相对亮度比值 ≥ 4.5:1；若 Dracula 原值不满足，则以测试通过后的可访问变体为准
 
-- [ ] Task 2: 三重状态编码模块 (AC: #2)
-  - [ ] 2.1 在 `src/ato/tui/theme.py` 创建状态编码常量模块
-  - [ ] 2.2 定义 `StatusCode` 数据类：`icon: str`、`color_var: str`、`label: str`
-  - [ ] 2.3 定义 `STATUS_CODES: dict[str, StatusCode]` 映射（展示语义：running/active/awaiting/failed/done/frozen/info）
-  - [ ] 2.4 提供两层 helper：`map_*_to_visual_status(...)` 负责把现有 `stories.status/current_phase`、`approvals.status`、必要时 `tasks.status` 映射到展示语义；`format_status(visual_status: str) -> StatusCode` 负责返回 icon/color/label
-  - [ ] 2.5 在 `tests/unit/test_theme.py` 编写测试：验证所有展示语义完整性、无缺失图标/颜色/标签，且当前 `StoryStatus` / `ApprovalStatus` / `TaskStatus` 均能映射到合法展示语义
+- [x] Task 2: 三重状态编码模块 (AC: #2)
+  - [x] 2.1 在 `src/ato/tui/theme.py` 创建状态编码常量模块
+  - [x] 2.2 定义 `StatusCode` 数据类：`icon: str`、`color_var: str`、`label: str`
+  - [x] 2.3 定义 `STATUS_CODES: dict[str, StatusCode]` 映射（展示语义：running/active/awaiting/failed/done/frozen/info）
+  - [x] 2.4 提供两层 helper：`map_*_to_visual_status(...)` 负责把现有 `stories.status/current_phase`、`approvals.status`、必要时 `tasks.status` 映射到展示语义；`format_status(visual_status: str) -> StatusCode` 负责返回 icon/color/label
+  - [x] 2.5 在 `tests/unit/test_theme.py` 编写测试：验证所有展示语义完整性、无缺失图标/颜色/标签，且当前 `StoryStatus` / `ApprovalStatus` / `TaskStatus` 均能映射到合法展示语义
 
-- [ ] Task 3: 响应式布局引擎 (AC: #3, #4)
-  - [ ] 3.1 在 `src/ato/tui/app.py` 的 `ATOApp` 中添加 `layout_mode: reactive[str]` 属性（值："three-panel" / "tabbed" / "degraded"）
-  - [ ] 3.2 实现 `on_resize(self, event: events.Resize)` 方法：根据 `event.size.width` 判断断点并更新 `layout_mode`
-  - [ ] 3.3 实现 `watch_layout_mode(self, new_mode: str)` 方法：只负责把模式变化转发给已挂载的 `DashboardScreen`（例如 `set_layout_mode(new_mode)`），不要让 `ATOApp` 自己持有三面板/Tab 结构
-  - [ ] 3.4 保持 `ATOApp.compose()` 继续渲染 `Header + DashboardScreen + Footer`；响应式内部布局全部由 `DashboardScreen` 管理
-  - [ ] 3.5 在 `tests/integration/test_tui_responsive.py` 编写 Textual `pilot` 响应式测试：用 `app.run_test(size=(cols, rows))` 模拟不同终端宽度（80/120/150/200 列），验证正确的布局模式激活
-  - [ ] 3.6 响应式测试需覆盖 resize 后模式切换时，当前展示数据和焦点上下文不会被重置
+- [x] Task 3: 响应式布局引擎 (AC: #3, #4)
+  - [x] 3.1 在 `src/ato/tui/app.py` 的 `ATOApp` 中添加 `layout_mode: reactive[str]` 属性（值："three-panel" / "tabbed" / "degraded"）
+  - [x] 3.2 实现 `on_resize(self, event: events.Resize)` 方法：根据 `event.size.width` 判断断点并更新 `layout_mode`
+  - [x] 3.3 实现 `watch_layout_mode(self, new_mode: str)` 方法：只负责把模式变化转发给已挂载的 `DashboardScreen`（例如 `set_layout_mode(new_mode)`），不要让 `ATOApp` 自己持有三面板/Tab 结构
+  - [x] 3.4 保持 `ATOApp.compose()` 继续渲染 `Header + DashboardScreen + Footer`；响应式内部布局全部由 `DashboardScreen` 管理
+  - [x] 3.5 在 `tests/integration/test_tui_responsive.py` 编写 Textual `pilot` 响应式测试：用 `app.run_test(size=(cols, rows))` 模拟不同终端宽度（80/120/150/200 列），验证正确的布局模式激活
+  - [x] 3.6 响应式测试需覆盖 resize 后模式切换时，当前展示数据和焦点上下文不会被重置
 
-- [ ] Task 4: DashboardScreen 升级为布局容器 (AC: #3, #4)
-  - [ ] 4.1 将 `src/ato/tui/dashboard.py` 的 `DashboardScreen` 从单行 `Static` 重构为复合 Widget/容器；本 Story 不要把它升格为 Textual `Screen`，以保持 `ATOApp.compose()` 可直接挂载
-  - [ ] 4.2 `compose()` 中创建 `ContentSwitcher` 根容器，内部包含 `three-panel` / `tabbed` / `degraded` 三种子布局
-  - [ ] 4.3 三面板模式（≥140 列）：`Horizontal(left_panel, right_panel)`；左面板 `width: 40%`，右面板 `width: 60%`（180+列时 30%/70%）
-  - [ ] 4.4 左面板使用 `Static` 占位（显示 story 计数文字，后续 6.2b 替换为 DataTable）；右面板上下分区：右上 `Static`（联动详情占位）+ 右下 `Static`（操作区域占位）
-  - [ ] 4.5 Tab 模式（100-139 列）：用 `TabbedContent` 包含多个 `TabPane`，Tab 标签：`[1]审批` `[2]Stories` `[3]成本` `[4]日志`
-  - [ ] 4.6 降级模式（<100 列）：显示 `Static` 警告文字："终端宽度不足 100 列，请扩大终端窗口或使用 CLI 命令"
-  - [ ] 4.7 保留并扩展 `DashboardScreen.update_content()`，让现有 reactive 数据仍能刷新占位内容；新增 `set_layout_mode()` 或等价接口承接 `ATOApp.watch_layout_mode`
-  - [ ] 4.8 更新现有 `tests/integration/test_tui_pilot.py` 测试以适配新的 `DashboardScreen` 结构
+- [x] Task 4: DashboardScreen 升级为布局容器 (AC: #3, #4)
+  - [x] 4.1 将 `src/ato/tui/dashboard.py` 的 `DashboardScreen` 从单行 `Static` 重构为复合 Widget/容器；本 Story 不要把它升格为 Textual `Screen`，以保持 `ATOApp.compose()` 可直接挂载
+  - [x] 4.2 `compose()` 中创建 `ContentSwitcher` 根容器，内部包含 `three-panel` / `tabbed` / `degraded` 三种子布局
+  - [x] 4.3 三面板模式（≥140 列）：`Horizontal(left_panel, right_panel)`；左面板 `width: 40%`，右面板 `width: 60%`（180+列时 30%/70%）
+  - [x] 4.4 左面板使用 `Static` 占位（显示 story 计数文字，后续 6.2b 替换为 DataTable）；右面板上下分区：右上 `Static`（联动详情占位）+ 右下 `Static`（操作区域占位）
+  - [x] 4.5 Tab 模式（100-139 列）：用 `TabbedContent` 包含多个 `TabPane`，Tab 标签：`[1]审批` `[2]Stories` `[3]成本` `[4]日志`
+  - [x] 4.6 降级模式（<100 列）：显示 `Static` 警告文字："终端宽度不足 100 列，请扩大终端窗口或使用 CLI 命令"
+  - [x] 4.7 保留并扩展 `DashboardScreen.update_content()`，让现有 reactive 数据仍能刷新占位内容；新增 `set_layout_mode()` 或等价接口承接 `ATOApp.watch_layout_mode`
+  - [x] 4.8 更新现有 `tests/integration/test_tui_pilot.py` 测试以适配新的 `DashboardScreen` 结构
 
-- [ ] Task 5: 焦点管理与键盘导航 (AC: #3, #4)
-  - [ ] 5.1 实现 `Tab`/`Shift-Tab` 在面板间循环切换焦点
-  - [ ] 5.2 焦点面板边框动态切换：获得焦点时 `$accent`，失去焦点时 `$muted`
-  - [ ] 5.3 窄终端 Tab 模式下数字键 `1`/`2`/`3`/`4` 切换 Tab
-  - [ ] 5.4 `q` 退出和 `ESC` 返回上层导航保持不变
-  - [ ] 5.5 在 `tests/integration/test_tui_responsive.py` 增加键盘导航测试
+- [x] Task 5: 焦点管理与键盘导航 (AC: #3, #4)
+  - [x] 5.1 实现 `Tab`/`Shift-Tab` 在面板间循环切换焦点
+  - [x] 5.2 焦点面板边框动态切换：获得焦点时 `$accent`，失去焦点时 `$muted`
+  - [x] 5.3 窄终端 Tab 模式下数字键 `1`/`2`/`3`/`4` 切换 Tab
+  - [x] 5.4 `q` 退出和 `ESC` 返回上层导航保持不变
+  - [x] 5.5 在 `tests/integration/test_tui_responsive.py` 增加键盘导航测试
 
 ## Dev Notes
 
@@ -334,15 +334,44 @@ def contrast_ratio(fg: str, bg: str) -> float:
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- Textual 不支持 `text-transform: uppercase` CSS 属性，`.h1` 样式移除该规则（H1 大写由 Python 侧控制）
+- `Vertical` 构造器不接受 `can_focus` 参数，改用 `_FocusablePanel(Vertical)` 子类设置 `CAN_FOCUS = True`
+- Textual `pilot.resize_terminal()` 是正确的 resize 模拟 API（非 `app.set_size()`）
+- mypy 报告 `# type: ignore[misc]` 在 `ATOApp(App[None])` 和 `DashboardScreen(Widget)` 上不再需要，已移除
+- **[Code Review Fix]** Textual 8.1.1 中子类 `CAN_FOCUS = True` 不生效——Vertical.__init__ 固定 `can_focus=False`，需在 `__init__` 后显式赋值 `self.can_focus = True`
+- **[Code Review Fix]** ContentSwitcher 隐藏模式中的 TabbedContent/ContentTabs 仍在焦点链中——通过 `_sync_focus_chain()` 在模式切换时 disable 非活跃模式的可聚焦控件
+- **[Code Review Fix]** 180+ 列面板比例需在 `on_resize` 中传递宽度给 `DashboardScreen.adjust_panel_ratio()` 动态设置 CSS width
+- **[Code Review R2 Fix]** `_sync_focus_chain` disable 面板后 Textual 自动 blur，但 re-enable 后不自动 re-focus——新增 `_saved_focus` dict 按模式保存/恢复焦点 widget id，`_restore_focus()` 在切换后恢复焦点或 fallback 到模式首个可聚焦控件
+- **[Code Review R2 Fix]** tabbed 模式的 `TabbedContent` 自身 `can_focus=False`，焦点恢复需找到内部 `ContentTabs` 子控件
+
 ### Completion Notes List
 
+- ✅ Task 1: 完整 TCSS 主题 — 9 个 Dracula 变体语义色 + 文字层级 + 面板焦点样式，$muted 使用可访问变体 #8390b7
+- ✅ Task 2: 三重状态编码模块 — StatusCode frozen dataclass + 7 展示语义 + 3 个领域→视觉映射函数
+- ✅ Task 3: 响应式布局引擎 — ATOApp.layout_mode reactive + on_resize 三断点 + watch_layout_mode 转发
+- ✅ Task 4: DashboardScreen 升级 — Static → Widget + ContentSwitcher 三模式 + _FocusablePanel + update_content 保持兼容
+- ✅ Task 5: 焦点管理 — Tab/Shift-Tab 面板切换 + :focus-within 边框高亮 + 数字键 1-4 Tab 切换
+- ✅ Code Review R1 修复（4 项）：焦点链 + 180+ 比例 + 全模式数据同步 + 测试语义加强
+- ✅ Code Review R2 修复（2 项）：布局切换焦点保存/恢复 + 焦点保持测试改为 resize 后无按键断言
+
 ### File List
+
+- src/ato/tui/app.py（修改）— 添加 layout_mode reactive + on_resize + watch_layout_mode + action_switch_tab + _apply_layout
+- src/ato/tui/app.tcss（重写）— 9 语义色变量 + 面板/焦点/文字层级样式
+- src/ato/tui/dashboard.py（重写）— Static → Widget + ContentSwitcher + _FocusablePanel(id/can_focus) + _sync_focus_chain + _saved_focus/_restore_focus + adjust_panel_ratio + 全模式 _refresh_placeholders
+- src/ato/tui/theme.py（新建）— StatusCode + STATUS_CODES + domain→visual 映射
+- tests/unit/test_theme_contrast.py（新建）— 12 个 WCAG AA 对比度验证测试
+- tests/unit/test_theme.py（新建）— 35 个状态编码完整性测试
+- tests/integration/test_tui_responsive.py（新建）— 23 个响应式+焦点保持+数据同步+比例验证测试
 
 ### Change Log
 
 - 2026-03-25: create-story 创建 — 基于 epics/architecture/PRD/UX-spec/前置 story 6.1a 分析生成完整开发上下文
 - 2026-03-25: validate-create-story 修订 —— 解决 `$muted` 与 WCAG 约束冲突；移除 `DashboardScreen` 升格为 `Screen` 的错误实现方向；统一 ATOApp/DashboardScreen 响应式职责；把 Textual pilot 示例改为 `run_test(size=...)`；补齐领域状态到展示语义的映射约束
+- 2026-03-25: dev-story 实现完成 — 5 个 Task 全部完成，66 个新测试（12+35+19），全量 944 测试通过零回归
+- 2026-03-25: code-review R1 修复 — 修复 4 项 findings（1 高 3 中）：焦点链修复（_FocusablePanel.__init__ + _sync_focus_chain）、180+ 列 30/70 面板比例（adjust_panel_ratio）、全模式数据同步（Tab/降级占位更新）、测试加强（ContentSwitcher.current 可见性验证 + 面板类型断言 + 数据内容断言），全量 946 测试通过零回归
+- 2026-03-25: code-review R2 修复 — 修复 2 项 findings（1 中 1 低）：布局切换焦点保存/恢复（_saved_focus dict + _restore_focus 回退到模式首个可聚焦控件）、焦点保持测试改为 resize 后立即断言无额外按键，全量 948 测试通过零回归

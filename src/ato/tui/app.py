@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import structlog
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import BindingType
 from textual.css.query import NoMatches
@@ -18,7 +19,7 @@ from ato.tui.dashboard import DashboardScreen
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 
-class ATOApp(App[None]):  # type: ignore[misc]
+class ATOApp(App[None]):
     """ATO TUI 主应用。
 
     作为独立前台进程运行，通过 SQLite 与后台 Orchestrator 通信。
@@ -27,7 +28,13 @@ class ATOApp(App[None]):  # type: ignore[misc]
 
     CSS_PATH = "app.tcss"
     TITLE = "Agent Team Orchestrator"
-    BINDINGS: ClassVar[list[BindingType]] = [("q", "quit", "退出")]
+    BINDINGS: ClassVar[list[BindingType]] = [
+        ("q", "quit", "退出"),
+        ("1", "switch_tab(1)", "Tab 1"),
+        ("2", "switch_tab(2)", "Tab 2"),
+        ("3", "switch_tab(3)", "Tab 3"),
+        ("4", "switch_tab(4)", "Tab 4"),
+    ]
 
     # Reactive 属性驱动 UI 更新
     story_count: reactive[int] = reactive(0)
@@ -35,16 +42,62 @@ class ATOApp(App[None]):  # type: ignore[misc]
     today_cost_usd: reactive[float] = reactive(0.0)
     last_updated: reactive[str] = reactive("")
 
+    # 响应式布局模式 (AC3)
+    layout_mode: reactive[str] = reactive("three-panel")
+
     def __init__(self, *, db_path: Path, orchestrator_pid: int | None = None) -> None:
         super().__init__()
         self._db_path = db_path
         self._orchestrator_pid = orchestrator_pid
 
     def compose(self) -> ComposeResult:
-        """最小布局：Header + DashboardScreen + Footer。"""
+        """骨架布局：Header + DashboardScreen + Footer。"""
         yield Header()
         yield DashboardScreen()
         yield Footer()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """根据终端宽度切换布局模式 (AC3)。"""
+        width = event.size.width
+        if width >= 140:
+            self.layout_mode = "three-panel"
+        elif width >= 100:
+            self.layout_mode = "tabbed"
+        else:
+            self.layout_mode = "degraded"
+        # 宽度传给 DashboardScreen 以调整面板比例
+        self._apply_layout(width)
+
+    def watch_layout_mode(self, new_mode: str) -> None:
+        """将布局模式变化转发给 DashboardScreen。"""
+        try:
+            dashboard = self.query_one(DashboardScreen)
+        except NoMatches:
+            return
+        dashboard.set_layout_mode(new_mode)
+
+    def _apply_layout(self, width: int) -> None:
+        """将终端宽度传给 DashboardScreen 以调整面板比例。"""
+        try:
+            dashboard = self.query_one(DashboardScreen)
+        except NoMatches:
+            return
+        dashboard.adjust_panel_ratio(width)
+
+    def action_switch_tab(self, tab_number: int) -> None:
+        """数字键切换 Tab（仅在 tabbed 模式下生效）。"""
+        if self.layout_mode != "tabbed":
+            return
+        try:
+            from textual.widgets import TabbedContent
+
+            dashboard = self.query_one(DashboardScreen)
+            tabbed = dashboard.query_one(TabbedContent)
+            tabs = list(tabbed.query("TabPane"))
+            if 1 <= tab_number <= len(tabs):
+                tabbed.active = tabs[tab_number - 1].id or ""
+        except NoMatches:
+            pass
 
     async def on_mount(self) -> None:
         """首次数据加载 + 启动 2 秒定时轮询。"""
