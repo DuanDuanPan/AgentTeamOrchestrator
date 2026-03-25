@@ -74,7 +74,7 @@ development_status:
   3-1-deterministic-validation-finding-tracking: done
   3-2a-convergent-loop-full-review: done
   3-2b-fix-dispatch-artifact-verification: done
-  3-2c-re-review-scope-narrowing: backlog
+  3-2c-re-review-scope-narrowing: ready-for-dev
   3-2d-convergence-termination: backlog
   3-3-convergence-trust-escalation: backlog
   epic-3-retrospective: optional
@@ -91,14 +91,14 @@ development_status:
   # ===== Epic 5: 崩溃恢复与可观测性 =====
   epic-5: in-progress
   5-1a-crash-recovery-auto-resume: done
-  5-1b-crash-recovery-performance-testing: backlog
+  5-1b-crash-recovery-performance-testing: ready-for-dev
   5-2-recovery-summary-execution-history: backlog
   epic-5-retrospective: optional
 
   # ===== Epic 6: TUI 指挥台 =====
   epic-6: in-progress
   6-1a-tui-launch-sqlite-connection: done
-  6-1b-dark-theme-responsive-layout: backlog
+  6-1b-dark-theme-responsive-layout: ready-for-dev
   6-2a-three-question-header: backlog
   6-2b-dashboard-story-list: backlog
   6-3a-standard-approval-interaction: backlog
