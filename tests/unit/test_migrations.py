@@ -204,3 +204,52 @@ class TestMigrationV2:
             tables = [r[0] for r in await cursor.fetchall()]
             assert "batches" in tables
             assert "batch_stories" in tables
+
+
+class TestMigrationV5:
+    """MIGRATIONS[5] — findings 表迁移测试（Story 3.1）。"""
+
+    async def test_migration_v4_to_v5(self, db_path: Path) -> None:
+        """从 v4 数据库升级到 v5，findings 表存在。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            # 先迁移到 v4
+            await run_migrations(db, 0, 4)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 4
+
+            # 从 v4 迁移到 v5
+            await run_migrations(db, 4, 5)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 5
+
+            # 验证 findings 表存在
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='findings'"
+            )
+            assert await cursor.fetchone() is not None
+
+    async def test_findings_indexes_exist(self, db_path: Path) -> None:
+        """验证两个索引已创建。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, SCHEMA_VERSION)
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='idx_findings_story_round'"
+            )
+            assert await cursor.fetchone() is not None
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_findings_dedup'"
+            )
+            assert await cursor.fetchone() is not None

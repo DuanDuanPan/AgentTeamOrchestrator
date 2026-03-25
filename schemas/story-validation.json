@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "story-validation.json",
+  "title": "Story Artifact Validation",
+  "description": "Story artifact 产出格式的结构验证",
+  "type": "object",
+  "required": ["story_id", "title", "status"],
+  "properties": {
+    "story_id": {
+      "type": "string",
+      "description": "Story 唯一标识"
+    },
+    "title": {
+      "type": "string",
+      "description": "Story 标题"
+    },
+    "status": {
+      "type": "string",
+      "description": "Story 状态"
+    },
+    "current_phase": {
+      "type": "string",
+      "description": "当前阶段"
+    },
+    "worktree_path": {
+      "type": ["string", "null"],
+      "description": "Worktree 路径（可选）"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "type"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Artifact 文件路径"
+          },
+          "type": {
+            "type": "string",
+            "description": "Artifact 类型"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true
+}

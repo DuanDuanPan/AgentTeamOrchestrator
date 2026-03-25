@@ -21,6 +21,8 @@ from ato.models.schemas import (
     BatchStoryLink,
     CheckResult,
     CostLogRecord,
+    FindingRecord,
+    FindingStatus,
     StoryRecord,
     StoryStatus,
     TaskRecord,
@@ -33,6 +35,7 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 _story_status_validator: TypeAdapter[StoryStatus] = TypeAdapter(StoryStatus)
 _task_status_validator: TypeAdapter[TaskStatus] = TypeAdapter(TaskStatus)
 _batch_status_validator: TypeAdapter[BatchStatus] = TypeAdapter(BatchStatus)
+_finding_status_validator: TypeAdapter[FindingStatus] = TypeAdapter(FindingStatus)
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -102,6 +105,30 @@ _BATCH_ACTIVE_UNIQUE_IDX = """\
 CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_single_active
 ON batches(status) WHERE status = 'active'
 """
+
+_FINDINGS_DDL = """\
+CREATE TABLE IF NOT EXISTS findings (
+    finding_id  TEXT PRIMARY KEY,
+    story_id    TEXT NOT NULL REFERENCES stories(story_id),
+    round_num   INTEGER NOT NULL,
+    severity    TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',
+    file_path   TEXT NOT NULL,
+    rule_id     TEXT NOT NULL,
+    dedup_hash  TEXT NOT NULL,
+    line_number INTEGER,
+    fix_suggestion TEXT,
+    created_at  TEXT NOT NULL
+)"""
+
+_FINDINGS_STORY_ROUND_IDX = """\
+CREATE INDEX IF NOT EXISTS idx_findings_story_round
+ON findings(story_id, round_num)"""
+
+_FINDINGS_DEDUP_IDX = """\
+CREATE INDEX IF NOT EXISTS idx_findings_dedup
+ON findings(dedup_hash)"""
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +708,160 @@ async def get_cost_summary(
 
 
 # ---------------------------------------------------------------------------
+# CRUD — Findings (Story 3.1)
+# ---------------------------------------------------------------------------
+
+_FINDING_COLUMNS = (
+    "finding_id, story_id, round_num, severity, description, status, "
+    "file_path, rule_id, dedup_hash, line_number, fix_suggestion, created_at"
+)
+
+
+async def insert_finding(db: aiosqlite.Connection, record: FindingRecord) -> None:
+    """插入一条 finding 记录。写前通过 model_validate 校验。"""
+    FindingRecord.model_validate(record.model_dump())
+    await db.execute(
+        f"INSERT INTO findings ({_FINDING_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            record.finding_id,
+            record.story_id,
+            record.round_num,
+            record.severity,
+            record.description,
+            record.status,
+            record.file_path,
+            record.rule_id,
+            record.dedup_hash,
+            record.line_number,
+            record.fix_suggestion,
+            _dt_to_iso(record.created_at),
+        ),
+    )
+    await db.commit()
+
+
+async def insert_findings_batch(
+    db: aiosqlite.Connection,
+    records: list[FindingRecord],
+) -> None:
+    """批量插入 findings，SAVEPOINT 保证原子性。
+
+    全部成功才 commit；任何一条失败则整批回滚，不留半成品。
+    """
+    if not records:
+        return
+    for record in records:
+        FindingRecord.model_validate(record.model_dump())
+    await db.execute("SAVEPOINT findings_batch")
+    try:
+        await db.executemany(
+            f"INSERT INTO findings ({_FINDING_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    r.finding_id,
+                    r.story_id,
+                    r.round_num,
+                    r.severity,
+                    r.description,
+                    r.status,
+                    r.file_path,
+                    r.rule_id,
+                    r.dedup_hash,
+                    r.line_number,
+                    r.fix_suggestion,
+                    _dt_to_iso(r.created_at),
+                )
+                for r in records
+            ],
+        )
+        await db.execute("RELEASE SAVEPOINT findings_batch")
+    except BaseException:
+        await db.execute("ROLLBACK TO SAVEPOINT findings_batch")
+        await db.execute("RELEASE SAVEPOINT findings_batch")
+        raise
+    await db.commit()
+
+
+async def get_findings_by_story(
+    db: aiosqlite.Connection,
+    story_id: str,
+    *,
+    round_num: int | None = None,
+) -> list[FindingRecord]:
+    """查询某个 story 的 findings，可按 round_num 过滤。"""
+    if round_num is not None:
+        cursor = await db.execute(
+            "SELECT * FROM findings WHERE story_id = ? AND round_num = ? ORDER BY rowid",
+            (story_id, round_num),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT * FROM findings WHERE story_id = ? ORDER BY rowid",
+            (story_id,),
+        )
+    rows = await cursor.fetchall()
+    return [_row_to_finding(r) for r in rows]
+
+
+async def get_open_findings(
+    db: aiosqlite.Connection,
+    story_id: str,
+) -> list[FindingRecord]:
+    """查询 status IN ('open', 'still_open') 的 findings。"""
+    cursor = await db.execute(
+        "SELECT * FROM findings WHERE story_id = ? AND status IN (?, ?) ORDER BY rowid",
+        (story_id, "open", "still_open"),
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_finding(r) for r in rows]
+
+
+async def update_finding_status(
+    db: aiosqlite.Connection,
+    finding_id: str,
+    new_status: FindingStatus,
+) -> None:
+    """更新 finding 状态。"""
+    _finding_status_validator.validate_python(new_status, strict=True)
+    cursor = await db.execute(
+        "UPDATE findings SET status = ? WHERE finding_id = ?",
+        (new_status, finding_id),
+    )
+    if cursor.rowcount == 0:
+        msg = f"Finding '{finding_id}' not found in database"
+        raise ValueError(msg)
+    await db.commit()
+
+
+async def count_findings_by_severity(
+    db: aiosqlite.Connection,
+    story_id: str,
+    round_num: int,
+) -> dict[str, int]:
+    """按 severity 统计 findings 数量，返回 {"blocking": N, "suggestion": M}。"""
+    cursor = await db.execute(
+        "SELECT severity, COUNT(*) FROM findings "
+        "WHERE story_id = ? AND round_num = ? GROUP BY severity",
+        (story_id, round_num),
+    )
+    rows = await cursor.fetchall()
+    result: dict[str, int] = {"blocking": 0, "suggestion": 0}
+    for row in rows:
+        severity = row[0]
+        if severity in result:
+            result[severity] = int(row[1])
+    return result
+
+
+def _row_to_finding(row: aiosqlite.Row) -> FindingRecord:
+    """SQLite Row → FindingRecord。"""
+    data = dict(row)
+    data["created_at"] = _iso_to_dt(data["created_at"])
+    return FindingRecord.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
 # CRUD — Preflight Results (Story 1.4a)
 # ---------------------------------------------------------------------------
 
@@ -696,9 +877,6 @@ async def insert_preflight_results(
     await db.executemany(
         "INSERT INTO preflight_results (run_id, layer, check_item, status, message) "
         "VALUES (?, ?, ?, ?, ?)",
-        [
-            (run_id, r.layer, r.check_item, r.status, r.message)
-            for r in results
-        ],
+        [(run_id, r.layer, r.check_item, r.status, r.message) for r in results],
     )
     await db.commit()

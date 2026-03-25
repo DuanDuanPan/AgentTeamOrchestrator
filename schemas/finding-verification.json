@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "finding-verification.json",
+  "title": "Finding Verification",
+  "description": "单个 finding 验证结果的结构（re-review 场景中 finding 闭合验证）",
+  "type": "object",
+  "required": ["finding_id", "status", "verified_at"],
+  "properties": {
+    "finding_id": {
+      "type": "string",
+      "description": "Finding 唯一标识"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["closed", "still_open"],
+      "description": "验证后的 finding 状态"
+    },
+    "verified_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "验证时间（ISO 8601）"
+    },
+    "verifier_note": {
+      "type": "string",
+      "description": "验证说明（可选）"
+    }
+  },
+  "additionalProperties": false
+}

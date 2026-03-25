@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-findings.json",
+  "title": "Review Findings",
+  "description": "Agent review 产出的 findings 列表结构验证",
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file_path", "rule_id", "severity", "description"],
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Finding 所在文件路径"
+          },
+          "rule_id": {
+            "type": "string",
+            "description": "规则标识符"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "suggestion"],
+            "description": "严重程度：blocking 必须修复 / suggestion 建议"
+          },
+          "description": {
+            "type": "string",
+            "description": "Finding 描述"
+          },
+          "line_number": {
+            "type": "integer",
+            "description": "行号（可选）"
+          },
+          "fix_suggestion": {
+            "type": "string",
+            "description": "修复建议（可选）"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -15,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 4
+SCHEMA_VERSION: int = 5
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -106,6 +108,70 @@ class CheckResult(_StrictBase):
     check_item: str
     status: CheckStatus
     message: str
+
+
+# ---------------------------------------------------------------------------
+# Finding 相关类型 (Story 3.1)
+# ---------------------------------------------------------------------------
+
+FindingSeverity = Literal["blocking", "suggestion"]
+"""Finding 严重程度：blocking 必须修复 / suggestion 建议。"""
+
+FindingStatus = Literal["open", "closed", "still_open"]
+"""Finding 生命周期状态：open 新发现 / closed 已修复 / still_open re-review 仍存在。"""
+
+
+class FindingRecord(_StrictBase):
+    """findings 表对应的 Pydantic 模型。"""
+
+    finding_id: str
+    story_id: str
+    round_num: int
+    severity: FindingSeverity
+    description: str
+    status: FindingStatus
+    file_path: str
+    rule_id: str
+    dedup_hash: str
+    line_number: int | None = None
+    fix_suggestion: str | None = None
+    created_at: datetime
+
+
+def compute_dedup_hash(
+    file_path: str,
+    rule_id: str,
+    severity: str,
+    description: str,
+) -> str:
+    """计算 finding 去重 hash。
+
+    正则化 description：空白压缩 + strip + lower。
+    SHA256(file_path|rule_id|severity|normalized_desc)。
+    """
+    normalized_desc = re.sub(r"\s+", " ", description).strip().lower()
+    payload = f"{file_path}|{rule_id}|{severity}|{normalized_desc}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Validation 结果模型 (Story 3.1)
+# ---------------------------------------------------------------------------
+
+
+class SchemaValidationIssue(_StrictBase):
+    """JSON Schema 验证错误条目（命名避免与 pydantic.ValidationError 冲突）。"""
+
+    path: str
+    message: str
+    schema_path: str = ""
+
+
+class ValidationResult(_StrictBase):
+    """JSON Schema 验证结果。"""
+
+    passed: bool
+    errors: list[SchemaValidationIssue] = []
 
 
 # ---------------------------------------------------------------------------

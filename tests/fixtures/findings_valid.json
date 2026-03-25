@@ -1,0 +1,18 @@
+{
+  "findings": [
+    {
+      "file_path": "src/ato/core.py",
+      "rule_id": "E001",
+      "severity": "blocking",
+      "description": "Missing error handling for subprocess timeout"
+    },
+    {
+      "file_path": "src/ato/models/db.py",
+      "rule_id": "W002",
+      "severity": "suggestion",
+      "description": "Consider adding index for frequent query pattern",
+      "line_number": 42,
+      "fix_suggestion": "Add CREATE INDEX on stories(status)"
+    }
+  ]
+}

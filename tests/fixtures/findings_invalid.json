@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "file_path": "src/ato/core.py",
+      "severity": "critical",
+      "description": "Missing field rule_id and invalid severity"
+    },
+    {
+      "rule_id": "E001",
+      "severity": "blocking",
+      "description": "Missing required field file_path"
+    }
+  ]
+}

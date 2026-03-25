@@ -9,10 +9,13 @@ import aiosqlite
 import pytest
 
 from ato.models.db import (
+    count_findings_by_severity,
     get_active_batch,
     get_batch_progress,
     get_batch_stories,
     get_connection,
+    get_findings_by_story,
+    get_open_findings,
     get_pending_approvals,
     get_story,
     get_tasks_by_story,
@@ -20,8 +23,11 @@ from ato.models.db import (
     insert_approval,
     insert_batch,
     insert_batch_story_links,
+    insert_finding,
+    insert_findings_batch,
     insert_story,
     insert_task,
+    update_finding_status,
     update_story_status,
     update_task_status,
 )
@@ -31,9 +37,13 @@ from ato.models.schemas import (
     BatchRecord,
     BatchStatus,
     BatchStoryLink,
+    FindingRecord,
+    FindingSeverity,
+    FindingStatus,
     StoryRecord,
     StoryStatus,
     TaskRecord,
+    compute_dedup_hash,
 )
 
 _NOW = datetime.now(tz=UTC)
@@ -809,5 +819,176 @@ class TestBatchProgress:
             await insert_batch(db, batch)
             progress = await get_batch_progress(db, "b-empty")
             assert progress.total == 0
+        finally:
+            await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Findings 辅助函数
+# ---------------------------------------------------------------------------
+
+
+def _make_finding(
+    finding_id: str,
+    story_id: str,
+    *,
+    severity: FindingSeverity = "blocking",
+    status: FindingStatus = "open",
+    round_num: int = 1,
+) -> FindingRecord:
+    return FindingRecord(
+        finding_id=finding_id,
+        story_id=story_id,
+        round_num=round_num,
+        severity=severity,
+        description=f"Finding {finding_id}",
+        status=status,
+        file_path="src/ato/core.py",
+        rule_id="E001",
+        dedup_hash=compute_dedup_hash("src/ato/core.py", "E001", severity, f"Finding {finding_id}"),
+        created_at=_NOW,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CRUD — Findings round-trip (Story 3.1)
+# ---------------------------------------------------------------------------
+
+
+class TestFindingCrud:
+    async def test_insert_finding(self, initialized_db_path: Path) -> None:
+        """插入后可查询。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-f1"))
+            finding = _make_finding("f-001", "s-f1")
+            await insert_finding(db, finding)
+            results = await get_findings_by_story(db, "s-f1")
+            assert len(results) == 1
+            assert results[0].finding_id == "f-001"
+            assert results[0].severity == "blocking"
+        finally:
+            await db.close()
+
+    async def test_insert_findings_batch(self, initialized_db_path: Path) -> None:
+        """批量插入 N 条，查询验证数量。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fb"))
+            findings = [_make_finding(f"f-b-{i}", "s-fb") for i in range(5)]
+            await insert_findings_batch(db, findings)
+            results = await get_findings_by_story(db, "s-fb")
+            assert len(results) == 5
+        finally:
+            await db.close()
+
+    async def test_insert_findings_batch_atomic_on_failure(self, initialized_db_path: Path) -> None:
+        """批量插入含重复 ID 时整批回滚，不留半成品。"""
+        import aiosqlite as aiosqlite_mod
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fba"))
+            # 第一条正常，第二条与第一条 finding_id 重复
+            findings = [
+                _make_finding("f-dup", "s-fba"),
+                _make_finding("f-dup", "s-fba"),  # 重复 PK
+            ]
+            with pytest.raises(aiosqlite_mod.IntegrityError):
+                await insert_findings_batch(db, findings)
+            # 确认整批回滚：0 条被持久化
+            results = await get_findings_by_story(db, "s-fba")
+            assert len(results) == 0
+        finally:
+            await db.close()
+
+    async def test_get_findings_by_story_with_round(self, initialized_db_path: Path) -> None:
+        """round_num 过滤。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fr"))
+            await insert_finding(db, _make_finding("f-r1", "s-fr", round_num=1))
+            await insert_finding(db, _make_finding("f-r2", "s-fr", round_num=2))
+            await insert_finding(db, _make_finding("f-r3", "s-fr", round_num=1))
+            # 仅查 round 1
+            results = await get_findings_by_story(db, "s-fr", round_num=1)
+            assert len(results) == 2
+            # 查 round 2
+            results = await get_findings_by_story(db, "s-fr", round_num=2)
+            assert len(results) == 1
+        finally:
+            await db.close()
+
+    async def test_get_open_findings(self, initialized_db_path: Path) -> None:
+        """仅返回 open/still_open。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fo"))
+            await insert_finding(db, _make_finding("f-o1", "s-fo", status="open"))
+            await insert_finding(db, _make_finding("f-o2", "s-fo", status="closed"))
+            await insert_finding(db, _make_finding("f-o3", "s-fo", status="still_open"))
+            results = await get_open_findings(db, "s-fo")
+            assert len(results) == 2
+            ids = {r.finding_id for r in results}
+            assert ids == {"f-o1", "f-o3"}
+        finally:
+            await db.close()
+
+    async def test_update_finding_status(self, initialized_db_path: Path) -> None:
+        """open → closed。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fu"))
+            await insert_finding(db, _make_finding("f-u1", "s-fu"))
+            await update_finding_status(db, "f-u1", "closed")
+            results = await get_findings_by_story(db, "s-fu")
+            assert results[0].status == "closed"
+        finally:
+            await db.close()
+
+    async def test_update_finding_status_not_found(self, initialized_db_path: Path) -> None:
+        """更新不存在的 finding 抛 ValueError。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            with pytest.raises(ValueError, match="not found"):
+                await update_finding_status(db, "nonexistent", "closed")
+        finally:
+            await db.close()
+
+    async def test_count_findings_by_severity(self, initialized_db_path: Path) -> None:
+        """blocking/suggestion 计数正确。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fc"))
+            # 3 blocking + 2 suggestion (round 1)
+            for i in range(3):
+                await insert_finding(db, _make_finding(f"f-c-b-{i}", "s-fc", severity="blocking"))
+            for i in range(2):
+                await insert_finding(db, _make_finding(f"f-c-s-{i}", "s-fc", severity="suggestion"))
+            counts = await count_findings_by_severity(db, "s-fc", 1)
+            assert counts["blocking"] == 3
+            assert counts["suggestion"] == 2
+        finally:
+            await db.close()
+
+    async def test_count_findings_empty(self, initialized_db_path: Path) -> None:
+        """无 findings 时返回 0/0。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-ce"))
+            counts = await count_findings_by_severity(db, "s-ce", 1)
+            assert counts["blocking"] == 0
+            assert counts["suggestion"] == 0
+        finally:
+            await db.close()
+
+    async def test_finding_datetime_roundtrip(self, initialized_db_path: Path) -> None:
+        """datetime 存储 ISO 8601 后 round-trip 仍可 model_validate。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fdt"))
+            await insert_finding(db, _make_finding("f-dt", "s-fdt"))
+            results = await get_findings_by_story(db, "s-fdt")
+            assert isinstance(results[0].created_at, datetime)
         finally:
             await db.close()

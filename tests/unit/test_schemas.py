@@ -14,10 +14,14 @@ from ato.models.schemas import (
     CLIAdapterError,
     CodexOutput,
     ConfigError,
+    FindingRecord,
     RecoveryError,
+    SchemaValidationIssue,
     StateTransitionError,
     StoryRecord,
     TaskRecord,
+    ValidationResult,
+    compute_dedup_hash,
 )
 
 # ---------------------------------------------------------------------------
@@ -233,45 +237,202 @@ class TestApprovalRecord:
 
 class TestCodexOutput:
     def test_model_validate_defaults(self) -> None:
-        output = CodexOutput.model_validate({
-            "status": "success",
-            "exit_code": 0,
-        })
+        output = CodexOutput.model_validate(
+            {
+                "status": "success",
+                "exit_code": 0,
+            }
+        )
         assert output.cache_read_input_tokens == 0
         assert output.model_name is None
         assert output.text_result == ""
         assert output.cost_usd == 0.0
 
     def test_model_validate_full(self) -> None:
-        output = CodexOutput.model_validate({
-            "status": "success",
-            "exit_code": 0,
-            "text_result": "review done",
-            "cost_usd": 0.05,
-            "input_tokens": 1000,
-            "output_tokens": 50,
-            "cache_read_input_tokens": 400,
-            "model_name": "codex-mini-latest",
-            "session_id": "thread-123",
-        })
+        output = CodexOutput.model_validate(
+            {
+                "status": "success",
+                "exit_code": 0,
+                "text_result": "review done",
+                "cost_usd": 0.05,
+                "input_tokens": 1000,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 400,
+                "model_name": "codex-mini-latest",
+                "session_id": "thread-123",
+            }
+        )
         assert output.cache_read_input_tokens == 400
         assert output.model_name == "codex-mini-latest"
         assert output.input_tokens == 1000
 
     def test_structured_output_mapping(self) -> None:
-        output = CodexOutput.model_validate({
-            "status": "success",
-            "exit_code": 0,
-            "structured_output": {"findings": [{"severity": "blocking"}]},
-        })
+        output = CodexOutput.model_validate(
+            {
+                "status": "success",
+                "exit_code": 0,
+                "structured_output": {"findings": [{"severity": "blocking"}]},
+            }
+        )
         assert output.structured_output is not None
         assert output.structured_output["findings"][0]["severity"] == "blocking"
 
     def test_extra_fields_ignored(self) -> None:
         """CodexOutput 继承 AdapterResult (extra='ignore')，额外字段不报错。"""
-        output = CodexOutput.model_validate({
-            "status": "success",
-            "exit_code": 0,
-            "unknown_field": "should be ignored",
-        })
+        output = CodexOutput.model_validate(
+            {
+                "status": "success",
+                "exit_code": 0,
+                "unknown_field": "should be ignored",
+            }
+        )
         assert output.status == "success"
+
+
+# ---------------------------------------------------------------------------
+# FindingRecord (Story 3.1)
+# ---------------------------------------------------------------------------
+
+
+def _valid_finding_data() -> dict[str, object]:
+    return {
+        "finding_id": "f-001",
+        "story_id": "story-001",
+        "round_num": 1,
+        "severity": "blocking",
+        "description": "Missing error handling",
+        "status": "open",
+        "file_path": "src/ato/core.py",
+        "rule_id": "E001",
+        "dedup_hash": "abc123",
+        "line_number": None,
+        "fix_suggestion": None,
+        "created_at": _NOW,
+    }
+
+
+class TestFindingRecord:
+    def test_finding_record_valid(self) -> None:
+        """全字段构建成功。"""
+        record = FindingRecord.model_validate(_valid_finding_data())
+        assert record.finding_id == "f-001"
+        assert record.severity == "blocking"
+        assert record.status == "open"
+        assert record.round_num == 1
+
+    def test_finding_record_strict(self) -> None:
+        """extra 字段被拒绝（_StrictBase extra='forbid'）。"""
+        data = _valid_finding_data()
+        data["unknown_field"] = "should fail"
+        with pytest.raises(ValidationError):
+            FindingRecord.model_validate(data)
+
+    def test_finding_record_invalid_severity(self) -> None:
+        """非法 severity 被拒绝。"""
+        data = _valid_finding_data()
+        data["severity"] = "critical"
+        with pytest.raises(ValidationError):
+            FindingRecord.model_validate(data)
+
+    def test_finding_record_invalid_status(self) -> None:
+        """非法 status 被拒绝。"""
+        data = _valid_finding_data()
+        data["status"] = "resolved"
+        with pytest.raises(ValidationError):
+            FindingRecord.model_validate(data)
+
+    def test_finding_record_optional_fields(self) -> None:
+        """line_number 和 fix_suggestion 可选字段接受值。"""
+        data = _valid_finding_data()
+        data["line_number"] = 42
+        data["fix_suggestion"] = "Add try/except"
+        record = FindingRecord.model_validate(data)
+        assert record.line_number == 42
+        assert record.fix_suggestion == "Add try/except"
+
+
+# ---------------------------------------------------------------------------
+# compute_dedup_hash (Story 3.1)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeDedupHash:
+    def test_deterministic(self) -> None:
+        """相同输入 → 相同 hash。"""
+        h1 = compute_dedup_hash("src/a.py", "E001", "blocking", "line too long")
+        h2 = compute_dedup_hash("src/a.py", "E001", "blocking", "line too long")
+        assert h1 == h2
+
+    def test_normalization(self) -> None:
+        """\"line too long\" vs \"LINE TOO LONG\" → 相同 hash。"""
+        h1 = compute_dedup_hash("src/a.py", "E001", "blocking", "line too long")
+        h2 = compute_dedup_hash("src/a.py", "E001", "blocking", "LINE TOO LONG")
+        assert h1 == h2
+
+    def test_whitespace_normalization(self) -> None:
+        """多余空白被压缩为单个空格。"""
+        h1 = compute_dedup_hash("src/a.py", "E001", "blocking", "line too long")
+        h2 = compute_dedup_hash("src/a.py", "E001", "blocking", "line  too\n\tlong")
+        assert h1 == h2
+
+    def test_different_severity(self) -> None:
+        """severity 不同 → hash 不同。"""
+        h1 = compute_dedup_hash("src/a.py", "E001", "blocking", "line too long")
+        h2 = compute_dedup_hash("src/a.py", "E001", "suggestion", "line too long")
+        assert h1 != h2
+
+    def test_different_file_path(self) -> None:
+        """file_path 不同 → hash 不同。"""
+        h1 = compute_dedup_hash("src/a.py", "E001", "blocking", "desc")
+        h2 = compute_dedup_hash("src/b.py", "E001", "blocking", "desc")
+        assert h1 != h2
+
+    def test_hash_is_sha256_hex(self) -> None:
+        """返回值是 64 字符的十六进制字符串。"""
+        h = compute_dedup_hash("file.py", "R001", "blocking", "test")
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+
+# ---------------------------------------------------------------------------
+# SchemaValidationIssue (Story 3.1)
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaValidationIssue:
+    def test_model_valid(self) -> None:
+        """基本构建验证。"""
+        issue = SchemaValidationIssue(
+            path="findings.0.severity",
+            message="'critical' is not one of ['blocking', 'suggestion']",
+        )
+        assert issue.path == "findings.0.severity"
+        assert "critical" in issue.message
+
+    def test_default_schema_path(self) -> None:
+        """schema_path 默认为空字符串。"""
+        issue = SchemaValidationIssue(path="$", message="error")
+        assert issue.schema_path == ""
+
+    def test_extra_field_rejected(self) -> None:
+        """extra 字段被拒绝。"""
+        with pytest.raises(ValidationError):
+            SchemaValidationIssue(path="$", message="error", extra_field="bad")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# ValidationResult (Story 3.1)
+# ---------------------------------------------------------------------------
+
+
+class TestValidationResult:
+    def test_passed_result(self) -> None:
+        result = ValidationResult(passed=True)
+        assert result.passed is True
+        assert result.errors == []
+
+    def test_failed_result(self) -> None:
+        errors = [SchemaValidationIssue(path="$", message="missing required")]
+        result = ValidationResult(passed=False, errors=errors)
+        assert result.passed is False
+        assert len(result.errors) == 1

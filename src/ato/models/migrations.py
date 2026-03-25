@@ -172,9 +172,33 @@ async def _migrate_v3_to_v4(db: aiosqlite.Connection) -> None:
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
         )"""
     )
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_preflight_run_id ON preflight_results(run_id)")
+
+
+@_register(5)
+async def _migrate_v4_to_v5(db: aiosqlite.Connection) -> None:
+    """v4 → v5: 新增 findings 表 + 索引（Story 3.1）。"""
     await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_preflight_run_id ON preflight_results(run_id)"
+        """\
+        CREATE TABLE IF NOT EXISTS findings (
+            finding_id  TEXT PRIMARY KEY,
+            story_id    TEXT NOT NULL REFERENCES stories(story_id),
+            round_num   INTEGER NOT NULL,
+            severity    TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'open',
+            file_path   TEXT NOT NULL,
+            rule_id     TEXT NOT NULL,
+            dedup_hash  TEXT NOT NULL,
+            line_number INTEGER,
+            fix_suggestion TEXT,
+            created_at  TEXT NOT NULL
+        )"""
     )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_findings_story_round ON findings(story_id, round_num)"
+    )
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_findings_dedup ON findings(dedup_hash)")
 
 
 # ---------------------------------------------------------------------------
