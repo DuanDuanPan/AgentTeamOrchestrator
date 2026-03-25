@@ -44,6 +44,26 @@ def _classify_error(exit_code: int | None, stderr: str) -> tuple[ErrorCategory, 
     return ErrorCategory.UNKNOWN, False
 
 
+def build_interactive_command(
+    prompt: str,
+    *,
+    session_id: str | None = None,
+) -> list[str]:
+    """构建 interactive session 的 claude CLI 命令参数列表。
+
+    Interactive session 不使用 --output-format json（人类直接交互）。
+    支持 --resume 续接已有 session。
+
+    Args:
+        prompt: 发送给 CLI 的提示文本。
+        session_id: 若提供则使用 --resume 续接。
+    """
+    cmd = ["claude", "-p", prompt]
+    if session_id:  # None 和 "" 都降级为 fresh session
+        cmd.extend(["--resume", session_id])
+    return cmd
+
+
 class ClaudeAdapter(BaseAdapter):
     """Claude CLI 适配器。
 

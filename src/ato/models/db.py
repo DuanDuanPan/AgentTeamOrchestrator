@@ -431,6 +431,28 @@ def _row_to_task(row: aiosqlite.Row) -> TaskRecord:
     return TaskRecord.model_validate(data)
 
 
+async def get_tasks_by_status(
+    db: aiosqlite.Connection,
+    status: str,
+) -> list[TaskRecord]:
+    """查询指定状态的所有 tasks。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        status: 要查询的 task 状态值。
+
+    Returns:
+        匹配状态的 TaskRecord 列表。
+    """
+    _task_status_validator.validate_python(status, strict=True)
+    cursor = await db.execute(
+        "SELECT * FROM tasks WHERE status = ? ORDER BY rowid",
+        (status,),
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_task(r) for r in rows]
+
+
 async def mark_running_tasks_paused(db: aiosqlite.Connection) -> int:
     """批量将所有 status='running' 的 task 标记为 'paused'。
 
