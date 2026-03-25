@@ -199,7 +199,7 @@ classification:
 
 **1. Convergent Loop 协议 — 最核心的技术创新**
 
-现有 AI 编码工具的 review-fix 循环是"全量重审 → 全量修复"的朴素循环，容易出现评判标准漂移和 finding 集合膨胀。Convergent Loop 引入 finding 级跨轮次状态追踪和每轮 scope 严格收窄，将不确定的迭代变为有边界的收敛过程。在已知的多 agent 系统中没有先例。这个协议不限于 code-review，可通用于 validate-create、QA-fix 等所有迭代场景。
+现有 AI 编码工具的 review-fix 循环是"全量重审 → 全量修复"的朴素循环，容易出现评判标准漂移和 finding 集合膨胀。Convergent Loop 引入 finding 级跨轮次状态追踪和每轮 scope 严格收窄，将不确定的迭代变为有边界的收敛过程。在已知的多 agent 系统中没有先例。Review 阶段通过 prompt 指示 agent 执行 `bmad-code-review` skill（三层并行审查 → triage → 结构化输出），输出经流捕获后由 BmadAdapter 解析为 finding 数据。这个协议不限于 code-review，可通用于 validate-create、QA-fix 等所有迭代场景。
 
 **2. 自我改进闭环 — 从"工具"到"系统智能"**
 
@@ -295,7 +295,7 @@ phases:
   # ...
 ```
 
-**角色边界通过 CLI 本身的隔离机制保证：** Claude 和 Codex 是不同的 CLI 用于不同角色，物理分离即为边界。Codex reviewer 在 `read-only` 沙箱中运行，agent 不可写文件，审查报告通过 CLI 的 `-o` 参数输出（CLI 层面写入，不受沙箱限制）。不额外限定工具列表，减少配置复杂度。
+**角色边界通过 CLI 本身的隔离机制保证：** Claude 和 Codex 是不同的 CLI 用于不同角色，物理分离即为边界。Codex reviewer 在 `read-only` 沙箱中运行，agent 不可写文件。Review agent 的 prompt 指示其使用 `bmad-code-review` skill（项目 `.claude/skills/` 下的 skill 在项目目录运行时自动可发现），agent 按 skill 定义的 step-file workflow 执行三层并行审查（Blind Hunter / Edge Case Hunter / Acceptance Auditor）→ triage → 结构化输出。审查结果通过 CLI 输出流捕获（`text_result`），由 BmadAdapter 解析为结构化 findings。不额外限定工具列表，减少配置复杂度。
 
 ### Command Structure
 
@@ -377,7 +377,7 @@ batch select（PM agent 推荐 → 人类确认）
   → story creating（Claude, Structured Job）
   → story validating（Codex, Convergent Loop）
   → development（Interactive Session — 系统启动 worktree + agent session，人参与协作，完成后手动提交）
-  → code review + fix（Codex review + Claude fix, Convergent Loop）
+  → code review + fix（review agent 执行 bmad-code-review skill → BmadAdapter 解析 findings → Claude fix, Convergent Loop）
   → QA generation + execution（Structured Job）
   → UAT（人类在 worktree 中手动测试，通过 TUI 提交结果）
   → merge（需人类授权）
@@ -392,7 +392,7 @@ batch select（PM agent 推荐 → 人类确认）
 | 编排核心 | 声明式状态机 + TransitionQueue + SubprocessManager |
 | Claude CLI adapter | `-p` 调用、JSON 输出解析、session 管理、成本提取 |
 | Codex CLI adapter | `exec` 调用、JSONL 解析、`-o` 输出收集、sandbox 控制 |
-| BMAD 适配层（全量） | code-review、story-validation、architecture-review、QA-report 四个 skill 的 Markdown → JSON 解析 |
+| BMAD 适配层（全量） | agent 执行 BMAD skill（code-review、story-validation、architecture-review、QA-report）→ 输出通过流捕获（text_result）→ BmadAdapter 解析为结构化 JSON |
 | Convergent Loop | finding 级追踪、scope 收窄、收敛判定、escalate |
 | Approval Queue | batch 选择、merge 授权、超时处理、异常 escalation、UAT 结果提交 |
 | SQLite 持久化 | WAL 模式、stories/tasks/findings/approvals/cost_log 表 |
@@ -466,17 +466,17 @@ batch select（PM agent 推荐 → 人类确认）
 ### AI Agent 协作
 
 - **FR6:** 系统可通过 CLI subprocess 调用 Claude Code 执行创建、实现、修复等任务，并收集 JSON 格式的结构化输出
-- **FR7:** 系统可通过 CLI subprocess 调用 Codex CLI 执行审查、验证等任务，并从 JSONL 事件流和 `-o` 输出文件收集结果
+- **FR7:** 系统可通过 CLI subprocess 调用 Codex CLI 执行审查、验证等任务（prompt 指示 agent 使用对应 BMAD skill），并从 JSONL 事件流捕获 agent 输出（text_result）
 - **FR8:** 系统可根据配置为不同角色指定 CLI 类型、沙箱级别和模型选择
 - **FR9:** 系统可管理 agent session（创建、续接、fork），支持 Convergent Loop 内短循环的 session resume
 - **FR53:** 系统可从 task 输出中提取结构化工作记忆摘要（Context Briefing），作为跨 task 边界的 fresh session 输入
 - **FR10:** 系统可启动 Interactive Session（独立终端窗口），注册其 PID、worktree 路径和启动时间，人与 agent 直接在终端中协作
-- **FR11:** 系统可将 BMAD skill 的 Markdown 输出通过适配层解析为结构化 JSON（覆盖 code-review、story-validation、architecture-review、QA-report 四个 skill）
+- **FR11:** 系统可将 agent 执行 BMAD skill 后的 Markdown 输出（通过 CLI 流捕获的 text_result）经 BmadAdapter 解析为结构化 JSON（覆盖 code-review、story-validation、architecture-review、QA-report 四个 skill）
 - **FR12:** PM agent 可分析 epic/story 的优先级和依赖关系，生成推荐的 batch 方案供操作者选择
 
 ### 质量门控
 
-- **FR13:** 系统可执行 Convergent Loop 协议：review → finding 入库 → fix（可显式指定 debugging-strategies skill 辅助根因分析与系统化修复） → re-review（scope 收窄）→ 收敛判定或 escalate
+- **FR13:** 系统可执行 Convergent Loop 协议：review（agent 执行 bmad-code-review skill）→ BmadAdapter 解析 → finding 入库 → fix（可显式指定 debugging-strategies skill 辅助根因分析与系统化修复） → re-review（scope 收窄，agent 仍使用 bmad-code-review skill）→ 收敛判定或 escalate
 - **FR14:** 系统可在 SQLite 中追踪每个 finding 的跨轮次状态（open → closed / still_open / new）
 - **FR15:** 系统可在每轮 re-review 时自动收窄 scope，仅验证上轮 open findings 的闭合状态和新引入问题
 - **FR16:** 系统可执行 deterministic validation check（JSON Schema 结构验证），作为 agent review 之前的第一层验证

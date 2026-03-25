@@ -28,9 +28,9 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 
 1. **编排引擎（FR1-FR5, FR24-FR28）：** 声明式 YAML 配置 → 状态机动态构建 → 自动推进 story 生命周期。所有运行时状态持久化到 SQLite WAL，支持崩溃后零数据丢失恢复。这决定了系统核心必须是一个 asyncio 事件循环 + 嵌入式状态存储的单进程架构。
 
-2. **双 CLI 异构 Agent 调用（FR6-FR12, FR53）：** Claude CLI (`claude -p`) 和 Codex CLI (`codex exec`) 作为角色工作者，输出格式、权限模型、成本字段均不同。需要统一的 adapter 抽象层隔离差异。由于无 API Key，Claude 必须使用 OAuth 认证（非 `--bare` 模式），BMAD skills 在 `claude -p` 调用时自动加载。
+2. **双 CLI 异构 Agent 调用（FR6-FR12, FR53）：** Claude CLI (`claude -p`) 和 Codex CLI (`codex exec`) 作为角色工作者，输出格式、权限模型、成本字段均不同。需要统一的 adapter 抽象层隔离差异。由于无 API Key，Claude 必须使用 OAuth 认证（非 `--bare` 模式）。项目 `.claude/skills/` 下的 BMAD skills 在项目目录运行时对所有 CLI agent 自动可发现，编排器通过 prompt 指示 agent 使用对应 skill（如 review 阶段使用 `bmad-code-review` skill），agent 输出通过 CLI 流捕获（text_result）后由 BmadAdapter 解析为结构化 JSON。
 
-3. **Convergent Loop 质量门控（FR13-FR18）：** review → finding 入库 → fix → re-review（scope 收窄）→ 收敛判定或 escalate。Finding 级跨轮次状态追踪是核心数据模型之一，直接影响 SQLite schema 设计和状态机 transition 路径。
+3. **Convergent Loop 质量门控（FR13-FR18）：** review（agent 执行 bmad-code-review skill → 三层并行审查 → triage → 结构化输出 → BmadAdapter 解析）→ finding 入库 → fix → re-review（scope 收窄，agent 仍使用 bmad-code-review skill）→ 收敛判定或 escalate。Finding 级跨轮次状态追踪是核心数据模型之一，直接影响 SQLite schema 设计和状态机 transition 路径。
 
 **Finding 跨轮次匹配算法：**
 
@@ -66,7 +66,7 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 | Python ≥3.11 | asyncio TaskGroup 依赖 | 限定最低运行时版本 |
 | BMAD skills 不可修改 | 项目约束 | 适配层用 LLM 语义解析 Markdown → JSON |
 | 本地单用户单进程 | 系统设计原则 | 不需要分布式协调，SQLite 足够 |
-| `claude -p` 非 bare 模式加载项目配置 | 认证约束副作用 | BMAD skills 自动可用（利），但冷启动性能和 token 消耗影响需量化（弊） |
+| `.claude/skills/` 对项目目录内所有 CLI agent 自动可发现 | 项目结构 | 编排器通过 prompt 指示 agent 使用对应 BMAD skill，agent 输出通过流捕获（text_result）由 BmadAdapter 解析；冷启动性能和 token 消耗影响需量化 |
 
 ### Cross-Cutting Concerns Identified
 
@@ -864,7 +864,7 @@ tui/ ───► models/db.py ◄┤              core.py ◄── nudge.py
 |---------|---------|---------|
 | 工作流编排 (FR1-5) | `config.py`, `state_machine.py`, `transition_queue.py` | `models/schemas.py` |
 | AI Agent 协作 (FR6-12, 53) | `adapters/*.py`, `subprocess_mgr.py` | `adapters/base.py` |
-| 质量门控 (FR13-18) | `convergent_loop.py` | `adapters/bmad_adapter.py` |
+| 质量门控 (FR13-18) | `convergent_loop.py`（prompt 指示 agent 使用 bmad-code-review skill → text_result → BmadAdapter 解析） | `adapters/bmad_adapter.py` |
 | 人机协作 (FR19-23) | `tui/approval.py`, `cli.py`, `nudge.py` | `models/db.py` |
 | 状态管理与恢复 (FR24-28) | `models/db.py`, `recovery.py`, `logging.py` | `models/migrations.py` |
 | 工作空间管理 (FR29-32, 52) | `subprocess_mgr.py` | — |
@@ -883,10 +883,13 @@ ato.yaml ──► config.py ──► state_machine 构建
                               subprocess_mgr
                                ╱          ╲
                      claude -p              codex exec
+                  (prompt 指示使用      (prompt 指示使用
+                   对应 BMAD skill)     对应 BMAD skill)
                         │                      │
-                     JSON stdout          JSONL stdout + -o file
+                     JSON stdout          JSONL stdout
+                   (text_result)         (text_result)
                         │                      │
-                     adapter 解析 ──► Pydantic model_validate
+                     adapter 解析 ──► BmadAdapter 解析 ──► Pydantic model_validate
                                           │
                                     TransitionQueue ──► SQLite 持久化
                                                            │

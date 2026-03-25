@@ -27,17 +27,17 @@ This document provides the complete epic and story breakdown for AgentTeamOrches
 **AI Agent 协作:**
 
 - FR6: 系统可通过 CLI subprocess 调用 Claude Code 执行创建、实现、修复等任务，并收集 JSON 格式的结构化输出
-- FR7: 系统可通过 CLI subprocess 调用 Codex CLI 执行审查、验证等任务，并从 JSONL 事件流和 `-o` 输出文件收集结果
+- FR7: 系统可通过 CLI subprocess 调用 Codex CLI 执行审查、验证等任务（prompt 指示 agent 使用对应 BMAD skill），并从 JSONL 事件流捕获 agent 输出（text_result）
 - FR8: 系统可根据配置为不同角色指定 CLI 类型、沙箱级别和模型选择
 - FR9: 系统可管理 agent session（创建、续接、fork），支持 Convergent Loop 内短循环的 session resume
 - FR10: 系统可启动 Interactive Session（独立终端窗口），注册其 PID、worktree 路径和启动时间，人与 agent 直接在终端中协作
-- FR11: 系统可将 BMAD skill 的 Markdown 输出通过适配层解析为结构化 JSON（覆盖 code-review、story-validation、architecture-review、QA-report 四个 skill）
+- FR11: 系统可将 agent 执行 BMAD skill 后的 Markdown 输出（通过 CLI 流捕获的 text_result）经 BmadAdapter 解析为结构化 JSON（覆盖 code-review、story-validation、architecture-review、QA-report 四个 skill）
 - FR12: PM agent 可分析 epic/story 的优先级和依赖关系，生成推荐的 batch 方案供操作者选择
 - FR53: 系统可从 task 输出中提取结构化工作记忆摘要（Context Briefing），作为跨 task 边界的 fresh session 输入
 
 **质量门控:**
 
-- FR13: 系统可执行 Convergent Loop 协议：review → finding 入库 → fix → re-review（scope 收窄）→ 收敛判定或 escalate
+- FR13: 系统可执行 Convergent Loop 协议：review（agent 执行 bmad-code-review skill）→ BmadAdapter 解析 → finding 入库 → fix → re-review（scope 收窄，agent 仍使用 bmad-code-review skill）→ 收敛判定或 escalate
 - FR14: 系统可在 SQLite 中追踪每个 finding 的跨轮次状态（open → closed / still_open / new）
 - FR15: 系统可在每轮 re-review 时自动收窄 scope，仅验证上轮 open findings 的闭合状态和新引入问题
 - FR16: 系统可执行 deterministic validation check（JSON Schema 结构验证），作为 agent review 之前的第一层验证
@@ -632,8 +632,8 @@ So that 确认双 CLI 异构 agent 调用均正常工作。
 
 **Given** 需要调用 Codex CLI 执行审查任务
 **When** 调用 `CodexAdapter.execute(prompt, options)`
-**Then** 构建 `codex exec "<prompt>" --json` 命令
-**And** reviewer 角色使用 `--sandbox read-only`，结果通过 `-o` 参数输出到文件
+**Then** 构建 `codex exec "<prompt>" --json` 命令，prompt 中指示 agent 使用 `bmad-code-review` skill（项目 `.claude/skills/` 下的 skill 在项目目录运行时自动可发现）
+**And** reviewer 角色使用 `--sandbox read-only`，审查结果通过 CLI 输出流捕获（`text_result`）
 
 **Given** Codex CLI 调用完成
 **When** 解析 JSONL 事件流和 `-o` 输出文件
@@ -786,8 +786,8 @@ So that 获得完整的质量基线。
 
 **Given** story 进入 review 阶段
 **When** Convergent Loop 启动第 1 轮
-**Then** 调度 reviewer agent（Codex read-only）执行全量 review
-**And** 解析 findings 通过 BMAD adapter，入库到 SQLite findings 表
+**Then** 调度 reviewer agent（Codex read-only），prompt 指示 agent 使用 `bmad-code-review` skill 执行全量 review
+**And** 审查结果通过 CLI 输出流捕获（text_result），经 BmadAdapter 解析为结构化 findings，入库到 SQLite findings 表
 
 **Given** 第 1 轮 review 返回 0 个 finding
 **When** 评估收敛条件
@@ -828,7 +828,8 @@ So that 每轮 review 聚焦于变更影响，效率递增。
 **Given** fix 完成后进入第 N+1 轮 re-review
 **When** 构建 re-review scope
 **Then** 仅包含上轮 open findings 的匹配键集合（file_path + rule_id + severity）
-**And** re-review prompt 明确指示 reviewer 只需验证这些 findings 的闭合状态和新引入问题
+**And** re-review prompt 指示 agent 使用 `bmad-code-review` skill，并明确这是 scoped re-review：仅需验证这些 findings 的闭合状态和新引入问题
+**And** 审查结果通过 CLI 输出流捕获（text_result），经 BmadAdapter 解析
 
 **Given** re-review 完成
 **When** 匹配 findings 状态

@@ -111,10 +111,11 @@ class ConvergentLoop:
             phase="reviewing",
         )
 
-        # --- Dispatch review agent ---
+        # --- Dispatch review agent (使用 bmad-code-review skill) ---
         review_prompt = (
-            f"Review all code in the worktree at {resolved_path}. "
-            f"Story: {story_id}. Perform a full code review."
+            f"Use the bmad-code-review skill to review all code changes "
+            f"in the worktree at {resolved_path}. "
+            f"Story: {story_id}. Review mode: branch diff against main."
         )
         result = await self._subprocess_mgr.dispatch_with_retry(
             story_id=story_id,
