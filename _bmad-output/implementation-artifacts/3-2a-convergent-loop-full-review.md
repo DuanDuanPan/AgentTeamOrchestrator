@@ -1,6 +1,6 @@
 # Story 3.2a: Convergent Loop 首轮全量 Review
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -37,38 +37,38 @@ So that 获得完整的质量基线。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 ConvergentLoop 核心类 (AC: #1, #2, #3)
-  - [ ] 1.1 在 `src/ato/convergent_loop.py` 中实现 `ConvergentLoop` 类，接收依赖注入参数：
+- [x] Task 1: 实现 ConvergentLoop 核心类 (AC: #1, #2, #3)
+  - [x] 1.1 在 `src/ato/convergent_loop.py` 中实现 `ConvergentLoop` 类，接收依赖注入参数：
     - `db_path: Path`——数据库路径
     - `subprocess_mgr: SubprocessManager`——用于 dispatch review agent
     - `bmad_adapter: BmadAdapter`——用于解析 review Markdown 输出
     - `transition_queue: TransitionQueue`——用于提交状态转换事件
     - `config: ConvergentLoopConfig`——`max_rounds` 和 `convergence_threshold`
     - `nudge: Nudge | None = None`——可选通知
-  - [ ] 1.2 实现 `async run_first_review(story_id: str, worktree_path: str | None) -> ConvergentLoopResult`：
-    - 调用 `subprocess_mgr.dispatch_with_retry()` 执行 Codex review（`cli_tool="codex"`, `role="reviewer"`, `phase="reviewing"`）
+  - [x] 1.2 实现 `async run_first_review(story_id: str, worktree_path: str | None) -> ConvergentLoopResult`：
+    - 调用 `subprocess_mgr.dispatch_with_retry()` 执行 Codex review（`cli_tool=”codex”`, `role=”reviewer”`, `phase=”reviewing”`）
     - review 必须在 story 的独立 worktree 内执行：优先使用传入的 `worktree_path`；若为 `None`，则从 `stories.worktree_path` 读取；若仍为空则直接报错，不要退化到仓库根目录
     - prompt 应包含 resolved worktree path（review 目标代码路径）
-    - options 中设置 `cwd=<resolved_worktree_path>` 和 `sandbox="read-only"`
+    - options 中设置 `cwd=<resolved_worktree_path>` 和 `sandbox=”read-only”`
     - 返回 `ConvergentLoopResult` 包含 `round_num=1`、converged 状态、finding 统计
-  - [ ] 1.3 实现 review 结果解析流程：
+  - [x] 1.3 实现 review 结果解析流程：
     - 从 `AdapterResult.text_result`（Codex 的 review Markdown 输出）调用 `bmad_adapter.parse(markdown, skill_type=BmadSkillType.CODE_REVIEW, story_id=story_id)`
     - 处理 `BmadParseResult`：verdict 为 `approved` 或 `changes_requested` 或 `parse_failed`
     - `parse_failed` 时以 **keyword arguments** 调用 `record_parse_failure()` 创建人工审批记录；如 `self._nudge` 存在，可传入 `notifier=self._nudge.notify`
-  - [ ] 1.4 实现 finding 入库流程：
-    - 将 `BmadFinding` 列表转换为 `FindingRecord` 列表（生成 `finding_id=uuid4()`、`round_num=1`、`status="open"`、计算 `dedup_hash`）
+  - [x] 1.4 实现 finding 入库流程：
+    - 将 `BmadFinding` 列表转换为 `FindingRecord` 列表（生成 `finding_id=uuid4()`、`round_num=1`、`status=”open”`、计算 `dedup_hash`）
     - 调用 `insert_findings_batch(db, records)` 批量入库
     - 调用 `maybe_create_blocking_abnormal_approval()` 检查 blocking 阈值
-  - [ ] 1.5 实现收敛评估（首轮特化逻辑）：
-    - 0 个 finding → converged=True，提交 `TransitionEvent(event_name="review_pass", source="agent", submitted_at=...)` 到 TransitionQueue
-    - ≥1 个 blocking finding → converged=False，提交 `TransitionEvent(event_name="review_fail", source="agent", submitted_at=...)`
+  - [x] 1.5 实现收敛评估（首轮特化逻辑）：
+    - 0 个 finding → converged=True，提交 `TransitionEvent(event_name=”review_pass”, source=”agent”, submitted_at=...)` 到 TransitionQueue
+    - ≥1 个 blocking finding → converged=False，提交 `TransitionEvent(event_name=”review_fail”, source=”agent”, submitted_at=...)`
     - 仅 suggestion 无 blocking → converged=True（suggestion 不阻塞收敛）
 
-- [ ] Task 2: 定义 ConvergentLoopResult 模型 (AC: #1, #2, #3)
-  - [ ] 2.1 在 `src/ato/models/schemas.py` 中添加：
+- [x] Task 2: 定义 ConvergentLoopResult 模型 (AC: #1, #2, #3)
+  - [x] 2.1 在 `src/ato/models/schemas.py` 中添加：
     ```python
     class ConvergentLoopResult(_StrictBase):
-        """单轮 Convergent Loop 结果。"""
+        “””单轮 Convergent Loop 结果。”””
         story_id: str
         round_num: int
         converged: bool
@@ -80,18 +80,18 @@ So that 获得完整的质量基线。
         new_count: int = 0
     ```
 
-- [ ] Task 3: 实现 Deterministic Validation Gate (AC: #1)
-  - [ ] 3.1 仅在存在**明确的结构化 review artifact payload** 时调用 `validate_artifact()` 执行 JSON Schema 前置验证；当前 MVP 的首轮 code review 直接审查 worktree，默认无 artifact JSON，因此该 hook 必须安全跳过
-  - [ ] 3.2 若未来 caller 提供 artifact payload 且验证失败：提交 `TransitionEvent(event_name="validate_fail", source="agent", submitted_at=...)`（story 回退到 creating），记录 validation errors 到 structlog / 返回结果，并提前返回，不进入 agent review
-  - [ ] 3.3 不要为本 story 新增“review validation task”或伪造 schema 输入；`TaskRecord.error_message` 的承载留给后续显式 review-validation task 接入时处理
+- [x] Task 3: 实现 Deterministic Validation Gate (AC: #1)
+  - [x] 3.1 仅在存在**明确的结构化 review artifact payload** 时调用 `validate_artifact()` 执行 JSON Schema 前置验证；当前 MVP 的首轮 code review 直接审查 worktree，默认无 artifact JSON，因此该 hook 必须安全跳过
+  - [x] 3.2 若未来 caller 提供 artifact payload 且验证失败：提交 `TransitionEvent(event_name=”validate_fail”, source=”agent”, submitted_at=...)`（story 回退到 creating），记录 validation errors 到 structlog / 返回结果，并提前返回，不进入 agent review
+  - [x] 3.3 不要为本 story 新增”review validation task”或伪造 schema 输入；`TaskRecord.error_message` 的承载留给后续显式 review-validation task 接入时处理
 
-- [ ] Task 4: structlog 结构化日志 (AC: #3)
-  - [ ] 4.1 review 启动时记录：`convergent_loop_round_start`，字段 `story_id`, `round_num=1`, `phase="reviewing"`
-  - [ ] 4.2 findings 入库后记录：`convergent_loop_round_complete`，字段 `round_num=1`, `findings_total`, `open_count`, `blocking_count`, `suggestion_count`
-  - [ ] 4.3 收敛判定后记录：`convergent_loop_converged` 或 `convergent_loop_needs_fix`
+- [x] Task 4: structlog 结构化日志 (AC: #3)
+  - [x] 4.1 review 启动时记录：`convergent_loop_round_start`，字段 `story_id`, `round_num=1`, `phase=”reviewing”`
+  - [x] 4.2 findings 入库后记录：`convergent_loop_round_complete`，字段 `round_num=1`, `findings_total`, `open_count`, `blocking_count`, `suggestion_count`
+  - [x] 4.3 收敛判定后记录：`convergent_loop_converged` 或 `convergent_loop_needs_fix`
 
-- [ ] Task 5: 测试 (AC: #1, #2, #3)
-  - [ ] 5.1 创建 `tests/unit/test_convergent_loop.py`：
+- [x] Task 5: 测试 (AC: #1, #2, #3)
+  - [x] 5.1 创建 `tests/unit/test_convergent_loop.py`：
     - `test_first_review_zero_findings_converges`——0 findings → converged=True，提交 review_pass
     - `test_first_review_blocking_findings_not_converged`——有 blocking → converged=False，提交 review_fail
     - `test_first_review_only_suggestions_converges`——仅 suggestion → converged=True
@@ -104,8 +104,8 @@ So that 获得完整的质量基线。
     - `test_first_review_validation_failure_submits_validate_fail`——显式提供无效 artifact payload 时提交 `validate_fail` 并提前返回
     - `test_first_review_structlog_fields`——验证日志包含 round_num, findings_total, open_count
     - `test_convergent_loop_result_model`——ConvergentLoopResult 构建和验证
-  - [ ] 5.2 测试使用 mock SubprocessManager 和 mock BmadAdapter——不实际调用 CLI
-  - [ ] 5.3 测试 TransitionQueue 交互使用 mock——验证正确事件提交（`review_pass` / `review_fail` / `validate_fail`），且 `source="agent"`、`submitted_at` 已填充
+  - [x] 5.2 测试使用 mock SubprocessManager 和 mock BmadAdapter——不实际调用 CLI
+  - [x] 5.3 测试 TransitionQueue 交互使用 mock——验证正确事件提交（`review_pass` / `review_fail` / `validate_fail`），且 `source=”agent”`、`submitted_at` 已填充
 
 ## Dev Notes
 
@@ -342,10 +342,46 @@ logger.info(
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- Python 3.11 不支持 `type` 语句（Python 3.12+），改用 `_BmadAdapter = Any` 赋值
+- 全部 20 个新测试通过
+- 全套 747 测试零回归
+
 ### Completion Notes List
 
+- ✅ Task 2: `ConvergentLoopResult` 模型添加到 `schemas.py`，包含 9 个字段
+- ✅ Task 1: `ConvergentLoop` 核心类实现于 `convergent_loop.py`，包含 `run_first_review()` 主流程、`_resolve_worktree_path()` 路径解析、`_run_validation_gate()` 验证门
+- ✅ Task 3: Deterministic Validation Gate — 无 artifact_payload 时安全跳过，有时调用 `validate_artifact()` 并在失败时提交 `validate_fail` 事件回退到 creating
+- ✅ Task 4: structlog 三个日志点 — `convergent_loop_round_start`、`convergent_loop_round_complete`、`convergent_loop_converged` / `convergent_loop_needs_fix`
+- ✅ Task 5: 20 个测试用例覆盖全部场景 + TransitionQueue 交互验证 + 真实状态机集成测试
+- ✅ Review R1 [高]: 状态机增加 `reviewing → creating` via `validate_fail` 转换路径，convergent_loop 正确提交 `validate_fail`（而非错误的 `review_fail`），新增真实状态机集成测试验证
+- ✅ Review R1 [中]: `blocking_threshold` 改为必传参数（无默认值），强制调用方从 `CostConfig.blocking_threshold` 显式传入，杜绝静默退回硬编码值
+- ✅ Review R2 [高]: 修正 R1 的错误方向——`validate_fail` 才是 story 要求的正确事件；给状态机补上 `reviewing.to(creating)` 路径而非偷换事件名
+- ✅ Review R2 [中]: `blocking_threshold` 去掉默认值变为 required，测试 helper 显式传入
+
+### Implementation Plan
+
+1. 先定义 `ConvergentLoopResult` 模型（Task 2）作为返回值类型
+2. 实现 `ConvergentLoop` 核心类（Task 1），一体化包含 validation gate（Task 3）和 structlog（Task 4）
+3. 编写 20 个单元测试覆盖所有 AC（Task 5）
+4. 收敛逻辑简化为 blocking 有/无判定，不实现 convergence_threshold 计算（留给 Story 3.2d）
+
 ### File List
+
+| 操作 | 文件路径 |
+|------|---------|
+| MODIFY | `src/ato/convergent_loop.py` |
+| MODIFY | `src/ato/models/schemas.py` |
+| MODIFY | `src/ato/state_machine.py` |
+| CREATE | `tests/unit/test_convergent_loop.py` |
+| MODIFY | `_bmad-output/implementation-artifacts/sprint-status.yaml` |
+| MODIFY | `_bmad-output/implementation-artifacts/3-2a-convergent-loop-full-review.md` |
+
+### Change Log
+
+- 2026-03-25: Story 3.2a 完整实现 — ConvergentLoop 首轮全量 review（17 测试，744 全套通过）
+- 2026-03-25: R1 修复 — validation gate 事件改为 review_fail + blocking_threshold 配置化（19 测试，746 全套通过）
+- 2026-03-25: R2 修复 — 状态机补 reviewing→creating via validate_fail + blocking_threshold 改为 required（20 测试，747 全套通过）

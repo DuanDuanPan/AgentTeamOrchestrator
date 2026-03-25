@@ -190,6 +190,25 @@ class ValidationResult(_StrictBase):
 
 
 # ---------------------------------------------------------------------------
+# Convergent Loop 结果模型 (Story 3.2a)
+# ---------------------------------------------------------------------------
+
+
+class ConvergentLoopResult(_StrictBase):
+    """单轮 Convergent Loop 结果。"""
+
+    story_id: str
+    round_num: int
+    converged: bool
+    findings_total: int
+    blocking_count: int
+    suggestion_count: int
+    open_count: int
+    closed_count: int = 0
+    new_count: int = 0
+
+
+# ---------------------------------------------------------------------------
 # Record Models
 # ---------------------------------------------------------------------------
 

@@ -112,6 +112,7 @@ class StoryLifecycle(StateMachine):
         developing ──dev_done──→ reviewing
         reviewing ──review_pass──→ qa_testing
         reviewing ──review_fail──→ fixing           ← Convergent Loop
+        reviewing ──validate_fail──→ creating       ← artifact 校验失败回退
         fixing ──fix_done──→ reviewing              ← re-review
         qa_testing ──qa_pass──→ uat
         qa_testing ──qa_fail──→ fixing              ← QA Convergent Loop
@@ -140,7 +141,7 @@ class StoryLifecycle(StateMachine):
     start_create = queued.to(creating)
     create_done = creating.to(validating)
     validate_pass = validating.to(dev_ready)
-    validate_fail = validating.to(creating)
+    validate_fail = validating.to(creating) | reviewing.to(creating)
     start_dev = dev_ready.to(developing)
     dev_done = developing.to(reviewing)
     review_pass = reviewing.to(qa_testing)
