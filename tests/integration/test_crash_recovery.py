@@ -471,6 +471,7 @@ class TestRecoveryLogging:
         assert len(complete_events) == 1
         assert complete_events[0]["recovery_mode"] == "crash"
         assert "auto_recovered" in complete_events[0]
+        assert "dispatched" in complete_events[0]
         assert "needs_human" in complete_events[0]
         assert "duration_ms" in complete_events[0]
 
