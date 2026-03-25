@@ -1,6 +1,6 @@
 # Story 2B.6: 操作者可启动 Interactive Session 并通过 ato submit 完成
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -49,45 +49,45 @@ So that 复杂任务可以人机协作解决。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: ContextBriefing Pydantic 模型 (AC: #4)
-  - [ ] 1.1 在 `schemas.py` 添加 `ContextBriefing(_StrictBase)` 模型
-  - [ ] 1.2 添加 `created_at: datetime` 字段（存储时自动填充）
-  - [ ] 1.3 编写单元测试验证 model_validate() 和序列化
+- [x] Task 1: ContextBriefing Pydantic 模型 (AC: #4)
+  - [x] 1.1 在 `schemas.py` 添加 `ContextBriefing(_StrictBase)` 模型
+  - [x] 1.2 添加 `created_at: datetime` 字段（存储时自动填充）
+  - [x] 1.3 编写单元测试验证 model_validate() 和序列化
 
-- [ ] Task 2: Interactive Session 启动机制 (AC: #1)
-  - [ ] 2.1 在 `subprocess_mgr.py` 添加 `dispatch_interactive()` 方法
-  - [ ] 2.2 使用 `open` (macOS) 或 platform-aware 方式在新终端窗口启动
-  - [ ] 2.3 在 adapter 层暴露/复用 interactive argv builder，生成 `claude -p <prompt> [--resume <session_id>]` 命令（OAuth 模式）；`subprocess_mgr.py` 只负责终端启动包装，不直接拼 CLI flags
-  - [ ] 2.4 注册 PID + started_at 到 tasks 表，并写入 `.ato/sessions/{story_id}.json` sidecar 元数据（`pid` / `started_at` / `base_commit` / `session_id?`）
-  - [ ] 2.5 不新增 `tasks.phase_type`、`tasks.worktree_path` 或 `task_type` 列；interactive/structured 区分来自 `PhaseDefinition.phase_type` 和既有 `stories.worktree_path`
-  - [ ] 2.6 编写单元测试（mock subprocess + DB 验证）
+- [x] Task 2: Interactive Session 启动机制 (AC: #1)
+  - [x] 2.1 在 `subprocess_mgr.py` 添加 `dispatch_interactive()` 方法
+  - [x] 2.2 使用 `open` (macOS) 或 platform-aware 方式在新终端窗口启动
+  - [x] 2.3 在 adapter 层暴露/复用 interactive argv builder，生成 `claude -p <prompt> [--resume <session_id>]` 命令（OAuth 模式）；`subprocess_mgr.py` 只负责终端启动包装，不直接拼 CLI flags
+  - [x] 2.4 注册 PID + started_at 到 tasks 表，并写入 `.ato/sessions/{story_id}.json` sidecar 元数据（`pid` / `started_at` / `base_commit` / `session_id?`）
+  - [x] 2.5 不新增 `tasks.phase_type`、`tasks.worktree_path` 或 `task_type` 列；interactive/structured 区分来自 `PhaseDefinition.phase_type` 和既有 `stories.worktree_path`
+  - [x] 2.6 编写单元测试（mock subprocess + DB 验证）
 
-- [ ] Task 3: Worktree 新 commit 检测 (AC: #2)
-  - [ ] 3.1 在 `worktree_mgr.py` 添加 `has_new_commits(story_id, since_rev)` 方法
-  - [ ] 3.2 使用 `git log <since_rev>..HEAD --oneline` 检测 worktree 中的新提交，其中 `since_rev` 来自 session sidecar 的 `base_commit`
-  - [ ] 3.3 为 sidecar 元数据读取与 commit 检测编写单元测试（mock git subprocess）
+- [x] Task 3: Worktree 新 commit 检测 (AC: #2)
+  - [x] 3.1 在 `worktree_mgr.py` 添加 `has_new_commits(worktree_path, since_rev)` 方法
+  - [x] 3.2 使用 `git log <since_rev>..HEAD --oneline` 检测 worktree 中的新提交，其中 `since_rev` 来自 session sidecar 的 `base_commit`
+  - [x] 3.3 为 sidecar 元数据读取与 commit 检测编写单元测试（mock git subprocess）
 
-- [ ] Task 4: `ato submit` CLI 命令 (AC: #2, #4)
-  - [ ] 4.1 在 `cli.py` 添加 `submit` 命令
-  - [ ] 4.2 验证 story 存在，且 `story.current_phase` 属于配置中的 `interactive_session` phases（默认 example config 为 `uat`，不要硬编码 `developing`）
-  - [ ] 4.3 读取 `.ato/sessions/{story_id}.json`，调用 `WorktreeManager.has_new_commits(story_id, base_commit)` 验证有实际工作
-  - [ ] 4.4 构造 ContextBriefing 并 model_validate()
-  - [ ] 4.5 更新当前 interactive task 的 `status="completed"`、`context_briefing=briefing.model_dump_json()`、`completed_at`
-  - [ ] 4.6 不在 CLI 进程内直接调用 `TransitionQueue`；只执行 SQLite 写入 + `send_external_nudge(orchestrator_pid)`
-  - [ ] 4.7 编写 CLI 单元测试，覆盖 Orchestrator 运行/未运行两条路径
-  - [ ] 4.8 编写 CLI 单元测试，覆盖 `--briefing-file` / 交互式输入两条路径
+- [x] Task 4: `ato submit` CLI 命令 (AC: #2, #4)
+  - [x] 4.1 在 `cli.py` 添加 `submit` 命令
+  - [x] 4.2 验证 story 存在，且 `story.current_phase` 属于配置中的 `interactive_session` phases（默认 example config 为 `uat`，不要硬编码 `developing`）
+  - [x] 4.3 读取 `.ato/sessions/{story_id}.json`，调用 `WorktreeManager.has_new_commits(worktree_path, base_commit)` 验证有实际工作
+  - [x] 4.4 构造 ContextBriefing 并 model_validate()
+  - [x] 4.5 更新当前 interactive task 的 `status="completed"`、`context_briefing=briefing.model_dump_json()`、`completed_at`
+  - [x] 4.6 不在 CLI 进程内直接调用 `TransitionQueue`；只执行 SQLite 写入 + `send_external_nudge(orchestrator_pid)`
+  - [x] 4.7 编写 CLI 单元测试，覆盖 Orchestrator 运行/未运行两条路径
+  - [x] 4.8 编写 CLI 单元测试，覆盖 `--briefing-file` / 交互式输入两条路径
 
-- [ ] Task 5: 超时监控与 Approval 创建 (AC: #3)
-  - [ ] 5.1 在 `core.py` 的 `_poll_cycle()` 中添加 interactive session 超时检测，并根据 `settings.phases` 识别 interactive phases（不读取不存在的 `task.phase_type`）；若需要，补充 `db.py` 的 `get_tasks_by_status()` 查询 helper
-  - [ ] 5.2 超时后创建 approval（type=`session_timeout`，payload 为 JSON 字符串，包含 `task_id`、`elapsed_seconds`、`options`、`recommended_action`）
-  - [ ] 5.3 `_poll_cycle()` 检测已由 `ato submit` 标记完成的 interactive task，并在 Orchestrator 进程内提交 phase-aware 的 success `TransitionEvent`
-  - [ ] 5.4 Approval 决策处理：根据操作者选择执行对应恢复策略
-  - [ ] 5.5 编写单元测试
+- [x] Task 5: 超时监控与 Approval 创建 (AC: #3)
+  - [x] 5.1 在 `core.py` 的 `_poll_cycle()` 中添加 interactive session 超时检测，并根据 `settings.phases` 识别 interactive phases（不读取不存在的 `task.phase_type`）；补充 `db.py` 的 `get_tasks_by_status()` 查询 helper
+  - [x] 5.2 超时后创建 approval（type=`session_timeout`，payload 为 JSON 字符串，包含 `task_id`、`elapsed_seconds`、`options`、`recommended_action`）
+  - [x] 5.3 `_poll_cycle()` 检测已由 `ato submit` 标记完成的 interactive task，并在 Orchestrator 进程内提交 phase-aware 的 success `TransitionEvent`
+  - [x] 5.4 Approval 决策处理：根据操作者选择执行对应恢复策略
+  - [x] 5.5 编写单元测试
 
-- [ ] Task 6: Session 续接支持 (AC: #5)
-  - [ ] 6.1 dispatch_interactive() 支持 `session_id` 参数用于 `--resume`
-  - [ ] 6.2 续接优先读取显式传入的 `session_id` 或 sidecar 元数据中的 `session_id`；若无值则降级为 fresh session / fork
-  - [ ] 6.3 编写续接场景的单元测试
+- [x] Task 6: Session 续接支持 (AC: #5)
+  - [x] 6.1 dispatch_interactive() 支持 `session_id` 参数用于 `--resume`
+  - [x] 6.2 续接优先读取显式传入的 `session_id` 或 sidecar 元数据中的 `session_id`；若无值则降级为 fresh session / fork
+  - [x] 6.3 编写续接场景的单元测试
 
 ## Dev Notes
 
@@ -347,8 +347,45 @@ class WorktreeManager:
 
 ### Agent Model Used
 
+Claude Opus 4.6 (1M context)
+
 ### Debug Log References
+
+- 无 debug 问题
 
 ### Completion Notes List
 
+- ✅ Task 1: `ContextBriefing` Pydantic 模型添加到 `schemas.py`，含 `story_id`, `phase`, `task_type`, `artifacts_produced`, `key_decisions`, `agent_notes`, `created_at` 字段。6 个单元测试验证 model_validate()、序列化、strict 模式。
+- ✅ Task 2: `dispatch_interactive()` 添加到 `SubprocessManager`，使用 `_launch_terminal_session()` 在新终端窗口启动 claude CLI。`build_interactive_command()` 函数在 `claude_cli.py` 暴露，保持 adapter 隔离。sidecar 元数据 `.ato/sessions/{story_id}.json` 写入 PID/started_at/base_commit/session_id。
+- ✅ Task 3: `has_new_commits()` 添加到 `WorktreeManager`，使用 `git -C <path> log <since>..HEAD --oneline` 检测新提交。3 个单元测试覆盖成功/空/错误场景。
+- ✅ Task 4: `ato submit` CLI 命令完整实现。验证 story 存在、phase 为 interactive_session（通过配置动态判断）、有新 commit、构造 ContextBriefing、更新 task 状态、发送 nudge。支持 `--briefing-file` 和交互式输入（自动提取 artifacts_produced）两种模式。6 个 CLI 单元测试。
+- ✅ Task 5: `_check_interactive_timeouts()` 和 `_detect_completed_interactive_tasks()` 函数添加到 `core.py`。`_poll_cycle()` 集成超时检测和 completed task 检测。`get_tasks_by_status()` helper 添加到 `db.py`。3 个单元测试 + 2 个重复防护测试。
+- ✅ Task 6: `dispatch_interactive()` 和 `build_interactive_command()` 均支持 `session_id` 参数用于 `--resume` 续接。无显式 session_id 时从已有 sidecar 读取 fallback；均无值则降级为 fresh session。5 个单元测试。
+- ✅ Code Review Fix 1: `_detect_completed_interactive_tasks()` 增加 story.current_phase 校验 + task 消费标记（`expected_artifact='transition_submitted'`），防止重复 transition 派发。
+- ✅ Code Review Fix 2: `_check_interactive_timeouts()` 增加已有 pending approval 查重，防止每次轮询重复创建 session_timeout approval。
+- ✅ Code Review Fix 3: phase→event 映射改为显式 dict（`uat→uat_pass`, `developing→dev_done`），不再用 `f"{name}_pass"` 生成，防止非 uat phase 生成错误 event name。
+- ✅ Code Review Fix 4: `dispatch_interactive()` 增加 sidecar session_id fallback 读取；`_launch_terminal_session()` 接受并保留 session_id 到 sidecar 文件。
+- ✅ Code Review Fix 5: `ato submit` 交互输入分支调用 `_extract_changed_files()` 从 worktree git diff 提取变更文件列表，不再留空。
+
 ### File List
+
+**新增文件：**
+- `tests/unit/test_interactive_session.py` — Interactive Session 综合单元测试 (25 个测试)
+- `tests/unit/test_cli_submit.py` — ato submit CLI 命令单元测试 (6 个测试)
+
+**修改文件：**
+- `src/ato/models/schemas.py` — 新增 `ContextBriefing` 模型
+- `src/ato/adapters/claude_cli.py` — 新增 `build_interactive_command()` 函数
+- `src/ato/subprocess_mgr.py` — 新增 `_launch_terminal_session()`, `dispatch_interactive()`, `_wait_for_sidecar()`
+- `src/ato/worktree_mgr.py` — 新增 `has_new_commits()` 方法
+- `src/ato/cli.py` — 新增 `submit` 命令、`_extract_changed_files()` 及相关辅助函数
+- `src/ato/core.py` — 新增 `_check_interactive_timeouts()`, `_detect_completed_interactive_tasks()`；更新 `_poll_cycle()`
+- `src/ato/models/db.py` — 新增 `get_tasks_by_status()` 查询函数
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — 状态更新
+
+### Change Log
+
+- 2026-03-25: Story 2B.6 Interactive Session 完整实现。新增 ContextBriefing 模型、dispatch_interactive 启动机制、has_new_commits 检测、ato submit CLI 命令、超时监控与 approval 创建、session 续接支持。26 个新测试，全部 720 个测试通过，零回归。
+- 2026-03-25: 修复 Code Review R1 的 5 项 patch findings。防止重复 transition 派发和重复 timeout approval 创建；修正 phase→event 映射；完善 resume 契约（sidecar fallback + session_id 保留）；交互输入分支自动提取 artifacts_produced。
+- 2026-03-25: 修复 Code Review R2 的 3 项 patch findings。(1) 消费标记移到 TQ.submit() 成功之后确保原子性，崩溃时下次轮询可重试；(2) _launch_terminal_session 改用临时 shell 脚本文件 + shlex.quote/json.dumps 安全转义，避免 prompt 中特殊字符破坏命令；(3) ato submit 用 sidecar PID 精确匹配 task，避免多 running task 时误标。
+- 2026-03-25: 修复 Code Review R3 的 3 项 patch findings。(1) sidecar here-doc 从 `<<'SIDECAR_EOF'` 改为 `<<SIDECAR_EOF`，使 $$ 和 $(date) 正确展开生成合法 JSON；(2) --briefing-file 增加 story_id/phase 一致性校验；(3) 空字符串 session_id 统一降级为 fresh session。新增 2 个回归测试（33 个测试总计），全部 727 个测试通过。

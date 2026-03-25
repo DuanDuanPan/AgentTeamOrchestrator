@@ -472,6 +472,28 @@ ParserMode = Literal["deterministic", "semantic_fallback", "failed"]
 ParseVerdict = Literal["approved", "changes_requested", "parse_failed"]
 
 
+# ---------------------------------------------------------------------------
+# Context Briefing 模型 (Story 2B.6)
+# ---------------------------------------------------------------------------
+
+
+class ContextBriefing(_StrictBase):
+    """Interactive Session / Agent Task 完成后的结构化工作记忆摘要。
+
+    task_type 使用当前交互 phase 的语义标签（如 developing / uat），
+    不限制为固定枚举值。经 model_validate() 验证后以 JSON 序列化形式
+    存入 tasks 表 context_briefing 列。
+    """
+
+    story_id: str
+    phase: str
+    task_type: str
+    artifacts_produced: list[str]
+    key_decisions: list[str]
+    agent_notes: str
+    created_at: datetime
+
+
 class BmadSkillType(StrEnum):
     """BMAD skill 类型枚举，支持 workflow 名称/别名归一化。"""
 

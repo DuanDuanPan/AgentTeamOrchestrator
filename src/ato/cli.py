@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click.exceptions
@@ -17,7 +18,7 @@ from rich.text import Text
 
 from ato.config import PhaseDefinition, build_phase_definitions, load_config
 from ato.models.db import get_connection, get_story
-from ato.models.schemas import CheckResult, StoryRecord
+from ato.models.schemas import CheckResult, ContextBriefing, StoryRecord
 from ato.preflight import run_preflight
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
@@ -796,3 +797,280 @@ async def _plan_async(
         typer.echo("⚠ 配置加载失败，仅显示阶段序列", err=True)
 
     render_plan(story, phase_definitions)
+
+
+# ---------------------------------------------------------------------------
+# ato submit — Interactive Session 完成提交
+# ---------------------------------------------------------------------------
+
+
+def _send_nudge_safe(pid_path: Path) -> None:
+    """安全发送 nudge，Orchestrator 未运行时仅输出提示。"""
+    from ato.core import read_pid_file
+    from ato.nudge import send_external_nudge
+
+    pid = read_pid_file(pid_path)
+    if pid is None:
+        typer.echo("Orchestrator 未运行，跳过 nudge（下次启动时自动检测）。")
+        return
+    try:
+        send_external_nudge(pid)
+    except ProcessLookupError:
+        typer.echo("Orchestrator 进程不存在，跳过 nudge。")
+    except PermissionError:
+        typer.echo("无权向 Orchestrator 发送 nudge 信号。", err=True)
+
+
+async def _check_new_commits(worktree_path: str, base_commit: str, db_path: Path) -> bool:
+    """检测 worktree 中是否有新 commit。"""
+    from ato.worktree_mgr import WorktreeManager
+
+    mgr = WorktreeManager(
+        project_root=Path(worktree_path).parent.parent,
+        db_path=db_path,
+    )
+    return await mgr.has_new_commits(
+        worktree_path=Path(worktree_path),
+        since_rev=base_commit,
+    )
+
+
+async def _extract_changed_files(worktree_path: str, base_commit: str) -> list[str]:
+    """从 worktree git diff 提取变更文件列表。"""
+    import asyncio as _asyncio
+
+    from ato.adapters.base import cleanup_process
+
+    proc = await _asyncio.create_subprocess_exec(
+        "git",
+        "diff",
+        "--name-only",
+        base_commit,
+        "HEAD",
+        stdout=_asyncio.subprocess.PIPE,
+        stderr=_asyncio.subprocess.PIPE,
+        cwd=worktree_path,
+    )
+    try:
+        stdout_bytes, _ = await _asyncio.wait_for(proc.communicate(), timeout=30)
+    except TimeoutError:
+        await cleanup_process(proc)
+        return []
+    finally:
+        await cleanup_process(proc)
+
+    if proc.returncode != 0:
+        return []
+    stdout = stdout_bytes.decode() if stdout_bytes else ""
+    return [f.strip() for f in stdout.splitlines() if f.strip()]
+
+
+@app.command("submit")
+def submit_cmd(
+    story_id: str = typer.Argument(..., help="Story ID"),
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    briefing_file: Path | None = typer.Option(
+        None,
+        "--briefing-file",
+        help="Context Briefing JSON 文件路径",
+    ),
+    config_path: Path | None = typer.Option(None, "--config", help="ato.yaml 配置文件路径"),
+) -> None:
+    """提交 Interactive Session 完成，标记任务完成并通知 Orchestrator。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        asyncio.run(_submit_async(story_id, resolved_db, briefing_file, config_path))
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+async def _submit_async(
+    story_id: str,
+    db_path: Path,
+    briefing_file: Path | None,
+    config_path: Path | None,
+) -> None:
+    """submit 命令的异步实现。"""
+    from ato.config import build_phase_definitions, load_config
+    from ato.models.db import (
+        get_connection,
+        get_story,
+        get_tasks_by_story,
+        update_task_status,
+    )
+
+    ato_dir = db_path.parent
+
+    # 1. 验证 story 存在
+    db = await get_connection(db_path)
+    try:
+        story = await get_story(db, story_id)
+    finally:
+        await db.close()
+
+    if story is None:
+        typer.echo(f"Story not found: {story_id}", err=True)
+        raise typer.Exit(code=1)
+
+    # 2. 加载配置，确定 interactive phases
+    resolved_config = config_path or Path("ato.yaml")
+    if not resolved_config.exists():
+        # 尝试 ato.yaml.example
+        resolved_config = Path("ato.yaml.example")
+    if not resolved_config.exists():
+        typer.echo("错误：找不到 ato.yaml 配置文件。", err=True)
+        raise typer.Exit(code=1)
+
+    settings = load_config(resolved_config)
+    interactive_phases = {
+        pd.name
+        for pd in build_phase_definitions(settings)
+        if pd.phase_type == "interactive_session"
+    }
+
+    # 3. 验证 story 在 interactive phase
+    if story.current_phase not in interactive_phases:
+        typer.echo(
+            f"Story '{story_id}' 不在 interactive session 阶段 "
+            f"（当前: {story.current_phase}，允许: {interactive_phases}）",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # 4. 读取 sidecar 元数据
+    sidecar_path = ato_dir / "sessions" / f"{story_id}.json"
+    if not sidecar_path.exists():
+        typer.echo(
+            f"错误：Session 元数据不存在: {sidecar_path}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    sidecar_data = json.loads(sidecar_path.read_text())
+    base_commit = sidecar_data.get("base_commit")
+    if not base_commit:
+        typer.echo("错误：Session 元数据缺少 base_commit。", err=True)
+        raise typer.Exit(code=1)
+
+    # 5. 验证有新 commit
+    worktree_path = story.worktree_path
+    if not worktree_path:
+        typer.echo("错误：Story 没有关联的 worktree 路径。", err=True)
+        raise typer.Exit(code=1)
+
+    has_commits = await _check_new_commits(worktree_path, base_commit, db_path)
+    if not has_commits:
+        typer.echo(
+            f"No commits found in worktree since {base_commit[:8]}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # 6. 构造 ContextBriefing
+    now = datetime.now(tz=UTC)
+    if briefing_file is not None:
+        briefing_data = json.loads(briefing_file.read_text())
+        # JSON 中 datetime 为字符串，需要先转换
+        if isinstance(briefing_data.get("created_at"), str):
+            briefing_data["created_at"] = datetime.fromisoformat(briefing_data["created_at"])
+        briefing = ContextBriefing.model_validate(briefing_data)
+        # 校验 briefing 属于当前 story 和 phase
+        if briefing.story_id != story_id:
+            typer.echo(
+                f"错误：briefing 的 story_id ({briefing.story_id}) "
+                f"与当前 story ({story_id}) 不匹配。",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if briefing.phase != story.current_phase:
+            typer.echo(
+                f"错误：briefing 的 phase ({briefing.phase}) "
+                f"与当前 phase ({story.current_phase}) 不匹配。",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if briefing.task_type != story.current_phase:
+            typer.echo(
+                f"错误：briefing 的 task_type ({briefing.task_type}) "
+                f"与当前 phase ({story.current_phase}) 不匹配。",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+    else:
+        # 交互式输入——最小默认值
+        agent_notes = typer.prompt("输入工作备注（可选，直接回车跳过）", default="")
+        key_decisions_str = typer.prompt("输入关键决策（逗号分隔，可选）", default="")
+        key_decisions = (
+            [d.strip() for d in key_decisions_str.split(",") if d.strip()]
+            if key_decisions_str
+            else []
+        )
+        # 从 worktree git diff 自动提取变更文件
+        artifacts = await _extract_changed_files(worktree_path, base_commit)
+        briefing = ContextBriefing(
+            story_id=story_id,
+            phase=story.current_phase,
+            task_type=story.current_phase,
+            artifacts_produced=artifacts,
+            key_decisions=key_decisions,
+            agent_notes=agent_notes,
+            created_at=now,
+        )
+
+    # 7. 更新 task 状态
+    # 用 sidecar 中的 pid 精确匹配 task，避免多个 running task 时猜错
+    sidecar_pid = sidecar_data.get("pid")
+    db = await get_connection(db_path)
+    try:
+        tasks = await get_tasks_by_story(db, story_id)
+        # 收集当前 phase 的 running task 候选
+        candidates = [t for t in tasks if t.status == "running" and t.phase == story.current_phase]
+        running_task = None
+        if sidecar_pid is not None:
+            for t in candidates:
+                if t.pid == sidecar_pid:
+                    running_task = t
+                    break
+        # PID 不匹配时：仅在唯一候选时 fallback，多候选则报错
+        if running_task is None:
+            if len(candidates) == 1:
+                running_task = candidates[0]
+            elif len(candidates) > 1:
+                pids = [str(t.pid) for t in candidates]
+                typer.echo(
+                    f"错误：存在 {len(candidates)} 个 running interactive task "
+                    f"(PIDs: {', '.join(pids)})，但 sidecar PID ({sidecar_pid}) "
+                    f"未匹配到任何一个。请检查 session 元数据。",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+
+        if running_task is None:
+            typer.echo("错误：未找到运行中的 interactive task。", err=True)
+            raise typer.Exit(code=1)
+
+        await update_task_status(
+            db,
+            running_task.task_id,
+            "completed",
+            context_briefing=briefing.model_dump_json(),
+            completed_at=now,
+        )
+    finally:
+        await db.close()
+
+    # 8. 发送 nudge
+    pid_path = ato_dir / "orchestrator.pid"
+    _send_nudge_safe(pid_path)
+
+    typer.echo(f"✅ Story '{story_id}' interactive session 已完成。")

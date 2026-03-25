@@ -228,6 +228,39 @@ class WorktreeManager:
             return None
         return Path(story.worktree_path)
 
+    async def has_new_commits(
+        self,
+        worktree_path: Path,
+        since_rev: str,
+    ) -> bool:
+        """检测 worktree 中是否有新 commit。
+
+        使用 ``git log <since_rev>..HEAD --oneline`` 检测。
+
+        Args:
+            worktree_path: Worktree 绝对路径。
+            since_rev: 基准 commit（来自 session sidecar 的 base_commit）。
+
+        Returns:
+            True 表示有新 commit，False 表示无。
+        """
+        returncode, stdout, _stderr = await self._run_git(
+            "-C",
+            str(worktree_path),
+            "log",
+            f"{since_rev}..HEAD",
+            "--oneline",
+        )
+        if returncode != 0:
+            logger.warning(
+                "has_new_commits_git_error",
+                worktree_path=str(worktree_path),
+                since_rev=since_rev,
+                returncode=returncode,
+            )
+            return False
+        return bool(stdout.strip())
+
     async def exists(self, story_id: str) -> bool:
         """检查 story 的 worktree 是否存在。
 
