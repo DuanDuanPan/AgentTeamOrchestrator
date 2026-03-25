@@ -15,6 +15,8 @@ import typer
 from rich.console import Console
 from rich.text import Text
 
+from ato.config import PhaseDefinition, build_phase_definitions, load_config
+from ato.models.db import get_connection, get_story
 from ato.models.schemas import CheckResult, StoryRecord
 from ato.preflight import run_preflight
 
@@ -615,3 +617,182 @@ def stop_cmd(
     except ProcessLookupError:
         typer.echo("Orchestrator 已强制停止。")
         remove_pid_file(pid_path)
+
+
+# ---------------------------------------------------------------------------
+# ato plan — 阶段序列预览
+# ---------------------------------------------------------------------------
+
+# 阶段类型 → rich 颜色样式
+_PHASE_TYPE_STYLES: dict[str, str] = {
+    "structured_job": "cyan",
+    "convergent_loop": "magenta",
+    "interactive_session": "green",
+}
+_SYSTEM_PHASE_STYLE = "dim"  # queued, done
+
+
+def render_plan(
+    story: StoryRecord,
+    phase_defs: list[PhaseDefinition],
+    *,
+    console: Console | None = None,
+) -> None:
+    """渲染 story 阶段序列预览到 console。"""
+    from ato.state_machine import CANONICAL_PHASES, PHASE_TO_STATUS
+
+    con = console or _console
+
+    full_sequence = ["queued", *CANONICAL_PHASES, "done"]
+
+    # 构建 phase_info 映射（name → (phase_type, role)）
+    phase_info: dict[str, tuple[str, str]] = {}
+    for pd in phase_defs:
+        phase_info[pd.name] = (pd.phase_type, pd.role)
+
+    # 标题
+    con.print()
+    con.print(Text("AgentTeamOrchestrator — Story Plan", style="bold"))
+    con.print()
+
+    current_phase = story.current_phase
+    is_blocked = current_phase == "blocked"
+    is_done = current_phase == "done"
+
+    # Story 信息
+    status_str = PHASE_TO_STATUS.get(current_phase, current_phase)
+    story_line = Text()
+    story_line.append(f"Story: {story.story_id} — {story.title}")
+    con.print(story_line, highlight=False)
+
+    if is_blocked:
+        con.print(
+            Text("⚠ 当前状态: blocked（MVP 不显示 blocked 前进度）", style="yellow"),
+            highlight=False,
+        )
+    else:
+        phase_line = Text()
+        phase_line.append(f"当前阶段: {current_phase} ({status_str})")
+        con.print(phase_line, highlight=False)
+
+    con.print()
+
+    # 确定当前阶段在序列中的位置
+    if is_done:
+        current_idx = len(full_sequence)  # 所有阶段都是 completed
+    elif is_blocked:
+        current_idx = -1  # 不做进度推断
+    elif current_phase in full_sequence:
+        current_idx = full_sequence.index(current_phase)
+    else:
+        current_idx = -1  # 未知阶段，全部按 future 渲染
+
+    # 逐行渲染
+    for i, phase_name in enumerate(full_sequence):
+        is_system_phase = phase_name in ("queued", "done")
+
+        # 确定进度状态
+        if current_idx < 0:
+            # blocked 或未知：全部按未激活阶段渲染（保留 phase-type 颜色）
+            icon = "○"
+            if is_system_phase:
+                style = _SYSTEM_PHASE_STYLE
+            else:
+                pt = phase_info.get(phase_name, (None, None))[0] if phase_info else None
+                style = _PHASE_TYPE_STYLES.get(pt, "") if pt else ""
+            suffix = ""
+        elif i < current_idx:
+            icon = "✔"
+            style = "green"
+            suffix = ""
+        elif i == current_idx:
+            icon = "▶"
+            pt = phase_info.get(phase_name, (None, None))[0] if phase_info else None
+            color = _PHASE_TYPE_STYLES.get(pt, "") if pt else ""
+            style = f"bold {color}".strip() if color else "bold"
+            suffix = " ← 当前"
+        else:
+            icon = "○"
+            if is_system_phase:
+                style = _SYSTEM_PHASE_STYLE
+            else:
+                pt = phase_info.get(phase_name, (None, None))[0] if phase_info else None
+                style = _PHASE_TYPE_STYLES.get(pt, "") if pt else ""
+            suffix = ""
+
+        # 构建行文本
+        line = Text()
+        line.append(f"  {icon} ", style=style)
+        line.append(f"{phase_name:<16}", style=style)
+
+        # 类型/角色信息（仅在有配置时显示）
+        if phase_info and phase_name in phase_info:
+            pt, role = phase_info[phase_name]
+            line.append(f"({pt} | {role})", style=style)
+
+        if suffix:
+            line.append(suffix, style=style)
+
+        con.print(line, highlight=False)
+
+    con.print()
+
+
+@app.command("plan")
+def plan_command(
+    story_id: str = typer.Argument(..., help="Story ID"),
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    config_path: Path | None = typer.Option(None, "--config", help="ato.yaml 配置文件路径"),
+) -> None:
+    """预览 story 将经历的完整阶段序列。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+
+    if not resolved_db.exists():
+        typer.echo(
+            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        asyncio.run(_plan_async(story_id, resolved_db, config_path))
+    except click.exceptions.Exit:
+        raise
+    except click.exceptions.Abort:
+        raise
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+async def _plan_async(
+    story_id: str,
+    db_path: Path,
+    config_path: Path | None,
+) -> None:
+    """执行 plan 异步逻辑。"""
+    db = await get_connection(db_path)
+    try:
+        story = await get_story(db, story_id)
+    finally:
+        await db.close()
+
+    if story is None:
+        typer.echo(f"Story not found: {story_id}", err=True)
+        raise typer.Exit(code=1)
+
+    # 配置加载（可选降级）
+    phase_definitions: list[PhaseDefinition] = []
+    resolved_config = config_path or Path("ato.yaml")
+    try:
+        settings = load_config(resolved_config)
+        phase_definitions = build_phase_definitions(settings)
+    except Exception as exc:
+        logger.warning(
+            "plan_config_load_failed",
+            config_path=str(resolved_config),
+            error=str(exc),
+        )
+        typer.echo("⚠ 配置加载失败，仅显示阶段序列", err=True)
+
+    render_plan(story, phase_definitions)

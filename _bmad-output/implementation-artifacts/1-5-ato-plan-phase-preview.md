@@ -1,6 +1,6 @@
 # Story 1.5: ato plan 阶段预览
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -45,68 +45,68 @@ So that 在启动编排前对即将发生的事有清晰的心理预期。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 `ato plan` CLI 命令入口 (AC: #1, #3, #4)
-  - [ ] 1.1 在 `src/ato/cli.py` 中新增 `@app.command("plan")` 顶级命令，接受 `story_id: str` 位置参数、`--db-path` 可选参数（默认 `.ato/state.db`）、`--config` 可选参数（默认 `ato.yaml`）
-  - [ ] 1.2 数据库存在性检查：若 `db_path` 不存在，`typer.echo("错误：数据库不存在: {db_path}。请先运行 `ato init`。", err=True)` + `raise typer.Exit(code=1)`
-  - [ ] 1.3 调用 `asyncio.run(_plan_async(story_id, db_path, config_path))` 执行异步逻辑
-  - [ ] 1.4 在 `_plan_async` 中：通过 `get_connection(db_path)` 打开连接，`get_story(db, story_id)` 查询 story，并在 `try/finally` 中 `await db.close()`
-  - [ ] 1.5 Story 不存在时：`typer.echo(f"Story not found: {story_id}", err=True)` + `raise typer.Exit(code=1)`
-  - [ ] 1.6 配置加载（可选降级）：尝试 `load_config(config_path)` + `build_phase_definitions(settings)`，失败时同时执行：
-    - `logger.warning("plan_config_load_failed", config_path=str(config_path), error=str(exc))`
-    - `typer.echo("⚠ 配置加载失败，仅显示阶段序列", err=True)`
+- [x] Task 1: 实现 `ato plan` CLI 命令入口 (AC: #1, #3, #4)
+  - [x] 1.1 在 `src/ato/cli.py` 中新增 `@app.command(“plan”)` 顶级命令，接受 `story_id: str` 位置参数、`--db-path` 可选参数（默认 `.ato/state.db`）、`--config` 可选参数（默认 `ato.yaml`）
+  - [x] 1.2 数据库存在性检查：若 `db_path` 不存在，`typer.echo(“错误：数据库不存在: {db_path}。请先运行 `ato init`。”, err=True)` + `raise typer.Exit(code=1)`
+  - [x] 1.3 调用 `asyncio.run(_plan_async(story_id, db_path, config_path))` 执行异步逻辑
+  - [x] 1.4 在 `_plan_async` 中：通过 `get_connection(db_path)` 打开连接，`get_story(db, story_id)` 查询 story，并在 `try/finally` 中 `await db.close()`
+  - [x] 1.5 Story 不存在时：`typer.echo(f”Story not found: {story_id}”, err=True)` + `raise typer.Exit(code=1)`
+  - [x] 1.6 配置加载（可选降级）：尝试 `load_config(config_path)` + `build_phase_definitions(settings)`，失败时同时执行：
+    - `logger.warning(“plan_config_load_failed”, config_path=str(config_path), error=str(exc))`
+    - `typer.echo(“⚠ 配置加载失败，仅显示阶段序列”, err=True)`
     - 继续渲染（`phase_definitions = []`）
-  - [ ] 1.7 调用 `render_plan(story, phase_definitions, console=con)` 渲染输出
-  - [ ] 1.8 异常处理：`click.exceptions.Exit` / `click.exceptions.Abort` 直接 re-raise；其他异常 `typer.echo(str(exc), err=True)` + `raise typer.Exit(code=1)`
+  - [x] 1.7 调用 `render_plan(story, phase_definitions, console=con)` 渲染输出
+  - [x] 1.8 异常处理：`click.exceptions.Exit` / `click.exceptions.Abort` 直接 re-raise；其他异常 `typer.echo(str(exc), err=True)` + `raise typer.Exit(code=1)`
 
-- [ ] Task 2: 实现 plan 渲染函数 (AC: #1, #2)
-  - [ ] 2.1 在 `src/ato/cli.py` 中实现 `render_plan(story: StoryRecord, phase_defs: list[PhaseDefinition], *, console: Console | None = None) -> None`
-  - [ ] 2.2 构建完整阶段序列：`["queued"] + list(CANONICAL_PHASES) + ["done"]`（共 12 个阶段）
-  - [ ] 2.3 从 `phase_defs` 构建 `phase_info: dict[str, tuple[str, str]]`（name → (phase_type, role)）映射，无配置时映射为空
-  - [ ] 2.4 确定阶段进度状态：
+- [x] Task 2: 实现 plan 渲染函数 (AC: #1, #2)
+  - [x] 2.1 在 `src/ato/cli.py` 中实现 `render_plan(story: StoryRecord, phase_defs: list[PhaseDefinition], *, console: Console | None = None) -> None`
+  - [x] 2.2 构建完整阶段序列：`[“queued”] + list(CANONICAL_PHASES) + [“done”]`（共 12 个阶段）
+  - [x] 2.3 从 `phase_defs` 构建 `phase_info: dict[str, tuple[str, str]]`（name → (phase_type, role)）映射，无配置时映射为空
+  - [x] 2.4 确定阶段进度状态：
     - 从 `story.current_phase` 在完整序列中的位置 idx 分割
     - idx 之前：completed（✔）
     - idx 位置：current（▶ 高亮）
     - idx 之后：future（正常显示）
-    - `blocked` 特殊处理：**不要尝试反推“最后已知阶段”**（当前模型未持久化 blocked 之前的 phase）
+    - `blocked` 特殊处理：**不要尝试反推”最后已知阶段”**（当前模型未持久化 blocked 之前的 phase）
     - `blocked` 时输出额外提示：`⚠ 当前状态: blocked（MVP 不显示 blocked 前进度）`
     - `blocked` 时完整阶段序列仍照常显示，但全部按普通未激活阶段渲染，不伪造 ✔ / ▶ 进度
     - `done` 特殊处理：所有阶段标记 ✔
-  - [ ] 2.5 阶段类型颜色映射：
+  - [x] 2.5 阶段类型颜色映射：
     - `structured_job` → `cyan`
     - `convergent_loop` → `magenta`
     - `interactive_session` → `green`
     - 系统状态（queued, done）→ `dim`
-  - [ ] 2.6 渲染标题：`"AgentTeamOrchestrator — Story Plan"` + story_id + 标题
-  - [ ] 2.7 逐行渲染每个阶段：`{状态图标} {阶段名:<16} ({类型} | {角色})`
+  - [x] 2.6 渲染标题：`”AgentTeamOrchestrator — Story Plan”` + story_id + 标题
+  - [x] 2.7 逐行渲染每个阶段：`{状态图标} {阶段名:<16} ({类型} | {角色})`
     - completed: `✔` + `green` 样式
     - current: `▶` + `bold` + 阶段类型颜色 + `← 当前`
     - future: `○` + 阶段类型颜色
-  - [ ] 2.8 若 `phase_info` 为空（配置缺失降级），省略类型/角色信息，仅显示阶段名
+  - [x] 2.8 若 `phase_info` 为空（配置缺失降级），省略类型/角色信息，仅显示阶段名
 
-- [ ] Task 3: 编写 CLI 命令测试 (AC: #1, #2, #3, #4)
-  - [ ] 3.1 新建 `tests/unit/test_cli_plan.py`，使用 `typer.testing.CliRunner`
-  - [ ] 3.2 测试正常流程（story 在 developing 阶段）：mock `get_story` 返回 StoryRecord，mock `load_config` + `build_phase_definitions`，验证退出码 0 + 输出包含 story_id
-  - [ ] 3.3 测试 Story 不存在：mock `get_story` 返回 None，验证退出码 1 + stderr 包含 "Story not found"
-  - [ ] 3.4 测试数据库不存在：传入不存在的 db_path，验证退出码 1 + stderr 包含"数据库不存在"
-  - [ ] 3.5 测试配置加载失败降级：mock `load_config` 抛异常，验证退出码 0 + stderr 包含"配置加载失败，仅显示阶段序列" + 仍有阶段输出（无类型/角色）
-  - [ ] 3.6 测试 done 状态 story：所有阶段显示 ✔
-  - [ ] 3.7 测试 queued 状态 story：仅 queued 为当前，其余为 future
-  - [ ] 3.8 测试 blocked 状态 story：显示 blocked 提示，且不伪造任意已完成/当前阶段
+- [x] Task 3: 编写 CLI 命令测试 (AC: #1, #2, #3, #4)
+  - [x] 3.1 新建 `tests/unit/test_cli_plan.py`，使用 `typer.testing.CliRunner`
+  - [x] 3.2 测试正常流程（story 在 developing 阶段）：mock `get_story` 返回 StoryRecord，mock `load_config` + `build_phase_definitions`，验证退出码 0 + 输出包含 story_id
+  - [x] 3.3 测试 Story 不存在：mock `get_story` 返回 None，验证退出码 1 + stderr 包含 “Story not found”
+  - [x] 3.4 测试数据库不存在：传入不存在的 db_path，验证退出码 1 + stderr 包含”数据库不存在”
+  - [x] 3.5 测试配置加载失败降级：mock `load_config` 抛异常，验证退出码 0 + stderr 包含”配置加载失败，仅显示阶段序列” + 仍有阶段输出（无类型/角色）
+  - [x] 3.6 测试 done 状态 story：所有阶段显示 ✔
+  - [x] 3.7 测试 queued 状态 story：仅 queued 为当前，其余为 future
+  - [x] 3.8 测试 blocked 状态 story：显示 blocked 提示，且不伪造任意已完成/当前阶段
 
-- [ ] Task 4: 编写渲染输出测试 (AC: #1, #2)
-  - [ ] 4.1 在 `tests/unit/test_cli_plan.py` 中测试 `render_plan` 输出
-  - [ ] 4.2 使用 `rich.console.Console(file=io.StringIO(), force_terminal=True)` 捕获渲染输出
-  - [ ] 4.3 验证标题 "AgentTeamOrchestrator — Story Plan" 显示
-  - [ ] 4.4 验证完整序列 12 个阶段全部出现
-  - [ ] 4.5 验证已完成阶段包含 "✔"，当前阶段包含 "▶" 和 "当前"
-  - [ ] 4.6 验证无配置降级时不显示类型/角色信息
-  - [ ] 4.7 验证有配置时各阶段类型标签正确显示
+- [x] Task 4: 编写渲染输出测试 (AC: #1, #2)
+  - [x] 4.1 在 `tests/unit/test_cli_plan.py` 中测试 `render_plan` 输出
+  - [x] 4.2 使用 `rich.console.Console(file=io.StringIO(), force_terminal=True)` 捕获渲染输出
+  - [x] 4.3 验证标题 “AgentTeamOrchestrator — Story Plan” 显示
+  - [x] 4.4 验证完整序列 12 个阶段全部出现
+  - [x] 4.5 验证已完成阶段包含 “✔”，当前阶段包含 “▶” 和 “当前”
+  - [x] 4.6 验证无配置降级时不显示类型/角色信息
+  - [x] 4.7 验证有配置时各阶段类型标签正确显示
 
-- [ ] Task 5: 代码质量验证
-  - [ ] 5.1 `uv run ruff check src/ato/cli.py` — 通过
-  - [ ] 5.2 `uv run mypy src/ato/cli.py` — 通过
-  - [ ] 5.3 `uv run pytest tests/unit/test_cli_plan.py -v` — 全部通过
-  - [ ] 5.4 `uv run pytest` — 全部通过, 0 regressions
+- [x] Task 5: 代码质量验证
+  - [x] 5.1 `uv run ruff check src/ato/cli.py` — 通过
+  - [x] 5.2 `uv run mypy src/ato/cli.py` — 通过
+  - [x] 5.3 `uv run pytest tests/unit/test_cli_plan.py -v` — 全部通过
+  - [x] 5.4 `uv run pytest` — 全部通过, 0 regressions
 
 ## Dev Notes
 
@@ -397,15 +397,32 @@ def plan_command(
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+无调试问题。
+
 ### Completion Notes List
 
+- ✅ 实现 `plan_command` + `_plan_async` + `render_plan`，遵循现有 CLI 模式（`init`, `start`, `batch select` 等）
+- ✅ 完整阶段序列从 `CANONICAL_PHASES` 导入，加上 queued/done 系统状态组成 12 阶段
+- ✅ 阶段进度判定逻辑：completed(✔) / current(▶) / future(○)，支持 blocked/done 特殊处理
+- ✅ 配置加载可选降级：失败时 stderr 告警，仅显示阶段序列（无类型/角色信息）
+- ✅ DB 连接在 try/finally 中正确关闭
+- ✅ 使用 `rich.text.Text` 对象构建输出，`highlight=False` 避免误解析
+- ✅ 14 个测试全部通过（7 个 CLI 命令测试 + 7 个渲染输出测试）
+- ✅ 全量回归 741 测试通过，0 regressions
+
 ### File List
+
+- `src/ato/cli.py` — 修改：新增 `plan_command` + `_plan_async` + `render_plan` + `_PHASE_TYPE_STYLES` / `_SYSTEM_PHASE_STYLE` 常量；顶层新增 `from ato.config import PhaseDefinition, build_phase_definitions, load_config` 和 `from ato.models.db import get_connection, get_story`
+- `tests/unit/test_cli_plan.py` — 新建：CLI plan 命令测试（7 个）+ 渲染输出测试（7 个）
 
 ### Change Log
 
 - 2026-03-25: create-story 创建 — 基于 epics/architecture/PRD/前置 story 分析生成完整开发上下文
-- 2026-03-25: validate-create-story 修订 —— 明确配置加载失败必须 stderr 告警并继续降级渲染；移除 blocked 场景中无法成立的“最后已知阶段”反推逻辑；补充 `_plan_async` 连接关闭要求与对应测试断言
+- 2026-03-25: validate-create-story 修订 —— 明确配置加载失败必须 stderr 告警并继续降级渲染；移除 blocked 场景中无法成立的”最后已知阶段”反推逻辑；补充 `_plan_async` 连接关闭要求与对应测试断言
+- 2026-03-25: dev-story 实现 — 完成 plan_command + render_plan + 14 个测试，全量 741 测试通过
+- 2026-03-25: code-review follow-up — 修复 3 个 findings：(1) blocked 分支复用 phase-type 颜色映射 (2) 类型/角色输出格式改为 `(type | role)` (3) 测试文件 list 泛型标注修复 mypy strict
+- 2026-03-25: code-review patch — 补强渲染契约回归保护：精确断言 `(structured_job | developer)` 格式 + 新增 blocked+有配置分支测试，共 15 测试
