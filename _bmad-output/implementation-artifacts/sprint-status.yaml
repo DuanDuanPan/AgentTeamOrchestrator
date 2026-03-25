@@ -63,15 +63,15 @@ development_status:
   epic-2b: in-progress
   2b-1-claude-agent-dispatch: done
   2b-2-codex-agent-review: done
-  2b-3-bmad-skill-parsing: backlog
-  2b-4-worktree-isolation: backlog
+  2b-3-bmad-skill-parsing: ready-for-dev
+  2b-4-worktree-isolation: ready-for-dev
   2b-5-batch-select-status: done
   2b-6-interactive-session: backlog
   epic-2b-retrospective: optional
 
   # ===== Epic 3: Convergent Loop 质量门控 =====
-  epic-3: backlog
-  3-1-deterministic-validation-finding-tracking: backlog
+  epic-3: in-progress
+  3-1-deterministic-validation-finding-tracking: ready-for-dev
   3-2a-convergent-loop-full-review: backlog
   3-2b-fix-dispatch-artifact-verification: backlog
   3-2c-re-review-scope-narrowing: backlog
