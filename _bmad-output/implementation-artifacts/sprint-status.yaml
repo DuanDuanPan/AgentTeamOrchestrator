@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-24
-last_updated: 2026-03-25T00:00:00
+last_updated: 2026-03-25
 project: AgentTeamOrchestrator
 project_key: NOKEY
 tracking_system: file-system
@@ -75,13 +75,13 @@ development_status:
   3-2a-convergent-loop-full-review: done
   3-2b-fix-dispatch-artifact-verification: done
   3-2c-re-review-scope-narrowing: done
-  3-2d-convergence-termination: backlog
+  3-2d-convergence-termination: ready-for-dev
   3-3-convergence-trust-escalation: backlog
   epic-3-retrospective: optional
 
   # ===== Epic 4: 人机协作与审批队列 =====
-  epic-4: backlog
-  4-1-approval-queue-nudge: backlog
+  epic-4: in-progress
+  4-1-approval-queue-nudge: ready-for-dev
   4-2-merge-queue-regression-safety: backlog
   4-3-uat-interactive-session-completion: backlog
   4-4-notification-cli-quality: backlog
@@ -99,7 +99,7 @@ development_status:
   epic-6: in-progress
   6-1a-tui-launch-sqlite-connection: done
   6-1b-dark-theme-responsive-layout: done
-  6-2a-three-question-header: backlog
+  6-2a-three-question-header: ready-for-dev
   6-2b-dashboard-story-list: backlog
   6-3a-standard-approval-interaction: backlog
   6-3b-exception-approval-multi-select: backlog
