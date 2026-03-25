@@ -124,6 +124,7 @@ async def maybe_create_blocking_abnormal_approval(
     *,
     nudge: Any | None = None,
     orchestrator_pid: int | None = None,
+    blocking_count: int | None = None,
 ) -> bool:
     """当 blocking 数量超过阈值时创建 blocking_abnormal approval。
 
@@ -134,11 +135,15 @@ async def maybe_create_blocking_abnormal_approval(
         threshold: blocking 阈值。
         nudge: 进程内 Nudge 实例（可选）。
         orchestrator_pid: Orchestrator PID，进程外 nudge 用（可选）。
+        blocking_count: 预计算的 blocking 数量。若为 None 则从 DB 查询
+            当前轮次记录（首轮 review）；re-review 调用方应传入
+            实际 open blocking 总数（含 still_open + new blocking）。
 
     Returns:
         True 表示创建了 approval（超阈值），False 表示未超。
     """
-    blocking_count = await count_blocking_findings(db, story_id, round_num)
+    if blocking_count is None:
+        blocking_count = await count_blocking_findings(db, story_id, round_num)
 
     if blocking_count <= threshold:
         logger.info(

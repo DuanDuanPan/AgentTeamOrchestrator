@@ -1,6 +1,6 @@
 # Story 3.2c: Re-review Scope Narrowing
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -40,9 +40,9 @@ So that 每轮 review 聚焦于变更影响，效率递增。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 `run_rereview()` 方法 (AC: #1, #2, #3)
-  - [ ] 1.1 在 `src/ato/convergent_loop.py` 的 `ConvergentLoop` 类中新增 `async run_rereview(story_id: str, round_num: int, worktree_path: str | None = None) -> ConvergentLoopResult`
-  - [ ] 1.2 方法流程：
+- [x] Task 1: 实现 `run_rereview()` 方法 (AC: #1, #2, #3)
+  - [x] 1.1 在 `src/ato/convergent_loop.py` 的 `ConvergentLoop` 类中新增 `async run_rereview(story_id: str, round_num: int, worktree_path: str | None = None) -> ConvergentLoopResult`
+  - [x] 1.2 方法流程：
     - 复用 `_resolve_worktree_path()` 解析 worktree 路径
     - 查询当前 unresolved findings 集合：调用 `get_open_findings(db, story_id)` 获取上一轮结束后仍为 `open/still_open` 的 findings；**不要**按 `round_num = round_num - 1` 截断
     - 构建 scoped re-review prompt（调用 `_build_rereview_prompt()`）
@@ -58,43 +58,43 @@ So that 每轮 review 聚焦于变更影响，效率递增。
     - 提交状态转换事件（review_pass 或 review_fail）
     - 返回 `ConvergentLoopResult`
 
-- [ ] Task 2: 实现 re-review prompt 构建 (AC: #1)
-  - [ ] 2.1 创建私有方法 `_build_rereview_prompt(previous_findings: list[FindingRecord], worktree_path: str) -> str`
-  - [ ] 2.2 prompt 内容：
+- [x] Task 2: 实现 re-review prompt 构建 (AC: #1)
+  - [x] 2.1 创建私有方法 `_build_rereview_prompt(previous_findings: list[FindingRecord], worktree_path: str) -> str`
+  - [x] 2.2 prompt 内容：
     - 明确指示这是 scoped re-review，不是全量 review
     - JSON 编码上轮 open findings（file_path、rule_id、severity、description）——防止 prompt 注入
     - 指示 reviewer 验证这些 findings 是否已闭合
     - 指示 reviewer 同时检测 fix 是否引入新问题
     - 指定 worktree 路径
 
-- [ ] Task 3: 实现跨轮次 finding 匹配算法 (AC: #2, #3)
-  - [ ] 3.1 创建私有方法 `_match_findings_across_rounds(previous_findings: list[FindingRecord], new_parse_findings: list[BmadFinding]) -> MatchResult`
-  - [ ] 3.2 匹配逻辑：
+- [x] Task 3: 实现跨轮次 finding 匹配算法 (AC: #2, #3)
+  - [x] 3.1 创建私有方法 `_match_findings_across_rounds(previous_findings: list[FindingRecord], new_parse_findings: list[BmadFinding]) -> MatchResult`
+  - [x] 3.2 匹配逻辑：
     - 用上轮 open findings 的 `dedup_hash` 构建集合 `prev_hashes`
     - 遍历本轮解析出的 findings，计算每个的 `dedup_hash`
     - 本轮 finding 的 hash 在 `prev_hashes` 中 → 该 finding 为 `still_open`
     - 上轮 finding 的 hash 不在本轮 findings hash 集合中 → 该上轮 finding 为 `closed`
     - 本轮 finding 的 hash 不在 `prev_hashes` 中 → 该 finding 为 `new`（status=open）
-  - [ ] 3.3 返回结构化匹配结果（封装在 `MatchResult` dataclass/NamedTuple 中）：
+  - [x] 3.3 返回结构化匹配结果（封装在 `MatchResult` dataclass/NamedTuple 中）：
     - `still_open_ids`: list[str] — 上轮仍 open 的 finding_id 列表（需更新为 still_open）
     - `closed_ids`: list[str] — 上轮已闭合的 finding_id 列表（需更新为 closed）
     - `new_findings`: list[FindingRecord] — 新入 finding 的 FindingRecord 列表（需 insert）
 
-- [ ] Task 4: 持久化匹配结果到 SQLite (AC: #2, #3)
-  - [ ] 4.1 批量更新上轮 findings 状态：
+- [x] Task 4: 持久化匹配结果到 SQLite (AC: #2, #3)
+  - [x] 4.1 批量更新上轮 findings 状态：
     - `still_open_ids` → 调用 `update_finding_status(db, finding_id, "still_open")`
     - `closed_ids` → 调用 `update_finding_status(db, finding_id, "closed")`
-  - [ ] 4.2 批量插入新 findings：
+  - [x] 4.2 批量插入新 findings：
     - 调用 `insert_findings_batch(db, new_findings)`
     - 新 findings 的 `round_num` = 当前轮次，`status` = "open"
 
-- [ ] Task 5: structlog 结构化日志 (AC: #1, #2, #3)
-  - [ ] 5.1 re-review 启动：`convergent_loop_round_start`，字段 `story_id`, `round_num`, `phase="reviewing"`, `scope="narrowed"`, `previous_open_count`
-  - [ ] 5.2 re-review 完成：`convergent_loop_round_complete`，字段 `story_id`, `round_num`, `findings_total`, `open_count`, `closed_count`, `new_count`, `still_open_count`, `blocking_count`, `suggestion_count`
-  - [ ] 5.3 收敛/未收敛：复用 `convergent_loop_converged` / `convergent_loop_needs_fix` 事件名
+- [x] Task 5: structlog 结构化日志 (AC: #1, #2, #3)
+  - [x] 5.1 re-review 启动：`convergent_loop_round_start`，字段 `story_id`, `round_num`, `phase="reviewing"`, `scope="narrowed"`, `previous_open_count`
+  - [x] 5.2 re-review 完成：`convergent_loop_round_complete`，字段 `story_id`, `round_num`, `findings_total`, `open_count`, `closed_count`, `new_count`, `still_open_count`, `blocking_count`, `suggestion_count`
+  - [x] 5.3 收敛/未收敛：复用 `convergent_loop_converged` / `convergent_loop_needs_fix` 事件名
 
-- [ ] Task 6: 测试 (AC: #1, #2, #3)
-  - [ ] 6.1 在 `tests/unit/test_convergent_loop.py` 追加 re-review 测试：
+- [x] Task 6: 测试 (AC: #1, #2, #3)
+  - [x] 6.1 在 `tests/unit/test_convergent_loop.py` 追加 re-review 测试：
     - `test_rereview_scope_narrowed_prompt` — re-review prompt 仅包含上轮 open findings
     - `test_rereview_scope_uses_all_current_unresolved_findings` — round 3+ 时仍包含更早轮次遗留的 `still_open` findings，不按 `round_num` 截断
     - `test_rereview_match_still_open` — 上轮 open + 本轮匹配 → still_open
@@ -111,7 +111,7 @@ So that 每轮 review 聚焦于变更影响，效率递增。
     - `test_rereview_transition_event_review_fail` — 未收敛时提交 review_fail
     - `test_rereview_structlog_fields` — 验证 round_complete 日志含 closed_count、new_count
     - `test_rereview_result_counts` — 验证 ConvergentLoopResult 各 count 字段正确
-  - [ ] 6.2 直接对 `_match_findings_across_rounds()` 的单元测试（如果为独立纯函数/方法）：
+  - [x] 6.2 直接对 `_match_findings_across_rounds()` 的单元测试（如果为独立纯函数/方法）：
     - `test_match_all_closed` — 上轮全部未在本轮出现 → 全 closed
     - `test_match_all_still_open` — 上轮全部在本轮出现 → 全 still_open
     - `test_match_no_previous_all_new` — 无上轮 findings → 全 new
@@ -454,15 +454,40 @@ mock_bmad.parse.return_value = BmadParseResult(
 
 - 2026-03-25: create-story 创建 — 基于 Epic 3 / PRD / 架构 / Story 3.2a + 3.2b 上下文生成 re-review scope narrowing story
 - 2026-03-25: validate-create-story 修订 —— 纠正 `status="new"` 与 `FindingStatus` 合同冲突；将 scope 源集合改为当前 unresolved findings（不按 `round_num` 截断）；区分 `blocking_abnormal` 与 `convergent_loop_escalation`；统一 `open_count` 语义与测试示例
+- 2026-03-25: dev-story 实现 — 完成全部 6 个 Task，新增 `run_rereview()`、`_build_rereview_prompt()`、`_match_findings_across_rounds()`、`MatchResult`；20 个新测试全部通过；全量 898 测试零 regression
+- 2026-03-25: code-review R1 修复 — 修复 2 个高严重度 bug：(1) blocking_abnormal 阈值检查漏算 still_open blocking（validation.py 增加 blocking_count 可选参数）；(2) _match_findings_across_rounds 重复 dedup_hash 导致 finding 静默丢失（dict→dict[str,list] 映射）；+6 回归测试；全量 904 通过
+- 2026-03-25: code-review R2 修复 — 修复 1 个中严重度 bug：当前轮重复新 finding 未去重（增加 seen_new_hashes 去重持久化）；+3 回归测试；全量 907 通过
+- 2026-03-25: code-review R3 修复 — 修复 1 个中严重度合同偏离：findings_total/blocking_count/suggestion_count 恢复为 parse 原始统计（story 合同语义），去重仅影响持久化（new_count/open_count）和阈值检查；全量 907 通过
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+无调试问题，全部测试首次运行即通过。
+
+**Code review 修复记录：**
+- Bug 1（高）：`maybe_create_blocking_abnormal_approval()` 内部按 `round_num` 查 DB，看不到保留原始 `round_num` 的 `still_open` findings。根因：`count_findings_by_severity(db, story_id, round_num)` 只统计当前轮插入的记录。修复：给 `maybe_create_blocking_abnormal_approval()` 增加可选 `blocking_count: int | None` 参数；`run_rereview()` 预计算实际 open blocking 总数（still_open blocking + new blocking）后传入。
+- Bug 2（高）：`_match_findings_across_rounds()` 用 `{dedup_hash: FindingRecord}` dict 压平了同 hash 多条记录，导致只保留最后一条。根因：首轮写入不去重，解析层原样追加。修复：改为 `dict[str, list[FindingRecord]]`，同 hash 的所有旧 findings 统一标记；增加 `matched_prev_hashes` 防止 current 中同 hash 重复追加。
+
 ### Completion Notes List
 
+- 实现 `MatchResult` NamedTuple（模块级，纯内部数据结构）
+- 实现 `run_rereview()` 方法：完整的 scoped re-review 流程，含 worktree 解析、scope 查询、Codex dispatch、BMAD parse、跨轮次匹配、SQLite 持久化、blocking threshold escalation、收敛评估、transition 事件提交
+- 实现 `_build_rereview_prompt()`：JSON 编码防 prompt 注入，明确指示 scoped re-review
+- 实现 `_match_findings_across_rounds()`：基于 dedup_hash 的跨轮次匹配算法，正确分类 still_open/closed/new
+- structlog 日志完整：round_start（含 scope="narrowed"）、round_complete（含 closed_count/new_count/still_open_count）、converged/needs_fix
+- Parse failure 处理：不修改上轮 findings 状态，返回 converged=False
+- 收敛条件：无 open/still_open blocking findings（含新引入的 blocking）
+- 20 + 6 = 26 个新测试全部通过，涵盖所有 AC 场景 + 2 个回归场景
+- 全量回归测试 904/904 通过，零 regression
+- ruff check + mypy strict 全部通过
+
 ### File List
+
+- `src/ato/convergent_loop.py` — MODIFY: +`MatchResult` NamedTuple, +`run_rereview()`, +`_build_rereview_prompt()`, +`_match_findings_across_rounds()`; 修复 blocking_abnormal 阈值传参 + 重复 hash 匹配 + 新 finding 去重
+- `src/ato/validation.py` — MODIFY: `maybe_create_blocking_abnormal_approval()` 增加可选 `blocking_count` 参数
+- `tests/unit/test_convergent_loop.py` — MODIFY: +29 re-review 测试用例（16 集成 + 4 匹配算法 + 9 回归）
