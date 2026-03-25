@@ -800,6 +800,45 @@ async def _plan_async(
 
 
 # ---------------------------------------------------------------------------
+# ato tui — TUI 指挥台
+# ---------------------------------------------------------------------------
+
+
+@app.command("tui")
+def tui_cmd(
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+) -> None:
+    """启动 TUI 指挥台，连接运行中的 Orchestrator。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+
+    if not resolved_db.exists():
+        typer.echo("数据库未找到，请先运行 ato init", err=True)
+        raise typer.Exit(code=1)
+
+    # 检测 Orchestrator 运行状态（复用 core.py 的 PID 读取约定）
+    from ato.core import read_pid_file
+
+    pid_path = resolved_db.parent / "orchestrator.pid"
+    pid = read_pid_file(pid_path)
+    orchestrator_pid: int | None = None
+
+    if pid is None:
+        typer.echo("⚠️ Orchestrator 未运行，写入已记录，需等待下次启动后处理")
+    else:
+        try:
+            os.kill(pid, 0)
+            orchestrator_pid = pid
+        except ProcessLookupError:
+            typer.echo("⚠️ Orchestrator 未运行（stale PID），写入已记录，需等待下次启动后处理")
+        except PermissionError:
+            orchestrator_pid = pid  # 进程存在但无权发信号
+
+    from ato.tui.app import ATOApp
+
+    ATOApp(db_path=resolved_db, orchestrator_pid=orchestrator_pid).run()
+
+
+# ---------------------------------------------------------------------------
 # ato submit — Interactive Session 完成提交
 # ---------------------------------------------------------------------------
 
