@@ -55,7 +55,7 @@ class TestOrchestratorLifecycle:
             if poll_count >= 3:
                 orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = counting_poll  # type: ignore[assignment]
+        orchestrator._poll_cycle = counting_poll  # type: ignore[method-assign]
 
         await orchestrator.run()
 
@@ -76,7 +76,7 @@ class TestOrchestratorLifecycle:
             pid_seen = pid_path.exists()
             orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = check_and_stop  # type: ignore[assignment]
+        orchestrator._poll_cycle = check_and_stop  # type: ignore[method-assign]
 
         await orchestrator.run()
 
@@ -93,7 +93,7 @@ class TestOrchestratorLifecycle:
         async def stop_immediately() -> None:
             orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = stop_immediately  # type: ignore[assignment]
+        orchestrator._poll_cycle = stop_immediately  # type: ignore[method-assign]
         await orchestrator.run()
 
         elapsed = time.monotonic() - t0
@@ -102,45 +102,50 @@ class TestOrchestratorLifecycle:
 
 class TestOrchestratorShutdownIntegration:
     async def test_sigterm_triggers_graceful_shutdown(self, setup_db: Path) -> None:
-        """通过 _request_shutdown（模拟 SIGTERM）触发优雅停止。"""
+        """通过 _request_shutdown（模拟 SIGTERM）触发优雅停止。
+
+        注：跳过 recovery 阶段，在 startup 完成后插入 running task，
+        专注测试 shutdown 的 mark_running_tasks_paused 行为。
+        """
         settings = _make_settings(polling_interval=0.1)
         orchestrator = Orchestrator(settings=settings, db_path=setup_db)
 
-        # 插入 running task
         now = datetime.now(tz=UTC)
-        db = await get_connection(setup_db)
-        try:
-            story = StoryRecord(
-                story_id="sig-story-1",
-                title="Signal Test",
-                status="in_progress",
-                current_phase="developing",
-                created_at=now,
-                updated_at=now,
-            )
-            await insert_story(db, story)
-            task = TaskRecord(
-                task_id="sig-task-1",
-                story_id="sig-story-1",
-                phase="developing",
-                role="developer",
-                cli_tool="claude",
-                status="running",
-                started_at=now,
-            )
-            await insert_task(db, task)
-        finally:
-            await db.close()
+        story = StoryRecord(
+            story_id="sig-story-1",
+            title="Signal Test",
+            status="in_progress",
+            current_phase="developing",
+            created_at=now,
+            updated_at=now,
+        )
+        task = TaskRecord(
+            task_id="sig-task-1",
+            story_id="sig-story-1",
+            phase="developing",
+            role="developer",
+            cli_tool="claude",
+            status="running",
+            started_at=now,
+        )
 
         poll_count = 0
 
         async def poll_then_stop() -> None:
             nonlocal poll_count
             poll_count += 1
-            if poll_count >= 2:
+            if poll_count == 1:
+                # 在首次轮询时插入 running task（recovery 已完成）
+                db = await get_connection(setup_db)
+                try:
+                    await insert_story(db, story)
+                    await insert_task(db, task)
+                finally:
+                    await db.close()
+            elif poll_count >= 3:
                 orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = poll_then_stop  # type: ignore[assignment]
+        orchestrator._poll_cycle = poll_then_stop  # type: ignore[method-assign]
 
         await orchestrator.run()
 
@@ -170,7 +175,7 @@ class TestOrchestratorShutdownIntegration:
             elif poll_count >= 2:
                 orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = poll_with_nudge  # type: ignore[assignment]
+        orchestrator._poll_cycle = poll_with_nudge  # type: ignore[method-assign]
 
         t0 = time.monotonic()
         await orchestrator.run()
@@ -198,7 +203,7 @@ class TestOrchestratorShutdownIntegration:
             elif poll_count >= 2:
                 orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = poll_with_real_signal  # type: ignore[assignment]
+        orchestrator._poll_cycle = poll_with_real_signal  # type: ignore[method-assign]
 
         t0 = time.monotonic()
         await orchestrator.run()
@@ -211,48 +216,45 @@ class TestOrchestratorShutdownIntegration:
     async def test_sigterm_during_startup_still_pauses_tasks(self, setup_db: Path) -> None:
         """SIGTERM 在启动窗口内到达时仍执行 _shutdown()，标记 running→paused。
 
-        信号 handler 在写 PID 之前注册，因此即使 SIGTERM 在 TQ 初始化或
-        恢复检测期间到达，也会设 _running=False，让 run() 跳过轮询直接进入
-        _shutdown()。
+        注：在 startup 完成后（recovery 已运行）插入 running task，
+        然后立即触发 SIGTERM，验证 shutdown 仍能正确 pause。
         """
-        # 插入 running task
-        now = datetime.now(tz=UTC)
-        db = await get_connection(setup_db)
-        try:
-            story = StoryRecord(
-                story_id="startup-sig-story",
-                title="Startup Signal Test",
-                status="in_progress",
-                current_phase="developing",
-                created_at=now,
-                updated_at=now,
-            )
-            await insert_story(db, story)
-            task = TaskRecord(
-                task_id="startup-sig-task",
-                story_id="startup-sig-story",
-                phase="developing",
-                role="developer",
-                cli_tool="claude",
-                status="running",
-                started_at=now,
-            )
-            await insert_task(db, task)
-        finally:
-            await db.close()
-
         settings = _make_settings(polling_interval=0.05)
         orchestrator = Orchestrator(settings=settings, db_path=setup_db)
 
-        # 在 _startup 内部、TQ 初始化之后立即触发 SIGTERM（模拟启动窗口内的 stop）
         original_startup = orchestrator._startup
+        now = datetime.now(tz=UTC)
 
-        async def startup_with_early_sigterm() -> None:
+        async def startup_with_task_and_sigterm() -> None:
             await original_startup()
-            # 启动刚完成，还未进入轮询——模拟窗口内 SIGTERM
+            # startup 完成后插入 running task（recovery 已完成）
+            db = await get_connection(setup_db)
+            try:
+                story = StoryRecord(
+                    story_id="startup-sig-story",
+                    title="Startup Signal Test",
+                    status="in_progress",
+                    current_phase="developing",
+                    created_at=now,
+                    updated_at=now,
+                )
+                await insert_story(db, story)
+                task = TaskRecord(
+                    task_id="startup-sig-task",
+                    story_id="startup-sig-story",
+                    phase="developing",
+                    role="developer",
+                    cli_tool="claude",
+                    status="running",
+                    started_at=now,
+                )
+                await insert_task(db, task)
+            finally:
+                await db.close()
+            # 立即触发 SIGTERM
             orchestrator._request_shutdown()
 
-        orchestrator._startup = startup_with_early_sigterm  # type: ignore[assignment]
+        orchestrator._startup = startup_with_task_and_sigterm  # type: ignore[method-assign]
 
         await orchestrator.run()
 

@@ -468,6 +468,22 @@ async def mark_running_tasks_paused(db: aiosqlite.Connection) -> int:
     return cursor.rowcount
 
 
+async def get_running_tasks(db: aiosqlite.Connection) -> list[TaskRecord]:
+    """返回所有 status='running' 的 tasks。
+
+    崩溃恢复引擎使用此函数发现需要恢复的 tasks。
+    """
+    return await get_tasks_by_status(db, "running")
+
+
+async def get_paused_tasks(db: aiosqlite.Connection) -> list[TaskRecord]:
+    """返回所有 status='paused' 的 tasks。
+
+    正常重启引擎使用此函数发现需要重调度的 tasks。
+    """
+    return await get_tasks_by_status(db, "paused")
+
+
 async def count_tasks_by_status(db: aiosqlite.Connection, status: str) -> int:
     """按状态计数 tasks。
 

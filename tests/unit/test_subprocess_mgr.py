@@ -284,6 +284,65 @@ class TestRetry:
         # 2 次尝试 → 2 条 cost_log 记录
         assert summary["call_count"] == 2
 
+    async def test_retry_can_resume_existing_task_id(self, db_ready: Path) -> None:
+        """crash recovery 可复用既有 task_id，并从首次尝试就走 update/retry 语义。"""
+        from ato.models.db import get_tasks_by_story, insert_task
+        from ato.models.schemas import TaskRecord
+
+        error = CLIAdapterError(
+            "rate limited",
+            category=ErrorCategory.RATE_LIMIT,
+            retryable=True,
+            exit_code=429,
+        )
+        call_count = 0
+        result = _make_adapter_result()
+
+        class FailOnceAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise error
+                return result
+
+        db = await get_connection(db_ready)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="task-existing",
+                    story_id="story-test",
+                    phase="dev",
+                    role="developer",
+                    cli_tool="claude",
+                    status="pending",
+                    started_at=_NOW,
+                ),
+            )
+        finally:
+            await db.close()
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=FailOnceAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+        await mgr.dispatch_with_retry(
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
+            task_id="task-existing",
+            is_retry=True,
+        )
+
+        db = await get_connection(db_ready)
+        tasks = await get_tasks_by_story(db, "story-test")
+        await db.close()
+        assert call_count == 2
+        assert len(tasks) == 1
+        assert tasks[0].task_id == "task-existing"
+        assert tasks[0].status == "completed"
+        assert tasks[0].error_message is None
+
     async def test_non_retryable_error_not_retried(self, db_ready: Path) -> None:
         error = CLIAdapterError(
             "parse failed",

@@ -1,6 +1,6 @@
 # Story 5.1a: 崩溃恢复自动恢复 (Crash Recovery Auto-Resume)
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -58,51 +58,51 @@ So that 意外中断不需要手动重建状态。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 恢复引擎核心实现 (`recovery.py`) (AC: 1-5, 7)
-  - [ ] 1.1 实现 `RecoveryEngine` 类，接收 `db_path`, `subprocess_mgr`, `transition_queue` 依赖
-  - [ ] 1.2 实现 `scan_running_tasks()` — 查询所有 `status='running'` 的 tasks
-  - [ ] 1.3 实现 `classify_task()` — 对单个 running task 执行四路分类
-  - [ ] 1.4 实现 PID 存活检测 `_is_pid_alive(pid)` — 使用 `os.kill(pid, 0)`
-  - [ ] 1.5 实现 artifact 存在检测 `_artifact_exists(task)` — 检查 `expected_artifact` 路径
-  - [ ] 1.6 实现四种恢复动作：`_reattach()`, `_complete_from_artifact()`, `_reschedule()`, `_mark_needs_human()`
-  - [ ] 1.7 实现 `run_recovery()` — 主入口，返回 `RecoveryResult`
-  - [ ] 1.8 每个恢复动作用 structlog 记录 `recovery_action` 事件
+- [x] Task 1: 恢复引擎核心实现 (`recovery.py`) (AC: 1-5, 7)
+  - [x] 1.1 实现 `RecoveryEngine` 类，接收 `db_path`, `subprocess_mgr`, `transition_queue` 依赖
+  - [x] 1.2 实现 `scan_running_tasks()` — 查询所有 `status='running'` 的 tasks
+  - [x] 1.3 实现 `classify_task()` — 对单个 running task 执行四路分类
+  - [x] 1.4 实现 PID 存活检测 `_is_pid_alive(pid)` — 使用 `os.kill(pid, 0)`
+  - [x] 1.5 实现 artifact 存在检测 `_artifact_exists(task)` — 检查 `expected_artifact` 路径
+  - [x] 1.6 实现四种恢复动作：`_reattach()`, `_complete_from_artifact()`, `_reschedule()`, `_mark_needs_human()`
+  - [x] 1.7 实现 `run_recovery()` — 主入口，返回 `RecoveryResult`
+  - [x] 1.8 每个恢复动作用 structlog 记录 `recovery_action` 事件
 
-- [ ] Task 2: 正常重启路径 (`core.py` 修改) (AC: 6)
-  - [ ] 2.1 在 `ato start` 启动流程中区分崩溃恢复 vs 正常恢复
-  - [ ] 2.2 `status='running'` → 崩溃恢复路径（调用 RecoveryEngine）
-  - [ ] 2.3 `status='paused'` → 正常恢复路径（直接重调度）
-  - [ ] 2.4 两条路径互斥，基于 task 状态自动判断
+- [x] Task 2: 正常重启路径 (`core.py` 修改) (AC: 6)
+  - [x] 2.1 在 `ato start` 启动流程中区分崩溃恢复 vs 正常恢复
+  - [x] 2.2 `status='running'` → 崩溃恢复路径（调用 RecoveryEngine）
+  - [x] 2.3 `status='paused'` → 正常恢复路径（直接重调度）
+  - [x] 2.4 两条路径互斥，基于 task 状态自动判断
 
-- [ ] Task 3: `ato stop` 优雅停止标记 (`core.py` 修改) (AC: 6)
-  - [ ] 3.1 `ato stop` 时将所有 `status='running'` 的 task 标记为 `paused`
-  - [ ] 3.2 记录停止时间戳到 structlog
-  - [ ] 3.3 复用已有 `mark_running_tasks_paused()` DB 函数
+- [x] Task 3: `ato stop` 优雅停止标记 (`core.py` 修改) (AC: 6)
+  - [x] 3.1 `ato stop` 时将所有 `status='running'` 的 task 标记为 `paused`
+  - [x] 3.2 记录停止时间戳到 structlog
+  - [x] 3.3 复用已有 `mark_running_tasks_paused()` DB 函数
 
-- [ ] Task 4: Pydantic 模型 (`models/schemas.py`) (AC: 1-7)
-  - [ ] 4.1 新增 `RecoveryAction = Literal["reattach", "complete", "reschedule", "needs_human"]`
-  - [ ] 4.2 新增 `RecoveryClassification` 模型 (task_id, story_id, action, reason)
-  - [ ] 4.3 新增 `RecoveryResult` 模型 (classifications, auto_recovered_count, needs_human_count, recovery_mode)
-  - [ ] 4.4 新增 `RecoveryMode = Literal["crash", "normal", "none"]`
+- [x] Task 4: Pydantic 模型 (`models/schemas.py`) (AC: 1-7)
+  - [x] 4.1 新增 `RecoveryAction = Literal["reattach", "complete", "reschedule", "needs_human"]`
+  - [x] 4.2 新增 `RecoveryClassification` 模型 (task_id, story_id, action, reason)
+  - [x] 4.3 新增 `RecoveryResult` 模型 (classifications, auto_recovered_count, needs_human_count, recovery_mode)
+  - [x] 4.4 新增 `RecoveryMode = Literal["crash", "normal", "none"]`
 
-- [ ] Task 5: DB 辅助函数 (`models/db.py`) (AC: 1-5)
-  - [ ] 5.1 新增 `get_running_tasks()` — 返回所有 `status='running'` 的 TaskRecord 列表
-  - [ ] 5.2 新增 `get_paused_tasks()` — 返回所有 `status='paused'` 的 TaskRecord 列表
-  - [ ] 5.3 确认已有 `mark_running_tasks_paused()` 满足 Task 3 需求；如不足则扩展
+- [x] Task 5: DB 辅助函数 (`models/db.py`) (AC: 1-5)
+  - [x] 5.1 新增 `get_running_tasks()` — 返回所有 `status='running'` 的 TaskRecord 列表
+  - [x] 5.2 新增 `get_paused_tasks()` — 返回所有 `status='paused'` 的 TaskRecord 列表
+  - [x] 5.3 确认已有 `mark_running_tasks_paused()` 满足 Task 3 需求；如不足则扩展
 
-- [ ] Task 6: 单元测试 (`tests/unit/test_recovery.py`) (AC: 1-7)
-  - [ ] 6.1 测试 PID 存活检测（mock `os.kill`）
-  - [ ] 6.2 测试 artifact 存在检测（mock `Path.exists`）
-  - [ ] 6.3 测试四种分类路径各一（构造 DB 状态 → 调用 classify → 验证动作）
-  - [ ] 6.4 测试正常恢复路径（paused tasks → 重调度）
-  - [ ] 6.5 测试无恢复场景（无 running/paused tasks → RecoveryMode.none）
-  - [ ] 6.6 测试混合场景（部分 running + 部分 paused → 正确分类）
+- [x] Task 6: 单元测试 (`tests/unit/test_recovery.py`) (AC: 1-7)
+  - [x] 6.1 测试 PID 存活检测（mock `os.kill`）
+  - [x] 6.2 测试 artifact 存在检测（mock `Path.exists`）
+  - [x] 6.3 测试四种分类路径各一（构造 DB 状态 → 调用 classify → 验证动作）
+  - [x] 6.4 测试正常恢复路径（paused tasks → 重调度）
+  - [x] 6.5 测试无恢复场景（无 running/paused tasks → RecoveryMode.none）
+  - [x] 6.6 测试混合场景（部分 running + 部分 paused → 正确分类）
 
-- [ ] Task 7: 集成测试 (`tests/integration/test_crash_recovery.py`) (AC: 1-7)
-  - [ ] 7.1 构造"崩溃前数据库状态"（插入 status=running tasks，PID 不存在）→ 调用 recovery → 验证分类
-  - [ ] 7.2 四种恢复场景端到端测试（纯数据库状态驱动，不杀真实进程）
-  - [ ] 7.3 正常重启路径端到端测试
-  - [ ] 7.4 验证 structlog 输出包含 recovery_action 字段
+- [x] Task 7: 集成测试 (`tests/integration/test_crash_recovery.py`) (AC: 1-7)
+  - [x] 7.1 构造"崩溃前数据库状态"（插入 status=running tasks，PID 不存在）→ 调用 recovery → 验证分类
+  - [x] 7.2 四种恢复场景端到端测试（纯数据库状态驱动，不杀真实进程）
+  - [x] 7.3 正常重启路径端到端测试
+  - [x] 7.4 验证 structlog 输出包含 recovery_action 字段
 
 ## Dev Notes
 
@@ -250,8 +250,63 @@ class RecoveryEngine:
 
 ### Agent Model Used
 
+Claude Opus 4.6 (1M context)
+
 ### Debug Log References
+
+无调试问题。
 
 ### Completion Notes List
 
+- 实现 `RecoveryEngine` 核心类（四路分类 + 恢复动作执行），遵循依赖注入模式
+- `_is_pid_alive()` 使用 `os.kill(pid, 0)` 检测进程存活，处理 ESRCH/EPERM
+- `_artifact_exists()` 检测 `expected_artifact` 路径文件存在
+- 四种恢复动作及 Fix：
+  - reattach: 注册 PID 到 SubprocessManager + 启动异步 PID 监控 asyncio task（Fix F2: 不依赖 SubprocessManager 可用性）
+  - complete: 标记 completed + 提交 transition event 推进 story 到下一阶段（Fix F1: 通过 _PHASE_SUCCESS_EVENT 映射）
+  - reschedule: 重置为 pending + nudge 唤醒 Orchestrator
+  - needs_human: 标记 failed（非 paused）+ 创建 crash_recovery approval（Fix F3: 防止下次启动误恢复）
+- Normal recovery 路径过滤掉有 pending crash_recovery approval 的 paused task（Fix F3）
+- `_detect_recovery_mode()` 从仅日志检测升级为实际调用 `RecoveryEngine.run_recovery()`
+- Task 3 已由已有 `_shutdown()` 实现（`mark_running_tasks_paused()` + structlog），仅增强了 `stopped_at` 时间戳字段
+- 新增 Pydantic 模型：`RecoveryAction`, `RecoveryMode`, `RecoveryClassification`, `RecoveryResult`
+- 新增 DB 辅助函数：`get_running_tasks()`, `get_paused_tasks()`（包装 `get_tasks_by_status()`）
+- 25 个单元测试 + 12 个集成测试，全量 832 测试通过，零回归
+- structlog 输出符合 Architecture Decision 6 规范（recovery_task_classified, recovery_complete 事件）
+
 ### File List
+
+- `src/ato/recovery.py` — RecoveryEngine 核心实现（新内容，替换空占位符）
+- `src/ato/models/schemas.py` — 新增 RecoveryAction, RecoveryMode, RecoveryClassification, RecoveryResult
+- `src/ato/models/db.py` — 新增 get_running_tasks(), get_paused_tasks()
+- `src/ato/core.py` — _detect_recovery_mode() 集成 RecoveryEngine; _shutdown() 增加 stopped_at; 移除未使用的 count_tasks_by_status 导入
+- `tests/unit/test_recovery.py` — 21 个单元测试（新文件）
+- `tests/integration/test_crash_recovery.py` — 9 个集成测试（新文件）
+- `tests/unit/test_core.py` — 更新 2 个恢复检测测试以适配 RecoveryEngine 集成
+
+## Change Log
+
+- 2026-03-25: Story 5.1a 完整实现 — 崩溃恢复自动恢复引擎（RecoveryEngine 四路分类 + 正常/崩溃恢复双路径 + 30 个测试）
+- 2026-03-25: Code Review R1 修复 3 个高危 finding：
+  - F1: complete 恢复后提交 transition event 推进 story（AC3 违反修复）
+  - F2: reattach 启动独立 asyncio PID 监控，不依赖 SubprocessManager（AC2 违反修复）
+  - F3: needs_human 使用 failed 状态 + normal recovery 过滤 crash_recovery approval（AC5 违反修复）
+  - 新增 5 个测试覆盖上述场景（含二次启动回归测试）
+- 2026-03-25: Code Review R2 修复 3 个 finding（2 高危 + 1 中危）：
+  - F1(reschedule闭环): _reschedule 后台创建 adapter + SubprocessManager re-dispatch task，完成后提交 transition event（AC4/AC6 闭环）
+  - F2(原子性): _mark_needs_human 用 SAVEPOINT 包裹 task UPDATE + approval INSERT，全有或全无（恢复中再崩溃不丢任务）
+  - F3(缺失phase): _PHASE_SUCCESS_EVENT 补充 dev_ready→start_dev 和 fixing→fix_done
+  - 新增 3 个测试：reschedule dispatch+transition / needs_human 原子性故障注入 / dev_ready+fixing phase 完成事件
+- 2026-03-25: Code Review R3 修复 2 个 finding（1 高危 + 1 高危）：
+  - F1(质量门控绕过): _reschedule 按 phase 类型分流——convergent_loop 不 raw dispatch（只 pending+nudge，等 ConvergentLoop 接管）；structured_job 后台 dispatch+transition
+  - F2(执行上下文丢失): _dispatch_recovery_task 读取 story.worktree_path 传入 options.cwd，codex 任务传 sandbox=workspace-write
+  - 新增 convergent_loop_phases 参数区分 phase 类型；Orchestrator 从 config 构建并传入
+  - 新增 4 个测试：convergent_loop 不 dispatch / structured_job dispatch+transition / convergent_loop 端到端 / dispatch options 验证
+- 2026-03-25: Code Review R5 修复 2 个 finding（1 高危 + 1 中危）：
+  - F1(convergent_loop语义错误): 不再调用 ConvergentLoop.run_first_review()（硬编码 reviewing 语义），改为 phase-aware 自建流程：_PHASE_FAIL_EVENT + _PHASE_BMAD_SKILL 映射，按 phase 使用正确的 role/event/skill dispatch→parse→evaluate→transition
+  - F2(计数误报): 新增 RecoveryResult.dispatched_count 字段，reschedule 计入 dispatched（结果待定），只有 reattach/complete 计入 auto_recovered（同步完成）
+  - 新增 3 个 phase-aware 测试：reviewing→review_pass / validating→validate_pass / qa_testing→qa_fail（blocking findings）
+- 2026-03-25: Code Review R6 修复 2 个 finding（1 高危 + 1 中危）：
+  - F1(通用prompt致parse_failed): 新增 _CONVERGENT_LOOP_PROMPTS 模板，每个 phase 输出指令匹配 BMAD 解析器期望（validation: 结果/摘要/关键问题; qa: Recommendation/Quality Score/Critical Issues）
+  - F2(后台异常丢失task): _dispatch_structured_job 和 _dispatch_convergent_loop 的 except 兜底调用 _mark_dispatch_failed → 原子标记 failed + 创建 approval
+  - 新增 3 个测试：validating prompt 标记验证 / qa prompt 标记验证 / dispatch RuntimeError 兜底（task→failed+approval）
