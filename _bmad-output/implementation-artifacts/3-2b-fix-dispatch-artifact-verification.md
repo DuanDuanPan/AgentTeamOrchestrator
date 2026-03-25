@@ -1,6 +1,6 @@
 # Story 3.2b: Fix Dispatch 与 Artifact 验证
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -30,9 +30,9 @@ So that 质量问题被自动修复。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 `run_fix_dispatch()` 方法 (AC: #1, #2)
-  - [ ] 1.1 在 `src/ato/convergent_loop.py` 的 `ConvergentLoop` 类中新增 `async run_fix_dispatch(story_id: str, round_num: int, worktree_path: str | None = None) -> ConvergentLoopResult`
-  - [ ] 1.2 方法流程：
+- [x] Task 1: 实现 `run_fix_dispatch()` 方法 (AC: #1, #2)
+  - [x] 1.1 在 `src/ato/convergent_loop.py` 的 `ConvergentLoop` 类中新增 `async run_fix_dispatch(story_id: str, round_num: int, worktree_path: str | None = None) -> ConvergentLoopResult`
+  - [x] 1.2 方法流程：
     - 复用 `_resolve_worktree_path()` 解析 worktree 路径（与 `run_first_review` 一致，不允许退化到仓库根目录）
     - 从 SQLite 查询当前 story 的 open blocking findings（调用 `get_open_findings()`，过滤 `severity=="blocking"`）
     - 若无 open blocking findings → 直接提交 `fix_done`（提前返回，无需 dispatch），返回 `ConvergentLoopResult(converged=False, findings_total=0, ...)`（fix 阶段不判定收敛，交给 re-review）
@@ -44,29 +44,29 @@ So that 质量问题被自动修复。
     - 返回 `ConvergentLoopResult`（duration/cost/artifact_verified 仅通过 structlog 记录，不扩展模型——由 `AdapterResult` 提供，不需要回传给调用方，调用方通过 cost_log 表查询成本）
     - dispatch 失败时（`CLIAdapterError` 在所有重试后仍抛出）→ 让异常自然冒泡给调用方，不要在 `run_fix_dispatch` 内捕获
 
-- [ ] Task 2: 实现 fix prompt 构建 (AC: #1)
-  - [ ] 2.1 创建私有方法 `_build_fix_prompt(findings: list[FindingRecord], worktree_path: str) -> str`
-  - [ ] 2.2 prompt 内容：
+- [x] Task 2: 实现 fix prompt 构建 (AC: #1)
+  - [x] 2.1 创建私有方法 `_build_fix_prompt(findings: list[FindingRecord], worktree_path: str) -> str`
+  - [x] 2.2 prompt 内容：
     - 指定 worktree 路径
     - 列出每个 open blocking finding 的 `file_path`、`severity`、`description`
     - 如果 finding 有 `line_number`，包含行号
     - 指示 agent 修复后 commit 变更
 
-- [ ] Task 3: 实现 artifact 验证（worktree commit 检查）(AC: #2)
-  - [ ] 3.1 创建私有方法 `_get_worktree_head(worktree_path: str) -> str | None`
-  - [ ] 3.2 使用 `asyncio.create_subprocess_exec("git", "rev-parse", "HEAD", cwd=worktree_path)` + `asyncio.wait_for(proc.communicate(), timeout=5)` 获取当前 HEAD hash；在 `finally` 中调用 `cleanup_process()`（复用 `ato.adapters.base.cleanup_process` 的三阶段清理协议）
-  - [ ] 3.3 fix dispatch 前后各调用一次，比较 hash：
+- [x] Task 3: 实现 artifact 验证（worktree commit 检查）(AC: #2)
+  - [x] 3.1 创建私有方法 `_get_worktree_head(worktree_path: str) -> str | None`
+  - [x] 3.2 使用 `asyncio.create_subprocess_exec("git", "rev-parse", "HEAD", cwd=worktree_path)` + `asyncio.wait_for(proc.communicate(), timeout=5)` 获取当前 HEAD hash；在 `finally` 中调用 `cleanup_process()`（复用 `ato.adapters.base.cleanup_process` 的三阶段清理协议）
+  - [x] 3.3 fix dispatch 前后各调用一次，比较 hash：
     - hash 变化 → artifact 验证通过
     - hash 未变 → artifact 验证失败，记录 `convergent_loop_fix_no_artifact` warning log，仍然提交 `fix_done`（让 re-review 阶段判断是否真的修复了）
     - git 命令失败 / 超时 / `OSError` → `_get_worktree_head()` 返回 `None`；调用方同样记录 warning 并继续，不阻塞 fix 流程
 
-- [ ] Task 4: structlog 结构化日志 (AC: #2)
-  - [ ] 4.1 fix 启动：`convergent_loop_fix_start`，字段 `story_id`, `round_num`, `phase="fixing"`, `open_blocking_count`
-  - [ ] 4.2 fix 完成：`convergent_loop_fix_complete`，字段 `story_id`, `round_num`, `duration_ms`, `cost_usd`, `artifact_verified`
-  - [ ] 4.3 artifact 验证失败或 HEAD 不可读时额外记录：`convergent_loop_fix_no_artifact`，warning 级别，并带 `reason`（如 `head_unchanged` / `git_head_unavailable`）
+- [x] Task 4: structlog 结构化日志 (AC: #2)
+  - [x] 4.1 fix 启动：`convergent_loop_fix_start`，字段 `story_id`, `round_num`, `phase="fixing"`, `open_blocking_count`
+  - [x] 4.2 fix 完成：`convergent_loop_fix_complete`，字段 `story_id`, `round_num`, `duration_ms`, `cost_usd`, `artifact_verified`
+  - [x] 4.3 artifact 验证失败或 HEAD 不可读时额外记录：`convergent_loop_fix_no_artifact`，warning 级别，并带 `reason`（如 `head_unchanged` / `git_head_unavailable`）
 
-- [ ] Task 5: 测试 (AC: #1, #2)
-  - [ ] 5.1 创建测试类于 `tests/unit/test_convergent_loop.py`（追加到现有文件）：
+- [x] Task 5: 测试 (AC: #1, #2)
+  - [x] 5.1 创建测试类于 `tests/unit/test_convergent_loop.py`（追加到现有文件）：
     - `test_fix_dispatch_with_blocking_findings`——有 blocking findings → 调度 Claude fix agent，提交 fix_done
     - `test_fix_dispatch_prompt_contains_finding_details`——fix prompt 包含 file_path、severity、description
     - `test_fix_dispatch_no_blocking_findings_skips`——无 blocking findings → 不调度 agent，直接提交 fix_done
@@ -77,8 +77,8 @@ So that 质量问题被自动修复。
     - `test_fix_dispatch_structlog_fields`——验证日志字段 story_id, round_num, duration_ms, cost_usd, artifact_verified
     - `test_fix_dispatch_uses_claude_not_codex`——验证 dispatch 调用 `cli_tool="claude"`
     - `test_fix_dispatch_transition_event`——fix_done 事件 source="agent", submitted_at 已填充
-  - [ ] 5.2 mock `_get_worktree_head` 返回不同 hash 模拟 artifact 变化（使用 `unittest.mock.patch.object`）
-  - [ ] 5.3 测试直接在调用 `run_fix_dispatch()` 时传入 `round_num` 参数，无需修改 `_make_loop` helper
+  - [x] 5.2 mock `_get_worktree_head` 返回不同 hash 模拟 artifact 变化（使用 `unittest.mock.patch.object`）
+  - [x] 5.3 测试直接在调用 `run_fix_dispatch()` 时传入 `round_num` 参数，无需修改 `_make_loop` helper
 
 ## Dev Notes
 
@@ -367,15 +367,34 @@ logger.info(
 
 - 2026-03-25: create-story 创建 — 基于 Epic 3 / PRD / 架构 / Story 3.2a 与 2B.1 / 2B.4 上下文生成 fix dispatch story
 - 2026-03-25: validate-create-story 修订 —— 要求 `_get_worktree_head()` 遵循三阶段清理协议并补齐超时边界；补充 git HEAD 读取失败仍继续 `fix_done` 的测试覆盖；移除不存在的 architecture ADR/Decision 引用并清理易漂移的行数/测试总数
+- 2026-03-25: dev-story 实现完成 — 实现 run_fix_dispatch()、_build_fix_prompt()、_get_worktree_head()，10 个测试全通过，807 全回归通过
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- RED phase: 10 tests written → all failed with `AttributeError: does not have the attribute '_get_worktree_head'`
+- GREEN phase: implemented `run_fix_dispatch()`, `_build_fix_prompt()`, `_get_worktree_head()` → all 10 tests pass
+- Full regression: 807 passed, 0 failures
+- Lint: `ruff check` — All checks passed
+- Type check: `mypy src/ato/convergent_loop.py tests/unit/test_convergent_loop.py` — Success: no issues found
+
 ### Completion Notes List
 
+- ✅ `run_fix_dispatch()` 实现完整流程：resolve worktree → 查询 open blocking findings → 构建 fix prompt → 记录 HEAD baseline → dispatch Claude agent → 验证 artifact → 提交 fix_done
+- ✅ 无 blocking findings 时提前返回并提交 fix_done（快速回到 reviewing）
+- ✅ `_build_fix_prompt()` 包含 file_path、severity、description、line_number（可选）
+- ✅ `_get_worktree_head()` 使用 asyncio.create_subprocess_exec + wait_for(timeout=5) + cleanup_process 三阶段清理协议
+- ✅ artifact 验证：hash 变化 = 通过，hash 未变 = warning + 继续，git 失败 = warning + 继续
+- ✅ structlog 三个事件：fix_start、fix_complete、fix_no_artifact
+- ✅ CLIAdapterError 自然冒泡，不在 run_fix_dispatch 中捕获
+- ✅ 10 个测试用例全部通过，807 全回归通过
+
 ### File List
+
+- `src/ato/convergent_loop.py` — MODIFIED: +`run_fix_dispatch()`、+`_build_fix_prompt()`、+`_get_worktree_head()`、+`import asyncio`
+- `tests/unit/test_convergent_loop.py` — MODIFIED: +`_make_finding_record()` helper、+10 个 fix dispatch 测试类、+`FindingRecord`/`compute_dedup_hash` import
