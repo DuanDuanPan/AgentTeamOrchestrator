@@ -1,0 +1,10 @@
+{
+  "skill_type": "code_review",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 2,
+  "findings": [
+    {"severity": "blocking", "category": "edge_case", "rule_id": "code_review.edge_case", "file_path": "src/ato/cli.py", "line": 15},
+    {"severity": "suggestion", "category": "edge_case", "rule_id": "code_review.edge_case", "file_path": "src/ato/cli.py", "line": 20}
+  ]
+}

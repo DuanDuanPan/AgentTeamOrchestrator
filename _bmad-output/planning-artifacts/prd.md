@@ -506,6 +506,7 @@ batch select（PM agent 推荐 → 人类确认）
 - **FR31:** 系统可管理 merge queue，按顺序执行 rebase 和 merge（需人类授权）
 - **FR32:** 系统可在 regression 失败时自动冻结 merge queue，阻止后续 merge
 - **FR52:** 系统可在 worktree rebase 产生冲突时调度 agent 自动解决，解决后重新进入 review 流程；解决失败 escalate 给操作者
+- **FR54:** 系统可在 merge 流程中 pre-commit hook 失败时调度 agent 自动修复（基于项目配置的 lint/format/type-check 命令），修复后重新 commit；修复失败 escalate 给操作者
 
 ### 配置与初始化
 

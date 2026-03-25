@@ -1,0 +1,18 @@
+{
+  "skill_type": "architecture_review",
+  "verdict": "approved",
+  "parser_mode": "deterministic",
+  "finding_count": 2,
+  "findings": [
+    {
+      "severity": "suggestion",
+      "category": "future_enhancement",
+      "rule_id": "architecture.future_enhancement"
+    },
+    {
+      "severity": "suggestion",
+      "category": "future_enhancement",
+      "rule_id": "architecture.future_enhancement"
+    }
+  ]
+}

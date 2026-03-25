@@ -1,0 +1,11 @@
+{
+  "skill_type": "qa_report",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 3,
+  "findings": [
+    {"severity": "blocking", "category": "hard_waits", "rule_id": "qa.hard_waits", "file_path": "tests/unit/test_state_machine.py", "line": 67},
+    {"severity": "blocking", "category": "isolation", "rule_id": "qa.isolation", "file_path": "tests/unit/test_state_machine.py", "line": 15},
+    {"severity": "blocking", "category": "isolation", "rule_id": "qa.isolation", "file_path": "tests/unit/test_state_machine.py", "line": 112}
+  ]
+}

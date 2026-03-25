@@ -241,11 +241,10 @@ class TestShutdownDirty:
         # PID 仍被清理（资源不能泄漏）
         assert not orchestrator._pid_path.exists()
         # TQ 仍被停止
+        assert orchestrator._tq is not None
         orchestrator._tq.stop.assert_awaited_once()
 
-    async def test_dirty_shutdown_propagates_through_run(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_dirty_shutdown_propagates_through_run(self, initialized_db_path: Path) -> None:
         """mark_running_tasks_paused 失败导致 run() 也抛异常（非零退出信号）。"""
         settings = _make_settings()
         orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
@@ -254,7 +253,7 @@ class TestShutdownDirty:
         async def stop_immediately() -> None:
             orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = stop_immediately  # type: ignore[assignment]
+        orchestrator._poll_cycle = stop_immediately  # type: ignore[method-assign]
 
         # 在 _shutdown 中 patch get_connection 使 mark_running_tasks_paused 失败
         original_shutdown = orchestrator._shutdown
@@ -266,7 +265,7 @@ class TestShutdownDirty:
             ):
                 await original_shutdown()
 
-        orchestrator._shutdown = shutdown_with_db_failure  # type: ignore[assignment]
+        orchestrator._shutdown = shutdown_with_db_failure  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="DB crash"):
             await orchestrator.run()
@@ -287,7 +286,7 @@ class TestStartupFailureCleanup:
             # 模拟信号注册失败
             raise RuntimeError("simulated signal handler failure")
 
-        orchestrator._startup = failing_startup  # type: ignore[assignment]
+        orchestrator._startup = failing_startup  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="simulated signal handler failure"):
             await orchestrator.run()
@@ -296,7 +295,7 @@ class TestStartupFailureCleanup:
         assert not pid_path.exists()
         # TransitionQueue.stop() 应被调用
         assert orchestrator._tq is not None
-        orchestrator._tq.stop.assert_awaited_once()
+        orchestrator._tq.stop.assert_awaited_once()  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +343,7 @@ async def _insert_test_task(
             phase="developing",
             role="developer",
             cli_tool="claude",
-            status=status,
+            status=status,  # type: ignore[arg-type]
             started_at=now,
         )
         await insert_task(db, task)

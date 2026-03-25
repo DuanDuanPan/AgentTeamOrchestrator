@@ -63,7 +63,7 @@ development_status:
   epic-2b: in-progress
   2b-1-claude-agent-dispatch: done
   2b-2-codex-agent-review: done
-  2b-3-bmad-skill-parsing: ready-for-dev
+  2b-3-bmad-skill-parsing: done
   2b-4-worktree-isolation: review
   2b-5-batch-select-status: done
   2b-6-interactive-session: backlog

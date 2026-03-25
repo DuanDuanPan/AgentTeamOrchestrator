@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 # ---------------------------------------------------------------------------
 # 跨模块常量
@@ -440,3 +440,108 @@ class CostLogRecord(_StrictBase):
     exit_code: int | None = None
     error_category: str | None = None
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# BMAD 解析模型 (Story 2B.3)
+# ---------------------------------------------------------------------------
+
+# 解析器模式
+ParserMode = Literal["deterministic", "semantic_fallback", "failed"]
+
+# 解析结果 verdict
+ParseVerdict = Literal["approved", "changes_requested", "parse_failed"]
+
+
+class BmadSkillType(StrEnum):
+    """BMAD skill 类型枚举，支持 workflow 名称/别名归一化。"""
+
+    CODE_REVIEW = "code_review"
+    STORY_VALIDATION = "story_validation"
+    ARCHITECTURE_REVIEW = "architecture_review"
+    QA_REPORT = "qa_report"
+
+    @classmethod
+    def from_alias(cls, name: str) -> BmadSkillType:
+        """从 workflow 名称/别名归一化为枚举值。
+
+        支持 kebab-case workflow 名称、精确枚举值等多种输入形态。
+
+        Raises:
+            ValueError: 未知的 skill 名称。
+        """
+        # 精确匹配枚举值
+        try:
+            return cls(name)
+        except ValueError:
+            pass
+
+        normalized = name.lower().replace("_", "-")
+        alias_map: dict[str, BmadSkillType] = {
+            # code_review — bmm module
+            "code-review": cls.CODE_REVIEW,
+            "bmad-code-review": cls.CODE_REVIEW,
+            "bmad-bmm-code-review": cls.CODE_REVIEW,
+            "skill:bmad-code-review": cls.CODE_REVIEW,
+            # story_validation — bmm module
+            "story-validation": cls.STORY_VALIDATION,
+            "validate-create-story": cls.STORY_VALIDATION,
+            "bmad-validate-story": cls.STORY_VALIDATION,
+            "bmad-create-story": cls.STORY_VALIDATION,
+            "bmad-bmm-create-story": cls.STORY_VALIDATION,
+            "skill:bmad-create-story": cls.STORY_VALIDATION,
+            "validate-story": cls.STORY_VALIDATION,
+            # architecture_review — bmm module
+            "architecture": cls.ARCHITECTURE_REVIEW,
+            "architecture-review": cls.ARCHITECTURE_REVIEW,
+            "create-architecture": cls.ARCHITECTURE_REVIEW,
+            "bmad-create-architecture": cls.ARCHITECTURE_REVIEW,
+            "bmad-bmm-create-architecture": cls.ARCHITECTURE_REVIEW,
+            "skill:bmad-create-architecture": cls.ARCHITECTURE_REVIEW,
+            # qa_report — tea module
+            "qa-report": cls.QA_REPORT,
+            "test-review": cls.QA_REPORT,
+            "testarch-test-review": cls.QA_REPORT,
+            "bmad-testarch-test-review": cls.QA_REPORT,
+            "bmad-tea-testarch-test-review": cls.QA_REPORT,
+            "skill:bmad-testarch-test-review": cls.QA_REPORT,
+        }
+        result = alias_map.get(normalized)
+        if result is None:
+            msg = f"Unknown BMAD skill: {name!r}"
+            raise ValueError(msg)
+        return result
+
+
+class BmadFinding(_StrictBase):
+    """BMAD 解析产出的单条 finding。"""
+
+    severity: FindingSeverity
+    category: str
+    description: str
+    file_path: str
+    line: int | None = None
+    rule_id: str
+    raw_location: str | None = None
+    dedup_hash: str | None = None
+
+    @model_validator(mode="after")
+    def _compute_hash(self) -> BmadFinding:
+        if self.dedup_hash is None:
+            self.dedup_hash = compute_dedup_hash(
+                self.file_path, self.rule_id, self.severity, self.description
+            )
+        return self
+
+
+class BmadParseResult(_StrictBase):
+    """BmadAdapter.parse() 的返回结果。"""
+
+    skill_type: BmadSkillType
+    verdict: ParseVerdict
+    findings: list[BmadFinding]
+    parser_mode: ParserMode
+    raw_markdown_hash: str
+    raw_output_preview: str
+    parse_error: str | None = None
+    parsed_at: datetime

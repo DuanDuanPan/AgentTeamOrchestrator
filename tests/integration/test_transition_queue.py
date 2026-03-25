@@ -33,8 +33,12 @@ def _evt(
 async def _seed_story(db_path: Path, story_id: str, phase: str = "queued") -> None:
     """插入一条 story 到 SQLite。"""
     status_map = {
-        "queued": "backlog", "creating": "planning", "validating": "planning",
-        "dev_ready": "ready", "developing": "in_progress", "reviewing": "review",
+        "queued": "backlog",
+        "creating": "planning",
+        "validating": "planning",
+        "dev_ready": "ready",
+        "developing": "in_progress",
+        "reviewing": "review",
         "fixing": "review",
     }
     now = datetime.now(UTC)
@@ -89,9 +93,7 @@ class TestBDDConcurrentTransitions:
         # monkey-patch consumer 中间记录处理顺序
         orig_get = _TransitionQueue._get_or_create_machine
 
-        async def recording_get(
-            self: object, story_id: str, db: object
-        ) -> object:
+        async def recording_get(self: object, story_id: str, db: object) -> object:
             sm = await orig_get(self, story_id, db)  # type: ignore[arg-type]
             processed_order.append(story_id)
             return sm
@@ -106,7 +108,7 @@ class TestBDDConcurrentTransitions:
             await tq.submit(_evt("story-b", "create_done"))
             await tq._queue.join()
         finally:
-            _TransitionQueue._get_or_create_machine = orig_get  # type: ignore[assignment]
+            _TransitionQueue._get_or_create_machine = orig_get  # type: ignore[method-assign]
 
         # 断言精确处理顺序：A 先于 B
         assert processed_order == ["story-a", "story-b"]
@@ -125,9 +127,7 @@ class TestBDDConcurrentTransitions:
 
         await tq.stop()
 
-    async def test_serial_no_concurrent_execution(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_serial_no_concurrent_execution(self, initialized_db_path: Path) -> None:
         """验证同一时刻只有一个 transition 在处理。"""
         await _seed_story(initialized_db_path, "sa", phase="creating")
         await _seed_story(initialized_db_path, "sb", phase="creating")
@@ -149,7 +149,7 @@ class TestBDDConcurrentTransitions:
             finally:
                 active_count -= 1
 
-        sm_mod.StoryLifecycle.send = counting_send  # type: ignore[assignment]
+        sm_mod.StoryLifecycle.send = counting_send  # type: ignore[method-assign]
         try:
             tq = TransitionQueue(initialized_db_path)
             await tq.start()
@@ -161,7 +161,7 @@ class TestBDDConcurrentTransitions:
             await tq._queue.join()
             await tq.stop()
         finally:
-            sm_mod.StoryLifecycle.send = orig_sm_send  # type: ignore[assignment]
+            sm_mod.StoryLifecycle.send = orig_sm_send  # type: ignore[method-assign]
 
         # 最大并发度应该为 1（串行处理）
         assert concurrency_max == 1
@@ -173,9 +173,7 @@ class TestBDDConcurrentTransitions:
 
 
 class TestTransitionLatency:
-    async def test_transition_within_5_seconds(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_transition_within_5_seconds(self, initialized_db_path: Path) -> None:
         """NFR2: 状态转换处理延迟 ≤5 秒。"""
         await _seed_story(initialized_db_path, "s1")
 
@@ -233,9 +231,7 @@ class TestEndToEnd:
 
         await tq.stop()
 
-    async def test_convergent_loop_review_fail_fix(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_convergent_loop_review_fail_fix(self, initialized_db_path: Path) -> None:
         """端到端: reviewing → review_fail → fixing → fix_done → reviewing。"""
         await _seed_story(initialized_db_path, "cl", phase="reviewing")
 

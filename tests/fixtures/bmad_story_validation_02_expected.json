@@ -1,0 +1,18 @@
+{
+  "skill_type": "story_validation",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 2,
+  "findings": [
+    {
+      "severity": "blocking",
+      "category": "critical_issue",
+      "rule_id": "story_validation.critical_issue"
+    },
+    {
+      "severity": "blocking",
+      "category": "critical_issue",
+      "rule_id": "story_validation.critical_issue"
+    }
+  ]
+}

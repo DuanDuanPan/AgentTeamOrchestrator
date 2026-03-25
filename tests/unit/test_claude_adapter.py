@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,13 +23,15 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
 @pytest.fixture()
-def success_fixture() -> dict:
-    return json.loads((FIXTURES / "claude_output_success.json").read_text())
+def success_fixture() -> dict[str, Any]:
+    result: dict[str, Any] = json.loads((FIXTURES / "claude_output_success.json").read_text())
+    return result
 
 
 @pytest.fixture()
-def structured_fixture() -> dict:
-    return json.loads((FIXTURES / "claude_output_structured.json").read_text())
+def structured_fixture() -> dict[str, Any]:
+    result: dict[str, Any] = json.loads((FIXTURES / "claude_output_structured.json").read_text())
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +40,7 @@ def structured_fixture() -> dict:
 
 
 class TestClaudeOutputFromJson:
-    def test_success_fixture_parsing(self, success_fixture: dict) -> None:
+    def test_success_fixture_parsing(self, success_fixture: dict[str, Any]) -> None:
         output = ClaudeOutput.from_json(success_fixture)
         assert output.status == "success"
         assert output.exit_code == 0
@@ -52,7 +55,7 @@ class TestClaudeOutputFromJson:
         assert output.model_usage is not None
         assert output.model_usage["model"] == "claude-opus-4-6"
 
-    def test_structured_fixture_parsing(self, structured_fixture: dict) -> None:
+    def test_structured_fixture_parsing(self, structured_fixture: dict[str, Any]) -> None:
         output = ClaudeOutput.from_json(structured_fixture)
         assert output.status == "success"
         assert output.structured_output is not None
@@ -176,7 +179,7 @@ def _mock_process(stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> Ma
 
 
 class TestClaudeAdapterExecute:
-    async def test_success_execution(self, success_fixture: dict) -> None:
+    async def test_success_execution(self, success_fixture: dict[str, Any]) -> None:
         proc = _mock_process(json.dumps(success_fixture).encode())
         adapter = ClaudeAdapter()
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
@@ -187,8 +190,10 @@ class TestClaudeAdapterExecute:
     async def test_nonzero_exit_raises(self) -> None:
         proc = _mock_process(b"", b"Error: auth token expired", returncode=1)
         adapter = ClaudeAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.AUTH_EXPIRED
         assert exc_info.value.retryable is True
@@ -196,8 +201,10 @@ class TestClaudeAdapterExecute:
     async def test_invalid_json_raises_parse_error(self) -> None:
         proc = _mock_process(b"not valid json", returncode=0)
         adapter = ClaudeAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
 
@@ -210,13 +217,15 @@ class TestClaudeAdapterExecute:
         proc.kill = MagicMock()
         proc.wait = AsyncMock()
         adapter = ClaudeAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test", {"timeout": 1})
         assert exc_info.value.category == ErrorCategory.TIMEOUT
         assert exc_info.value.retryable is True
 
-    async def test_on_process_start_callback(self, success_fixture: dict) -> None:
+    async def test_on_process_start_callback(self, success_fixture: dict[str, Any]) -> None:
         proc = _mock_process(json.dumps(success_fixture).encode())
         callback = AsyncMock()
         adapter = ClaudeAdapter()
@@ -263,7 +272,7 @@ class TestCleanupProcess:
             # 第二次 wait（kill 后）：立即返回
 
         proc.wait = slow_wait
-        await cleanup_process(proc, timeout=0.01)
+        await cleanup_process(proc, timeout=1)
         proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
         assert call_count == 2

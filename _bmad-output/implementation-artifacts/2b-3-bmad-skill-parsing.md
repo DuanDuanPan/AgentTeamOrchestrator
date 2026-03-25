@@ -1,6 +1,6 @@
 # Story 2B.3: BMAD Skill Markdown 输出解析为结构化 JSON
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -33,39 +33,39 @@ So that 质量门控和审查流程可以消费结构化数据。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 定义 BMAD 解析相关 Pydantic 模型 (AC: #1)
-  - [ ] 1.1 `BmadSkillType` 枚举（`code_review`, `story_validation`, `architecture_review`, `qa_report`），并支持 workflow 名称/别名归一化
-  - [ ] 1.2 `BmadFinding` 模型（`severity`, `category`, `description`, `file_path`, `line`, `rule_id`, `raw_location`）
-  - [ ] 1.3 `BmadParseResult` 模型（`skill_type`, `verdict`, `findings`, `parser_mode`, `raw_markdown_hash`, `raw_output_preview`, `parse_error`, `parsed_at`）
-  - [ ] 1.4 `compute_dedup_hash(file_path, rule_id, severity, description)` 辅助函数，算法与 Story 3.1 保持一致
-- [ ] Task 2: 实现 `BmadAdapter.parse()` 核心解析逻辑 (AC: #1, #2)
-  - [ ] 2.1 实现 `async BmadAdapter.parse()`，保持 parsing core 纯函数化，并通过依赖注入接入 semantic parser runner
-  - [ ] 2.2 实现 deterministic fast-path：支持当前仓库真实输出族群
+- [x] Task 1: 定义 BMAD 解析相关 Pydantic 模型 (AC: #1)
+  - [x] 1.1 `BmadSkillType` 枚举（`code_review`, `story_validation`, `architecture_review`, `qa_report`），并支持 workflow 名称/别名归一化
+  - [x] 1.2 `BmadFinding` 模型（`severity`, `category`, `description`, `file_path`, `line`, `rule_id`, `raw_location`）
+  - [x] 1.3 `BmadParseResult` 模型（`skill_type`, `verdict`, `findings`, `parser_mode`, `raw_markdown_hash`, `raw_output_preview`, `parse_error`, `parsed_at`）
+  - [x] 1.4 `compute_dedup_hash(file_path, rule_id, severity, description)` 辅助函数，算法与 Story 3.1 保持一致
+- [x] Task 2: 实现 `BmadAdapter.parse()` 核心解析逻辑 (AC: #1, #2)
+  - [x] 2.1 实现 `async BmadAdapter.parse()`，保持 parsing core 纯函数化，并通过依赖注入接入 semantic parser runner
+  - [x] 2.2 实现 deterministic fast-path：支持当前仓库真实输出族群
     - code-review 最终呈现格式（`Intent Gaps` / `Bad Spec` / `Patch` / `Defer`）
     - story-validation 报告格式（摘要 / 关键问题 / 已应用修正 / 最终结论）
     - architecture validation 摘要格式（`Overall Status` / `Key Strengths` / `Areas for Future Enhancement`）
     - TEA QA / test-review 报告格式（`Recommendation` / `Critical Issues` / `Recommendations`）
     - JSON array fast-path（Edge Case Hunter / 子评审 JSON）
-  - [ ] 2.3 实现 canonical normalization：抽取/推导 `severity`、`rule_id`、`file_path`、`line`，缺失位置时使用 `file_path="N/A"`、`line=None`
-  - [ ] 2.4 当 deterministic 结果不完整或无法可靠归一化时，调用已有 structured-output 能力的 semantic fallback（优先复用现有 CLI adapter；测试中通过 fake runner/mock 注入）
-  - [ ] 2.5 对最终结果执行 `BmadParseResult.model_validate()`
-- [ ] Task 3: 实现解析失败降级路径 (AC: #3)
-  - [ ] 3.1 实现 `record_parse_failure(...)`（或等价 helper），由它而不是纯 `parse()` 逻辑负责写入 `ApprovalRecord`
-  - [ ] 3.2 helper 接受注入 notifier（同进程 `Nudge.notify()`、跨进程 `send_external_nudge()` 或普通 callback），禁止在 parser core 中硬编码信号发送
-  - [ ] 3.3 记录 structlog 事件：`story_id`、`skill_type`、`parser_mode`、失败原因、预览摘要
-  - [ ] 3.4 返回标记失败的 `BmadParseResult`（`findings=[]`, `verdict="parse_failed"`）
-- [ ] Task 4: 创建 20 个 fixture 样本文件 (AC: #2)
-  - [ ] 4.1 每种 skill_type 至少 5 个样本，样本必须基于当前仓库中的真实模板/报告结构，而非自造简化标题
-  - [ ] 4.2 fixtures 命名：`bmad_{skill_type}_{nn}.md`
-  - [ ] 4.3 对应期望输出 JSON：`bmad_{skill_type}_{nn}_expected.json`
-  - [ ] 4.4 至少覆盖 1 个 malformed / partial 格式样本，用于触发 semantic fallback 或 graceful degrade
-- [ ] Task 5: 编写测试 (AC: #1, #2, #3)
-  - [ ] 5.1 `tests/unit/test_bmad_adapter.py`：fixture 批量解析测试（参数化 20 个样本）
-  - [ ] 5.2 deterministic fast-path 单测：四类 skill 输出 + JSON array fast-path
-  - [ ] 5.3 semantic fallback 单测：mock / fake parser runner 返回结构化输出并通过 schema 验证
-  - [ ] 5.4 失败路径测试：seed story 后创建 approval、触发注入 notifier、校验 structlog 预览截断
-  - [ ] 5.5 `tests/unit/test_schemas.py`：`BmadFinding` / `BmadParseResult` / dedup hash 一致性测试
-  - [ ] 5.6 边界情况：空输入、纯文本、clean review、缺失 location、未知标题
+  - [x] 2.3 实现 canonical normalization：抽取/推导 `severity`、`rule_id`、`file_path`、`line`，缺失位置时使用 `file_path="N/A"`、`line=None`
+  - [x] 2.4 当 deterministic 结果不完整或无法可靠归一化时，调用已有 structured-output 能力的 semantic fallback（优先复用现有 CLI adapter；测试中通过 fake runner/mock 注入）
+  - [x] 2.5 对最终结果执行 `BmadParseResult.model_validate()`
+- [x] Task 3: 实现解析失败降级路径 (AC: #3)
+  - [x] 3.1 实现 `record_parse_failure(...)`（或等价 helper），由它而不是纯 `parse()` 逻辑负责写入 `ApprovalRecord`
+  - [x] 3.2 helper 接受注入 notifier（同进程 `Nudge.notify()`、跨进程 `send_external_nudge()` 或普通 callback），禁止在 parser core 中硬编码信号发送
+  - [x] 3.3 记录 structlog 事件：`story_id`、`skill_type`、`parser_mode`、失败原因、预览摘要
+  - [x] 3.4 返回标记失败的 `BmadParseResult`（`findings=[]`, `verdict="parse_failed"`）
+- [x] Task 4: 创建 20 个 fixture 样本文件 (AC: #2)
+  - [x] 4.1 每种 skill_type 至少 5 个样本，样本必须基于当前仓库中的真实模板/报告结构，而非自造简化标题
+  - [x] 4.2 fixtures 命名：`bmad_{skill_type}_{nn}.md`
+  - [x] 4.3 对应期望输出 JSON：`bmad_{skill_type}_{nn}_expected.json`
+  - [x] 4.4 至少覆盖 1 个 malformed / partial 格式样本，用于触发 semantic fallback 或 graceful degrade
+- [x] Task 5: 编写测试 (AC: #1, #2, #3)
+  - [x] 5.1 `tests/unit/test_bmad_adapter.py`：fixture 批量解析测试（参数化 20 个样本）
+  - [x] 5.2 deterministic fast-path 单测：四类 skill 输出 + JSON array fast-path
+  - [x] 5.3 semantic fallback 单测：mock / fake parser runner 返回结构化输出并通过 schema 验证
+  - [x] 5.4 失败路径测试：seed story 后创建 approval、触发注入 notifier、校验 structlog 预览截断
+  - [x] 5.5 `tests/unit/test_schemas.py`：`BmadFinding` / `BmadParseResult` / dedup hash 一致性测试
+  - [x] 5.6 边界情况：空输入、纯文本、clean review、缺失 location、未知标题
 
 ## Dev Notes
 
@@ -297,10 +297,47 @@ pytest-asyncio auto mode（与项目现有测试一致）
 
 ### Agent Model Used
 
-（dev 阶段填写）
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- 修复 code-review 解析：_split_sections 过于细粒度，改用 _extract_named_section 实现 level-aware 提取
+- 修复代码围栏内 `#` 注释被误识别为 heading：添加 _strip_code_fences 预处理
+- 修复 regex 中 `|` 交替导致 heading 捕获组 group(1) 为 None：用 `(?:...)` 包裹
+- 修复 architecture-review 中 bold 格式 section（如 `**Areas for Future Enhancement:**`）未被识别：添加 _extract_bold_section
+- 修复 "Validation Issues Addressed" heading vs body 矛盾检测（heading 说 addressed，body 说 unresolved）
+- [Review Fix 1] code-review bold-label 列表形式 `- **Intent Gaps**: ...` 未被识别：新增 _extract_bold_list_section()
+- [Review Fix 2] architecture "NEEDS WORK" 状态被误判为通过：blocking 判定扩展到包含 "NEEDS"
+- [Review Fix 3] QA table findings 在有详细 issue section 时被静默丢弃：改为始终合并 + slug 包含去重
+- [Review Fix 4] BmadSkillType.from_alias() 未覆盖仓库 module-help.csv 暴露的真实别名：补充 bmad-bmm-*、bmad-tea-*、skill:* 前缀
+
 ### Completion Notes List
 
+- Task 1: 在 schemas.py 中新增 BmadSkillType（StrEnum + from_alias）、BmadFinding（含 model_validator 自动计算 dedup_hash）、BmadParseResult、compute_dedup_hash。所有模型使用 _StrictBase。
+- Task 2: 实现双阶段解析——deterministic fast-path（JSON/code-review/story-validation/architecture-review/qa-report 五种路径）+ 通过 SemanticParserRunner protocol 注入的 semantic fallback。
+- Task 3: 实现 record_parse_failure() helper，通过 ParseFailureNotifier protocol 注入通知回调，遵循 "parser core 不做 IO" 边界。
+- Task 4: 创建 20 个 fixture（4 skill_type × 5 样本），包含 clean review、JSON fast-path、malformed 输出等边界情况。
+- Task 5: 45 个测试 → review 后扩展为 53 个。参数化批量解析（20 fixtures）、deterministic fast-path 单测、semantic fallback 单测、失败路径 DB 测试、schema 模型测试、边界情况测试、4 个对抗性回归测试。
+- Review Follow-up: 修复 4 个 code-review finding（2 高 + 2 中），新增对抗性测试覆盖每个 finding。
+
 ### File List
+
+- `src/ato/models/schemas.py` — 新增 BmadSkillType、BmadFinding、BmadParseResult、compute_dedup_hash、FindingSeverity、ParserMode、ParseVerdict
+- `src/ato/adapters/bmad_adapter.py` — 替换占位文件，完整实现 BmadAdapter.parse() + record_parse_failure()
+- `tests/unit/test_schemas.py` — 新增 TestBmadSkillType、TestBmadFinding、TestBmadParseResult、TestComputeDedupHash
+- `tests/unit/test_bmad_adapter.py` — 新建，45 个测试
+- `tests/fixtures/bmad_code_review_01.md` ~ `bmad_code_review_05.md` — code-review fixture
+- `tests/fixtures/bmad_code_review_01_expected.json` ~ `bmad_code_review_05_expected.json`
+- `tests/fixtures/bmad_story_validation_01.md` ~ `bmad_story_validation_05.md` — story-validation fixture
+- `tests/fixtures/bmad_story_validation_01_expected.json` ~ `bmad_story_validation_05_expected.json`
+- `tests/fixtures/bmad_architecture_review_01.md` ~ `bmad_architecture_review_05.md` — architecture-review fixture
+- `tests/fixtures/bmad_architecture_review_01_expected.json` ~ `bmad_architecture_review_05_expected.json`
+- `tests/fixtures/bmad_qa_report_01.md` ~ `bmad_qa_report_05.md` — qa-report fixture
+- `tests/fixtures/bmad_qa_report_01_expected.json` ~ `bmad_qa_report_05_expected.json`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — 状态更新
+- `_bmad-output/implementation-artifacts/2b-3-bmad-skill-parsing.md` — story 文件更新
+
+### Change Log
+
+- 2026-03-25: Story 2B.3 完整实现 — BMAD Skill Markdown 输出解析为结构化 JSON
+- 2026-03-25: 修复 4 个 code-review finding — bold-label 解析、NEEDS WORK 判定、QA table 合并、alias 补全

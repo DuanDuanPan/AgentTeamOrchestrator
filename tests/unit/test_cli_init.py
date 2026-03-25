@@ -26,7 +26,7 @@ def _cr(
     status: str = "PASS",
     message: str = "Python 3.12.1",
 ) -> CheckResult:
-    return CheckResult(layer=layer, check_item=check_item, status=status, message=message)
+    return CheckResult(layer=layer, check_item=check_item, status=status, message=message)  # type: ignore[arg-type]
 
 
 def _all_pass_results() -> list[CheckResult]:
@@ -79,9 +79,7 @@ class TestInitNormalFlow:
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
         with patch("ato.cli.run_preflight", mock_preflight):
-            result = runner.invoke(
-                app, ["init", str(project_dir)], input="\n"
-            )
+            result = runner.invoke(app, ["init", str(project_dir)], input="\n")
 
         assert result.exit_code == 0
         assert "系统已初始化" in result.output
@@ -161,9 +159,7 @@ class TestInitReinitDetection:
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
         with patch("ato.cli.run_preflight", mock_preflight):
-            result = runner.invoke(
-                app, ["init", str(project_dir)], input="y\n\n"
-            )
+            result = runner.invoke(app, ["init", str(project_dir)], input="y\n\n")
 
         assert "重新初始化" in result.output
 
@@ -177,9 +173,7 @@ class TestInitReinitDetection:
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
         with patch("ato.cli.run_preflight", mock_preflight):
-            result = runner.invoke(
-                app, ["init", str(project_dir)], input="y\n\n"
-            )
+            result = runner.invoke(app, ["init", str(project_dir)], input="y\n\n")
 
         assert result.exit_code == 0
         mock_preflight.assert_called_once()
@@ -198,9 +192,7 @@ class TestInitReinitReject:
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
         with patch("ato.cli.run_preflight", mock_preflight):
-            result = runner.invoke(
-                app, ["init", str(project_dir)], input="n\n"
-            )
+            result = runner.invoke(app, ["init", str(project_dir)], input="n\n")
 
         assert result.exit_code != 0
         mock_preflight.assert_not_called()
@@ -334,21 +326,15 @@ class TestRenderStatusIcons:
         assert "✔" in output
 
     def test_halt_icon(self) -> None:
-        output = _capture_render(
-            [_cr("system", "claude_installed", "HALT", "未安装")]
-        )
+        output = _capture_render([_cr("system", "claude_installed", "HALT", "未安装")])
         assert "✖" in output
 
     def test_warn_icon(self) -> None:
-        output = _capture_render(
-            [_cr("project", "bmad_skills", "WARN", "未找到")]
-        )
+        output = _capture_render([_cr("project", "bmad_skills", "WARN", "未找到")])
         assert "⚠" in output
 
     def test_info_icon(self) -> None:
-        output = _capture_render(
-            [_cr("artifact", "ux_files", "INFO", "跳过")]
-        )
+        output = _capture_render([_cr("artifact", "ux_files", "INFO", "跳过")])
         assert "ℹ" in output
 
 

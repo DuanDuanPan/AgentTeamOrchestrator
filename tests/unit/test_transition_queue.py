@@ -18,6 +18,7 @@ from ato.transition_queue import TransitionQueue, _replay_to_phase
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_event(
     story_id: str = "story-1",
     event_name: str = "start_create",
@@ -207,9 +208,7 @@ class TestTransitionQueueSerialization:
 
 
 class TestTransitionQueueErrorIsolation:
-    async def test_invalid_transition_does_not_crash_queue(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_invalid_transition_does_not_crash_queue(self, initialized_db_path: Path) -> None:
         """非法 transition 不应 crash 队列，后续事件正常处理。"""
         await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
 
@@ -228,9 +227,7 @@ class TestTransitionQueueErrorIsolation:
 
         await tq.stop()
 
-    async def test_nonexistent_story_does_not_crash_queue(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_nonexistent_story_does_not_crash_queue(self, initialized_db_path: Path) -> None:
         """不存在的 story 不 crash 队列。"""
         await _insert_story_at_phase(initialized_db_path, "real", "queued", "backlog")
 
@@ -249,9 +246,7 @@ class TestTransitionQueueErrorIsolation:
 
         await tq.stop()
 
-    async def test_failed_transition_evicts_cached_machine(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_failed_transition_evicts_cached_machine(self, initialized_db_path: Path) -> None:
         """失败后缓存的状态机应被驱逐。"""
         await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
 
@@ -292,19 +287,19 @@ class TestTransitionQueueErrorIsolation:
         # 注入 save_story_state 失败
         import ato.transition_queue as tq_mod
 
-        orig_save = tq_mod.save_story_state
+        orig_save = tq_mod.save_story_state  # type: ignore[attr-defined]
 
         async def failing_save(*args: object, **kwargs: object) -> None:
             msg = "injected persist failure"
             raise RuntimeError(msg)
 
-        tq_mod.save_story_state = failing_save  # type: ignore[assignment]
+        tq_mod.save_story_state = failing_save  # type: ignore[attr-defined]
         try:
             # send 会成功（内存推进到 validating），但 persist 会失败
             await tq.submit(_make_event("s1", "create_done"))
             await tq._queue.join()
         finally:
-            tq_mod.save_story_state = orig_save  # type: ignore[assignment]
+            tq_mod.save_story_state = orig_save  # type: ignore[attr-defined]
 
         # 缓存应被驱逐（内存 vs DB 不一致）
         assert "s1" not in tq._machines
@@ -347,12 +342,12 @@ class TestTransitionQueueErrorIsolation:
             msg = "injected commit failure"
             raise RuntimeError(msg)
 
-        tq._db.commit = failing_commit  # type: ignore[assignment]
+        tq._db.commit = failing_commit  # type: ignore[method-assign]
         try:
             await tq.submit(_make_event("s1", "create_done"))
             await tq._queue.join()
         finally:
-            tq._db.commit = orig_commit  # type: ignore[assignment]
+            tq._db.commit = orig_commit  # type: ignore[method-assign]
 
         # 缓存被驱逐
         assert "s1" not in tq._machines
@@ -374,9 +369,7 @@ class TestTransitionQueueErrorIsolation:
 
 
 class TestTransitionQueueLifecycle:
-    async def test_duplicate_start_no_second_consumer(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_duplicate_start_no_second_consumer(self, initialized_db_path: Path) -> None:
         """重复 start() 不得创建第二个 consumer。"""
         tq = TransitionQueue(initialized_db_path)
         await tq.start()
@@ -386,17 +379,13 @@ class TestTransitionQueueLifecycle:
         assert task1 is task2
         await tq.stop()
 
-    async def test_submit_before_start_rejected(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_submit_before_start_rejected(self, initialized_db_path: Path) -> None:
         """未 start 就 submit 应抛出 StateTransitionError。"""
         tq = TransitionQueue(initialized_db_path)
         with pytest.raises(StateTransitionError, match="not running"):
             await tq.submit(_make_event("s1", "start_create"))
 
-    async def test_stop_then_submit_rejected(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_stop_then_submit_rejected(self, initialized_db_path: Path) -> None:
         """stop() 后 submit() 应抛出 StateTransitionError。"""
         tq = TransitionQueue(initialized_db_path)
         await tq.start()
@@ -404,25 +393,19 @@ class TestTransitionQueueLifecycle:
         with pytest.raises(StateTransitionError, match="not running"):
             await tq.submit(_make_event("s1", "start_create"))
 
-    async def test_stop_idempotent(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_stop_idempotent(self, initialized_db_path: Path) -> None:
         """stop() 是幂等的——重复调用不出错。"""
         tq = TransitionQueue(initialized_db_path)
         await tq.start()
         await tq.stop()
         await tq.stop()  # 第二次 stop 不应报错
 
-    async def test_stop_before_start_is_safe(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_stop_before_start_is_safe(self, initialized_db_path: Path) -> None:
         """未 start 就 stop 不出错。"""
         tq = TransitionQueue(initialized_db_path)
         await tq.stop()  # 应无副作用
 
-    async def test_stop_start_submit_processes(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_stop_start_submit_processes(self, initialized_db_path: Path) -> None:
         """stop → start → submit：第二轮 consumer 正常处理事件。"""
         await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
         tq = TransitionQueue(initialized_db_path)
@@ -439,9 +422,7 @@ class TestTransitionQueueLifecycle:
         assert story.current_phase == "creating"
         await tq.stop()
 
-    async def test_stop_clears_machines_cache(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_stop_clears_machines_cache(self, initialized_db_path: Path) -> None:
         """stop() 应清空状态机缓存。"""
         await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
         tq = TransitionQueue(initialized_db_path)
@@ -462,31 +443,46 @@ class TestMachineRestore:
     @pytest.mark.parametrize(
         "phase",
         [
-            "queued", "creating", "validating", "dev_ready", "developing",
-            "reviewing", "fixing", "qa_testing", "uat", "merging",
-            "regression", "done", "blocked",
+            "queued",
+            "creating",
+            "validating",
+            "dev_ready",
+            "developing",
+            "reviewing",
+            "fixing",
+            "qa_testing",
+            "uat",
+            "merging",
+            "regression",
+            "done",
+            "blocked",
         ],
     )
-    async def test_restore_from_phase(
-        self, initialized_db_path: Path, phase: str
-    ) -> None:
+    async def test_restore_from_phase(self, initialized_db_path: Path, phase: str) -> None:
         """从各个 phase 恢复状态机实例。"""
         status_map = {
-            "queued": "backlog", "creating": "planning", "validating": "planning",
-            "dev_ready": "ready", "developing": "in_progress", "reviewing": "review",
-            "fixing": "review", "qa_testing": "in_progress", "uat": "uat",
-            "merging": "in_progress", "regression": "in_progress",
-            "done": "done", "blocked": "blocked",
+            "queued": "backlog",
+            "creating": "planning",
+            "validating": "planning",
+            "dev_ready": "ready",
+            "developing": "in_progress",
+            "reviewing": "review",
+            "fixing": "review",
+            "qa_testing": "in_progress",
+            "uat": "uat",
+            "merging": "in_progress",
+            "regression": "in_progress",
+            "done": "done",
+            "blocked": "blocked",
         }
-        await _insert_story_at_phase(
-            initialized_db_path, "s1", phase, status_map[phase]
-        )
+        await _insert_story_at_phase(initialized_db_path, "s1", phase, status_map[phase])
 
         tq = TransitionQueue(initialized_db_path)
         await tq.start()
 
         # 使用 TQ 内部的 DB 连接来验证恢复
         import aiosqlite
+
         assert isinstance(tq._db, aiosqlite.Connection)
         sm = await tq._get_or_create_machine("s1", tq._db)
         assert sm.current_state_value == phase
@@ -500,9 +496,7 @@ class TestMachineRestore:
 
 
 class TestTransitionQueueNudge:
-    async def test_submit_triggers_nudge(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_submit_triggers_nudge(self, initialized_db_path: Path) -> None:
         """submit() 应触发 nudge.notify()。"""
         await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
         nudge = Nudge()

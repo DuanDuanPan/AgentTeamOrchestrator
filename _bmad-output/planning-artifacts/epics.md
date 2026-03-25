@@ -957,6 +957,11 @@ So that main 分支始终保持可用状态。
 **Then** 调度 agent 自动解决冲突，解决后重新进入 review 流程
 **And** 解决失败则 escalate 给操作者
 
+**Given** merge 流程中 pre-commit hook 失败（lint/format/type check）
+**When** 系统检测到 commit 失败
+**Then** 调度 agent 自动修复（基于项目配置的 lint/format/type-check 命令），修复后重新 commit
+**And** 自动修复失败则 escalate 给操作者，创建 approval（类型 `precommit_failure`）
+
 **Given** merge queue 被冻结
 **When** 操作者处理完异常（revert 或 fix forward 成功）
 **Then** merge queue 解冻，恢复正常合并流程

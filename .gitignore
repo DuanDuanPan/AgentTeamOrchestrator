@@ -45,6 +45,9 @@ coverage.xml
 # ATO 运行时
 .ato/
 
+# Worktrees
+.claude/worktrees/
+
 # 工具缓存
 .mypy_cache/
 .ruff_cache/

@@ -1,0 +1,13 @@
+{
+  "skill_type": "code_review",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 5,
+  "findings": [
+    {"severity": "blocking", "category": "intent_gap", "rule_id": "code_review.intent_gap", "file_path": "N/A"},
+    {"severity": "blocking", "category": "intent_gap", "rule_id": "code_review.intent_gap", "file_path": "N/A"},
+    {"severity": "blocking", "category": "bad_spec", "rule_id": "code_review.bad_spec", "file_path": "N/A"},
+    {"severity": "blocking", "category": "patch", "rule_id": "code_review.patch", "file_path": "src/ato/core.py", "line": 42},
+    {"severity": "suggestion", "category": "defer", "rule_id": "code_review.defer", "file_path": "N/A"}
+  ]
+}

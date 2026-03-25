@@ -1,0 +1,15 @@
+{
+  "skill_type": "architecture_review",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 7,
+  "findings": [
+    {"severity": "blocking", "category": "critical_gap", "rule_id": "architecture.critical_gap"},
+    {"severity": "suggestion", "category": "improvement", "rule_id": "architecture.future_enhancement"},
+    {"severity": "suggestion", "category": "improvement", "rule_id": "architecture.future_enhancement"},
+    {"severity": "suggestion", "category": "improvement", "rule_id": "architecture.future_enhancement"},
+    {"severity": "suggestion", "category": "future_enhancement", "rule_id": "architecture.future_enhancement"},
+    {"severity": "suggestion", "category": "future_enhancement", "rule_id": "architecture.future_enhancement"},
+    {"severity": "suggestion", "category": "future_enhancement", "rule_id": "architecture.future_enhancement"}
+  ]
+}

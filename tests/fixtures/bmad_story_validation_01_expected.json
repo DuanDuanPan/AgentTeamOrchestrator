@@ -1,0 +1,33 @@
+{
+  "skill_type": "story_validation",
+  "verdict": "approved",
+  "parser_mode": "deterministic",
+  "finding_count": 5,
+  "findings": [
+    {
+      "severity": "suggestion",
+      "category": "critical_issue",
+      "rule_id": "story_validation.critical_issue"
+    },
+    {
+      "severity": "suggestion",
+      "category": "critical_issue",
+      "rule_id": "story_validation.critical_issue"
+    },
+    {
+      "severity": "suggestion",
+      "category": "critical_issue",
+      "rule_id": "story_validation.critical_issue"
+    },
+    {
+      "severity": "suggestion",
+      "category": "remaining_risk",
+      "rule_id": "story_validation.remaining_risk"
+    },
+    {
+      "severity": "suggestion",
+      "category": "remaining_risk",
+      "rule_id": "story_validation.remaining_risk"
+    }
+  ]
+}

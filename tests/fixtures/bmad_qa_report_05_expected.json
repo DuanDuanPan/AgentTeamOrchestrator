@@ -1,0 +1,12 @@
+{
+  "skill_type": "qa_report",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 4,
+  "findings": [
+    {"severity": "suggestion", "category": "test_ids", "rule_id": "qa.test_ids"},
+    {"severity": "blocking", "category": "hard_waits_sleep_waitfortimeout", "rule_id": "qa.hard_waits_sleep_waitfortimeout"},
+    {"severity": "blocking", "category": "isolation_cleanup_no_shared_state", "rule_id": "qa.isolation_cleanup_no_shared_state"},
+    {"severity": "suggestion", "category": "explicit_assertions", "rule_id": "qa.explicit_assertions"}
+  ]
+}

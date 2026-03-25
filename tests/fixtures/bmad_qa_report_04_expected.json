@@ -1,0 +1,10 @@
+{
+  "skill_type": "qa_report",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 2,
+  "findings": [
+    {"severity": "blocking", "category": "explicit_assertions", "rule_id": "qa.explicit_assertions", "file_path": "tests/unit/test_transition_queue.py", "line": 89},
+    {"severity": "suggestion", "category": "test_duration", "rule_id": "qa.test_duration", "file_path": "tests/unit/test_transition_queue.py", "line": 145}
+  ]
+}

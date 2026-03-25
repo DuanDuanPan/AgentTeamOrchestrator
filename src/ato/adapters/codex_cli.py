@@ -328,7 +328,9 @@ class CodexAdapter(BaseAdapter):
             # 聚合 usage 并计算成本
             input_tokens, cached_input_tokens, output_tokens = _aggregate_usage(events)
             cost = calculate_cost(
-                model_name, input_tokens, output_tokens,
+                model_name,
+                input_tokens,
+                output_tokens,
                 cached_input_tokens=cached_input_tokens,
             )
 

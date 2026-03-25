@@ -83,6 +83,7 @@ async def db_ready(tmp_path: Path) -> Path:
     await init_db(db_path)
     # 插入一条 story 供 task 的 foreign key 引用
     from ato.models.db import insert_story
+
     db = await get_connection(db_path)
     try:
         await insert_story(db, _make_story())
@@ -117,14 +118,20 @@ class TestConcurrencyControl:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(
                 mgr.dispatch(
-                    story_id="story-test", phase="dev", role="developer",
-                    cli_tool="claude", prompt="p1",
+                    story_id="story-test",
+                    phase="dev",
+                    role="developer",
+                    cli_tool="claude",
+                    prompt="p1",
                 )
             )
             tg.create_task(
                 mgr.dispatch(
-                    story_id="story-test", phase="dev", role="developer",
-                    cli_tool="claude", prompt="p2",
+                    story_id="story-test",
+                    phase="dev",
+                    role="developer",
+                    cli_tool="claude",
+                    prompt="p2",
                 )
             )
         # 串行执行：第一个开始和完成，然后第二个开始和完成
@@ -144,8 +151,11 @@ class TestPIDRegistration:
         adapter = FakeAdapter()
         mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
         # dispatch 完成后 PID 已取消注册
         assert len(mgr.running) == 0
@@ -162,8 +172,11 @@ class TestPIDRegistration:
 
         mgr = SubprocessManager(max_concurrent=4, adapter=TrackAdapter(), db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
         assert len(mgr.running) == 0
 
@@ -194,8 +207,11 @@ class TestRetry:
 
         mgr = SubprocessManager(max_concurrent=4, adapter=FailOnceAdapter(), db_path=db_ready)  # type: ignore[arg-type]
         res = await mgr.dispatch_with_retry(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
         assert res.status == "success"
         assert call_count == 2
@@ -203,7 +219,10 @@ class TestRetry:
     async def test_retry_reuses_single_task_id(self, db_ready: Path) -> None:
         """Fix #1: 重试复用同一 task_id，只产生一条 tasks 记录。"""
         error = CLIAdapterError(
-            "rate limited", category=ErrorCategory.RATE_LIMIT, retryable=True, exit_code=429,
+            "rate limited",
+            category=ErrorCategory.RATE_LIMIT,
+            retryable=True,
+            exit_code=429,
         )
         call_count = 0
         result = _make_adapter_result()
@@ -218,8 +237,11 @@ class TestRetry:
 
         mgr = SubprocessManager(max_concurrent=4, adapter=FailOnceAdapter(), db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch_with_retry(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
         from ato.models.db import get_tasks_by_story
 
@@ -250,8 +272,11 @@ class TestRetry:
 
         mgr = SubprocessManager(max_concurrent=4, adapter=FailOnceAdapter(), db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch_with_retry(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
         db = await get_connection(db_ready)
         summary = await get_cost_summary(db, story_id="story-test")
@@ -269,8 +294,11 @@ class TestRetry:
         mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
         with pytest.raises(CLIAdapterError) as exc_info:
             await mgr.dispatch_with_retry(
-                story_id="story-test", phase="dev", role="developer",
-                cli_tool="claude", prompt="test",
+                story_id="story-test",
+                phase="dev",
+                role="developer",
+                cli_tool="claude",
+                prompt="test",
             )
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
         assert adapter.call_count == 1
@@ -285,8 +313,11 @@ class TestRetry:
         mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
         with pytest.raises(CLIAdapterError):
             await mgr.dispatch_with_retry(
-                story_id="story-test", phase="dev", role="developer",
-                cli_tool="claude", prompt="test",
+                story_id="story-test",
+                phase="dev",
+                role="developer",
+                cli_tool="claude",
+                prompt="test",
             )
         assert adapter.call_count == 2  # 1 original + 1 retry
 
@@ -301,8 +332,11 @@ class TestCostLogPersistence:
         adapter = FakeAdapter(result=_make_adapter_result(cost_usd=0.05))
         mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
         db = await get_connection(db_ready)
         summary = await get_cost_summary(db, story_id="story-test")
@@ -320,8 +354,11 @@ class TestCostLogPersistence:
         mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
         with pytest.raises(CLIAdapterError):
             await mgr.dispatch(
-                story_id="story-test", phase="dev", role="developer",
-                cli_tool="claude", prompt="test",
+                story_id="story-test",
+                phase="dev",
+                role="developer",
+                cli_tool="claude",
+                prompt="test",
             )
         db = await get_connection(db_ready)
         summary = await get_cost_summary(db, story_id="story-test")
@@ -340,8 +377,11 @@ class TestTaskPersistence:
         adapter = FakeAdapter()
         mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
         from ato.models.db import get_tasks_by_story
 
@@ -358,8 +398,11 @@ class TestTaskPersistence:
         mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
         with pytest.raises(CLIAdapterError):
             await mgr.dispatch(
-                story_id="story-test", phase="dev", role="developer",
-                cli_tool="claude", prompt="test",
+                story_id="story-test",
+                phase="dev",
+                role="developer",
+                cli_tool="claude",
+                prompt="test",
             )
         from ato.models.db import get_tasks_by_story
 
@@ -386,8 +429,11 @@ class TestTaskPersistence:
         # 启动第一个占位任务
         task1 = asyncio.create_task(
             mgr.dispatch(
-                story_id="story-test", phase="dev", role="developer",
-                cli_tool="claude", prompt="p1",
+                story_id="story-test",
+                phase="dev",
+                role="developer",
+                cli_tool="claude",
+                prompt="p1",
             )
         )
         await asyncio.sleep(0.05)  # 让 task1 进入 semaphore
@@ -395,8 +441,11 @@ class TestTaskPersistence:
         # 启动第二个排队任务
         task2 = asyncio.create_task(
             mgr.dispatch(
-                story_id="story-test", phase="dev", role="developer",
-                cli_tool="claude", prompt="p2",
+                story_id="story-test",
+                phase="dev",
+                role="developer",
+                cli_tool="claude",
+                prompt="p2",
             )
         )
         await asyncio.sleep(0.05)  # 给 task2 时间进入排队
@@ -423,18 +472,20 @@ class TestTelemetryPersistence:
         """Fix #4: cache_read_input_tokens 和 model 正确写入 cost_log。"""
         from ato.models.schemas import ClaudeOutput
 
-        claude_result = ClaudeOutput.model_validate({
-            "status": "success",
-            "exit_code": 0,
-            "duration_ms": 2000,
-            "text_result": "ok",
-            "cost_usd": 0.02,
-            "input_tokens": 500,
-            "output_tokens": 100,
-            "cache_read_input_tokens": 300,
-            "session_id": "sess-1",
-            "model_usage": {"model": "claude-opus-4-6", "inputTokens": 500},
-        })
+        claude_result = ClaudeOutput.model_validate(
+            {
+                "status": "success",
+                "exit_code": 0,
+                "duration_ms": 2000,
+                "text_result": "ok",
+                "cost_usd": 0.02,
+                "input_tokens": 500,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 300,
+                "session_id": "sess-1",
+                "model_usage": {"model": "claude-opus-4-6", "inputTokens": 500},
+            }
+        )
 
         class ClaudeResultAdapter:
             async def execute(self, prompt: str, options: Any = None, **kw: Any) -> ClaudeOutput:
@@ -442,8 +493,11 @@ class TestTelemetryPersistence:
 
         mgr = SubprocessManager(max_concurrent=4, adapter=ClaudeResultAdapter(), db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch(
-            story_id="story-test", phase="dev", role="developer",
-            cli_tool="claude", prompt="test",
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test",
         )
 
         db = await get_connection(db_ready)
@@ -459,18 +513,20 @@ class TestTelemetryPersistence:
         """CodexOutput 的 model_name 与 cache_read_input_tokens 正确写入 cost_log。"""
         from ato.models.schemas import CodexOutput
 
-        codex_result = CodexOutput.model_validate({
-            "status": "success",
-            "exit_code": 0,
-            "duration_ms": 1500,
-            "text_result": "review complete",
-            "cost_usd": 0.03,
-            "input_tokens": 26024,
-            "output_tokens": 29,
-            "cache_read_input_tokens": 10624,
-            "session_id": "thread-abc",
-            "model_name": "codex-mini-latest",
-        })
+        codex_result = CodexOutput.model_validate(
+            {
+                "status": "success",
+                "exit_code": 0,
+                "duration_ms": 1500,
+                "text_result": "review complete",
+                "cost_usd": 0.03,
+                "input_tokens": 26024,
+                "output_tokens": 29,
+                "cache_read_input_tokens": 10624,
+                "session_id": "thread-abc",
+                "model_name": "codex-mini-latest",
+            }
+        )
 
         class CodexResultAdapter:
             async def execute(self, prompt: str, options: Any = None, **kw: Any) -> CodexOutput:
@@ -478,8 +534,11 @@ class TestTelemetryPersistence:
 
         mgr = SubprocessManager(max_concurrent=4, adapter=CodexResultAdapter(), db_path=db_ready)  # type: ignore[arg-type]
         await mgr.dispatch(
-            story_id="story-test", phase="review", role="reviewer",
-            cli_tool="codex", prompt="test",
+            story_id="story-test",
+            phase="review",
+            role="reviewer",
+            cli_tool="codex",
+            prompt="test",
         )
 
         db = await get_connection(db_ready)

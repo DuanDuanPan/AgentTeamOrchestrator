@@ -1,0 +1,29 @@
+{
+  "skill_type": "qa_report",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 3,
+  "findings": [
+    {
+      "severity": "blocking",
+      "category": "hard_waits",
+      "rule_id": "qa.hard_waits",
+      "file_path": "tests/unit/test_core.py",
+      "line": 45
+    },
+    {
+      "severity": "blocking",
+      "category": "determinism",
+      "rule_id": "qa.determinism",
+      "file_path": "tests/unit/test_core.py",
+      "line": 92
+    },
+    {
+      "severity": "suggestion",
+      "category": "test_coverage",
+      "rule_id": "qa.test_coverage",
+      "file_path": "tests/unit/test_core.py",
+      "line": 80
+    }
+  ]
+}
