@@ -476,7 +476,7 @@ batch select（PM agent 推荐 → 人类确认）
 
 ### 质量门控
 
-- **FR13:** 系统可执行 Convergent Loop 协议：review → finding 入库 → fix → re-review（scope 收窄）→ 收敛判定或 escalate
+- **FR13:** 系统可执行 Convergent Loop 协议：review → finding 入库 → fix（可显式指定 debugging-strategies skill 辅助根因分析与系统化修复） → re-review（scope 收窄）→ 收敛判定或 escalate
 - **FR14:** 系统可在 SQLite 中追踪每个 finding 的跨轮次状态（open → closed / still_open / new）
 - **FR15:** 系统可在每轮 re-review 时自动收窄 scope，仅验证上轮 open findings 的闭合状态和新引入问题
 - **FR16:** 系统可执行 deterministic validation check（JSON Schema 结构验证），作为 agent review 之前的第一层验证

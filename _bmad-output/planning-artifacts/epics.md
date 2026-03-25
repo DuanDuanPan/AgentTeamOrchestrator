@@ -810,6 +810,7 @@ So that 质量问题被自动修复。
 **When** 进入 fix 阶段
 **Then** 调度 fixer agent（Claude）修复所有 open blocking findings
 **And** fix prompt 中包含每个 open finding 的 description、file_path、severity
+**And** fix agent 可显式指定使用 `debugging-strategies` skill（`/debugging-strategies`）进行系统化根因分析与修复策略制定
 
 **Given** fix agent 完成
 **When** 验证 fix 产出
