@@ -1,0 +1,11 @@
+{
+  "skill_type": "code_review",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 3,
+  "findings": [
+    {"severity": "blocking", "category": "patch", "rule_id": "code_review.patch", "file_path": "src/ato/models/db.py", "line": 78},
+    {"severity": "blocking", "category": "patch", "rule_id": "code_review.patch", "file_path": "src/ato/models/db.py", "line": 134},
+    {"severity": "blocking", "category": "patch", "rule_id": "code_review.patch", "file_path": "src/ato/models/schemas.py", "line": 56}
+  ]
+}

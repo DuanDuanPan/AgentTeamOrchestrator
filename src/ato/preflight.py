@@ -121,9 +121,13 @@ async def _check_claude_auth() -> CheckResult:
     check_item = "claude_auth"
     logger.debug("preflight_check_start", layer="system", check_item=check_item)
     cmd = [
-        "claude", "-p", "ping",
-        "--max-turns", "1",
-        "--output-format", "json",
+        "claude",
+        "-p",
+        "ping",
+        "--max-turns",
+        "1",
+        "--output-format",
+        "json",
         "--no-session-persistence",
     ]
     try:
@@ -153,11 +157,14 @@ async def _check_codex_auth() -> CheckResult:
     check_item = "codex_auth"
     logger.debug("preflight_check_start", layer="system", check_item=check_item)
     cmd = [
-        "codex", "exec", "ping",
+        "codex",
+        "exec",
+        "ping",
         "--json",
         "--skip-git-repo-check",
         "--ephemeral",
-        "-s", "read-only",
+        "-s",
+        "read-only",
     ]
     try:
         returncode, _stdout, stderr = await _run_subprocess(cmd, timeout=_CLI_AUTH_TIMEOUT)
@@ -421,7 +428,9 @@ def _check_artifact_glob(
     else:
         logger.debug(
             "preflight_check_result",
-            layer="artifact", check_item=check_item, status=missing_status,
+            layer="artifact",
+            check_item=check_item,
+            status=missing_status,
         )
     return CheckResult(
         layer="artifact",
@@ -515,12 +524,12 @@ async def check_artifacts(project_path: Path) -> list[CheckResult]:
         impl_path.mkdir(parents=True, exist_ok=True)
         # 验证目录实际可写 — mkdir(exist_ok=True) 对已存在的只读目录不会报错
         if not os.access(impl_path, os.W_OK | os.X_OK):
-            msg = (
-                f"implementation_artifacts 目录不可写: {impl_path}"
-            )
+            msg = f"implementation_artifacts 目录不可写: {impl_path}"
             logger.warning(
                 "preflight_check_halt",
-                layer="artifact", check_item=check_item, message=msg,
+                layer="artifact",
+                check_item=check_item,
+                message=msg,
             )
             results.append(
                 CheckResult(
@@ -543,7 +552,9 @@ async def check_artifacts(project_path: Path) -> list[CheckResult]:
         msg = f"implementation_artifacts 目录创建失败: {exc}"
         logger.warning(
             "preflight_check_halt",
-            layer="artifact", check_item=check_item, message=msg,
+            layer="artifact",
+            check_item=check_item,
+            message=msg,
         )
         results.append(
             CheckResult(layer="artifact", check_item=check_item, status="HALT", message=msg)

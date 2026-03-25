@@ -1,0 +1,15 @@
+{
+  "skill_type": "qa_report",
+  "verdict": "approved",
+  "parser_mode": "deterministic",
+  "finding_count": 1,
+  "findings": [
+    {
+      "severity": "suggestion",
+      "category": "naming_convention",
+      "rule_id": "qa.naming_convention",
+      "file_path": "tests/unit/test_state_machine.py",
+      "line": 142
+    }
+  ]
+}

@@ -291,8 +291,6 @@ class SubprocessManager:
 
     def _unregister_running(self, task_id: str) -> None:
         """从 running 字典中移除已完成的 task。"""
-        pids_to_remove = [
-            pid for pid, rt in self._running.items() if rt.task_id == task_id
-        ]
+        pids_to_remove = [pid for pid, rt in self._running.items() if rt.task_id == task_id]
         for pid in pids_to_remove:
             del self._running[pid]

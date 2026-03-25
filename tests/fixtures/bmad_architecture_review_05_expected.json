@@ -1,0 +1,10 @@
+{
+  "skill_type": "architecture_review",
+  "verdict": "changes_requested",
+  "parser_mode": "deterministic",
+  "finding_count": 2,
+  "findings": [
+    {"severity": "blocking", "category": "validation_issue", "rule_id": "architecture.validation_issue"},
+    {"severity": "blocking", "category": "validation_issue", "rule_id": "architecture.validation_issue"}
+  ]
+}

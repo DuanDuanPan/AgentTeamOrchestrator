@@ -35,7 +35,7 @@ class TestCheckResultModel:
             result = CheckResult(
                 layer="system",
                 check_item="test",
-                status=status,  # type: ignore[arg-type]
+                status=status,
                 message="ok",
             )
             assert result.status == status
@@ -44,7 +44,7 @@ class TestCheckResultModel:
         """所有合法 layer 值都能通过验证。"""
         for layer in ("system", "project", "artifact"):
             result = CheckResult(
-                layer=layer,  # type: ignore[arg-type]
+                layer=layer,
                 check_item="test",
                 status="PASS",
                 message="ok",
@@ -99,16 +99,12 @@ class TestCheckStatusAndLayerTypes:
     def test_check_status_type_alias(self) -> None:
         """CheckStatus 类型包含 4 种状态。"""
         # 通过 Literal 可用于类型注解；运行时直接验证字符串
-        result = CheckResult(
-            layer="system", check_item="x", status="PASS", message="ok"
-        )
+        result = CheckResult(layer="system", check_item="x", status="PASS", message="ok")
         assert result.status == "PASS"
 
     def test_check_layer_type_alias(self) -> None:
         """CheckLayer 类型包含 3 种层。"""
-        result = CheckResult(
-            layer="artifact", check_item="x", status="INFO", message="ok"
-        )
+        result = CheckResult(layer="artifact", check_item="x", status="INFO", message="ok")
         assert result.layer == "artifact"
 
 
@@ -145,8 +141,7 @@ class TestMigrationV4:
             await run_migrations(db, 0, 4)
 
             cursor = await db.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='index' AND name='idx_preflight_run_id'"
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_preflight_run_id'"
             )
             assert await cursor.fetchone() is not None
 
@@ -212,7 +207,7 @@ class TestInsertPreflightResults:
                 "FROM preflight_results WHERE run_id = ? ORDER BY id",
                 ("run-001",),
             )
-            rows = await cursor.fetchall()
+            rows = list(await cursor.fetchall())
             assert len(rows) == 2
             assert rows[0][0] == "run-001"
             assert rows[0][1] == "system"

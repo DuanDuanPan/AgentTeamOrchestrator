@@ -349,9 +349,7 @@ class TestLayer2:
         project = self._make_project(
             tmp_path,
             bmad_config_content=(
-                "project_name: test\n"
-                "planning_artifacts: ''\n"
-                "implementation_artifacts: ''\n"
+                "project_name: test\nplanning_artifacts: ''\nimplementation_artifacts: ''\n"
             ),
             skills_claude=True,
         )
@@ -586,9 +584,9 @@ class TestLayer3:
 
         project = self._make_artifacts_project(
             tmp_path,
-            epic_whole=True,   # whole
+            epic_whole=True,  # whole
             prd_sharded=True,  # sharded
-            arch_whole=True,   # whole
+            arch_whole=True,  # whole
         )
         results = await check_artifacts(project)
         statuses = {r.check_item: r.status for r in results}
@@ -616,9 +614,7 @@ class TestLayer3:
             # root 用户 os.access(W_OK) 总是返回 True，跳过断言
             if os.getuid() != 0:
                 assert statuses["impl_directory"] == "HALT"
-                impl_msg = next(
-                    r.message for r in results if r.check_item == "impl_directory"
-                )
+                impl_msg = next(r.message for r in results if r.check_item == "impl_directory")
                 assert "不可写" in impl_msg
         finally:
             impl_dir.chmod(0o755)
@@ -643,9 +639,7 @@ class TestLayer3:
             # root 用户 os.access 总是返回 True，跳过断言
             if os.getuid() != 0:
                 assert statuses["impl_directory"] == "HALT"
-                impl_msg = next(
-                    r.message for r in results if r.check_item == "impl_directory"
-                )
+                impl_msg = next(r.message for r in results if r.check_item == "impl_directory")
                 assert "不可写" in impl_msg
         finally:
             impl_dir.chmod(0o755)
@@ -660,9 +654,7 @@ class TestLayer3:
         bmad_dir = project / "_bmad" / "bmm"
         bmad_dir.mkdir(parents=True)
         (bmad_dir / "config.yaml").write_text(
-            "project_name: test\n"
-            "planning_artifacts: planning\n"
-            "implementation_artifacts: impl\n"
+            "project_name: test\nplanning_artifacts: planning\nimplementation_artifacts: impl\n"
         )
         planning = project / "planning"
         planning.mkdir()

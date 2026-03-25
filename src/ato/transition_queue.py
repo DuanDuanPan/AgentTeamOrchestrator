@@ -33,15 +33,15 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # happy-path phase → 从 queued 出发的 success 事件序列
 _HAPPY_PATH_EVENTS: dict[str, list[str]] = {}
 _HP_EVENTS: list[str] = [
-    "start_create",   # queued → creating
-    "create_done",    # creating → validating
+    "start_create",  # queued → creating
+    "create_done",  # creating → validating
     "validate_pass",  # validating → dev_ready
-    "start_dev",      # dev_ready → developing
-    "dev_done",       # developing → reviewing
-    "review_pass",    # reviewing → qa_testing
-    "qa_pass",        # qa_testing → uat
-    "uat_pass",       # uat → merging
-    "merge_done",     # merging → regression
+    "start_dev",  # dev_ready → developing
+    "dev_done",  # developing → reviewing
+    "review_pass",  # reviewing → qa_testing
+    "qa_pass",  # qa_testing → uat
+    "uat_pass",  # uat → merging
+    "merge_done",  # merging → regression
     "regression_pass",  # regression → done
 ]
 _HP_PHASES: list[str] = [

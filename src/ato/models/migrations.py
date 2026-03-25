@@ -172,9 +172,7 @@ async def _migrate_v3_to_v4(db: aiosqlite.Connection) -> None:
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
         )"""
     )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_preflight_run_id ON preflight_results(run_id)"
-    )
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_preflight_run_id ON preflight_results(run_id)")
 
 
 # ---------------------------------------------------------------------------

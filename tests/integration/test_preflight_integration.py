@@ -204,13 +204,17 @@ class TestRunPreflight:
             async def _track_init(path: Path) -> None:
                 call_order.append("init_db")
                 from ato.models.db import init_db
+
                 await init_db(path)
 
             async def _track_insert(
-                db: object, run_id: str, items: list[CheckResult],
+                db: object,
+                run_id: str,
+                items: list[CheckResult],
             ) -> None:
                 call_order.append("insert")
                 from ato.models.db import insert_preflight_results as real_insert
+
                 await real_insert(db, run_id, items)  # type: ignore[arg-type]
 
             mock_init.side_effect = _track_init
@@ -240,19 +244,11 @@ class TestRunPreflight:
 
         layers = [r.layer for r in results]
         # 验证层级顺序：所有 system 在 project 之前，所有 project 在 artifact 之前
-        system_end = max(
-            idx for idx, layer in enumerate(layers) if layer == "system"
-        )
+        system_end = max(idx for idx, layer in enumerate(layers) if layer == "system")
         if "project" in layers:
-            project_start = min(
-                idx for idx, layer in enumerate(layers) if layer == "project"
-            )
+            project_start = min(idx for idx, layer in enumerate(layers) if layer == "project")
             assert system_end < project_start
         if "artifact" in layers:
-            project_end = max(
-                idx for idx, layer in enumerate(layers) if layer == "project"
-            )
-            artifact_start = min(
-                idx for idx, layer in enumerate(layers) if layer == "artifact"
-            )
+            project_end = max(idx for idx, layer in enumerate(layers) if layer == "project")
+            artifact_start = min(idx for idx, layer in enumerate(layers) if layer == "artifact")
             assert project_end < artifact_start

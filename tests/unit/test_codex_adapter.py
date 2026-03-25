@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,18 +31,19 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
 @pytest.fixture()
-def success_events() -> list[dict]:
+def success_events() -> list[dict[str, Any]]:
     lines = (FIXTURES / "codex_events_success.jsonl").read_text().strip().splitlines()
     return [json.loads(line) for line in lines]
 
 
 @pytest.fixture()
-def success_output() -> dict:
-    return json.loads((FIXTURES / "codex_output_success.json").read_text())
+def success_output() -> dict[str, Any]:
+    result: dict[str, Any] = json.loads((FIXTURES / "codex_output_success.json").read_text())
+    return result
 
 
 @pytest.fixture()
-def error_events() -> list[dict]:
+def error_events() -> list[dict[str, Any]]:
     lines = (FIXTURES / "codex_events_error.jsonl").read_text().strip().splitlines()
     return [json.loads(line) for line in lines]
 
@@ -85,7 +88,7 @@ class TestParseJsonl:
 
 
 class TestAggregateUsage:
-    def test_single_turn(self, success_events: list[dict]) -> None:
+    def test_single_turn(self, success_events: list[dict[str, Any]]) -> None:
         inp, cached, out = _aggregate_usage(success_events)
         assert inp == 26024
         assert cached == 10624
@@ -115,7 +118,7 @@ class TestAggregateUsage:
 
 
 class TestExtractTextResult:
-    def test_current_format_item_text(self, success_events: list[dict]) -> None:
+    def test_current_format_item_text(self, success_events: list[dict[str, Any]]) -> None:
         text = _extract_text_result(success_events)
         assert "findings" in text
         parsed = json.loads(text)
@@ -198,7 +201,9 @@ class TestParseOutputFile:
 
 
 class TestCodexOutputFromEvents:
-    def test_success_fixture(self, success_events: list[dict], success_output_raw: str) -> None:
+    def test_success_fixture(
+        self, success_events: list[dict[str, Any]], success_output_raw: str
+    ) -> None:
         cost = calculate_cost("codex-mini-latest", 26024, 29, cached_input_tokens=10624)
         output = CodexOutput.from_events(
             success_events,
@@ -218,17 +223,19 @@ class TestCodexOutputFromEvents:
         assert len(output.structured_output["findings"]) == 2
         assert output.cost_usd == pytest.approx(cost)
 
-    def test_without_output_file(self, success_events: list[dict]) -> None:
+    def test_without_output_file(self, success_events: list[dict[str, Any]]) -> None:
         output = CodexOutput.from_events(
             success_events, exit_code=0, model_name="codex-mini-latest", cost_usd=0.01
         )
         assert output.structured_output is None
         assert "findings" in output.text_result
 
-    def test_failure_exit_code(self, success_events: list[dict]) -> None:
+    def test_failure_exit_code(self, success_events: list[dict[str, Any]]) -> None:
         output = CodexOutput.from_events(
-            success_events, exit_code=1,
-            model_name="codex-mini-latest", cost_usd=0.0,
+            success_events,
+            exit_code=1,
+            model_name="codex-mini-latest",
+            cost_usd=0.0,
         )
         assert output.status == "failure"
         assert output.exit_code == 1
@@ -238,16 +245,21 @@ class TestCodexOutputFromEvents:
         usage = {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}
         events = [{"type": "turn.completed", "usage": usage}]
         output = CodexOutput.from_events(
-            events, exit_code=0,
+            events,
+            exit_code=0,
             output_file_content="plain review text",
-            model_name="codex-mini-latest", cost_usd=0.0,
+            model_name="codex-mini-latest",
+            cost_usd=0.0,
         )
         assert output.structured_output is None
         assert output.text_result == "plain review text"
 
     def test_empty_events(self) -> None:
         output = CodexOutput.from_events(
-            [], exit_code=0, model_name="codex-mini-latest", cost_usd=0.0,
+            [],
+            exit_code=0,
+            model_name="codex-mini-latest",
+            cost_usd=0.0,
         )
         assert output.text_result == ""
         assert output.input_tokens == 0
@@ -420,8 +432,10 @@ class TestCodexAdapterExecute:
         """R1-2: exit=0 但 JSONL 全部解析失败应报 parse_error。"""
         proc = _mock_process(b"not-json\ngarbage\n")
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
 
@@ -429,8 +443,10 @@ class TestCodexAdapterExecute:
         """R3-1: exit=0 + stdout 为空应报 parse_error，不能静默成功。"""
         proc = _mock_process(b"")
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
         assert exc_info.value.retryable is False
@@ -439,8 +455,10 @@ class TestCodexAdapterExecute:
     async def test_nonzero_exit_raises(self) -> None:
         proc = _mock_process(b"", b"Error: auth token expired", returncode=1)
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.AUTH_EXPIRED
         assert exc_info.value.retryable is True
@@ -454,8 +472,10 @@ class TestCodexAdapterExecute:
         proc.kill = MagicMock()
         proc.wait = AsyncMock()
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test", {"timeout": 1})
         assert exc_info.value.category == ErrorCategory.TIMEOUT
         assert exc_info.value.retryable is True
@@ -469,13 +489,18 @@ class TestCodexAdapterExecute:
         callback.assert_awaited_once_with(proc)
 
     async def test_with_output_file(
-        self, success_events_raw: str, success_output_raw: str, tmp_path: Path,
+        self,
+        success_events_raw: str,
+        success_output_raw: str,
+        tmp_path: Path,
     ) -> None:
         output_path = tmp_path / "codex_output.json"
         proc = _mock_process(success_events_raw.encode())
         proc.communicate = AsyncMock(
             side_effect=self._write_output_and_return(
-                output_path, success_output_raw, success_events_raw.encode(),
+                output_path,
+                success_output_raw,
+                success_events_raw.encode(),
             )
         )
         adapter = CodexAdapter()
@@ -497,8 +522,10 @@ class TestCodexAdapterExecute:
         partial = b'{"type":"thread.started","thread_id":"t1"}\nnot-json\n'
         proc = _mock_process(partial)
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
 
@@ -511,8 +538,10 @@ class TestCodexAdapterExecute:
         )
         proc = _mock_process(jsonl)
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
 
@@ -525,15 +554,21 @@ class TestCodexAdapterExecute:
         )
         proc = _mock_process(jsonl)
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
-            await adapter.execute("test", {
-                "output_file": "/tmp/does-not-exist-codex-review.json",
-            })
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
+            await adapter.execute(
+                "test",
+                {
+                    "output_file": "/tmp/does-not-exist-codex-review.json",
+                },
+            )
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
 
     async def test_output_file_present_no_agent_msg_succeeds(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """有 -o 文件内容时即使无 agent_message 也成功。"""
         jsonl = (
@@ -549,13 +584,15 @@ class TestCodexAdapterExecute:
         adapter = CodexAdapter()
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await adapter.execute(
-                "test", {"output_file": str(out)},
+                "test",
+                {"output_file": str(out)},
             )
         assert result.status == "success"
         assert result.structured_output == {"findings": []}
 
     async def test_stale_output_file_is_not_accepted(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """R5-2: 旧的 output_file 内容不能被当作本次执行结果。"""
         jsonl = (
@@ -567,19 +604,20 @@ class TestCodexAdapterExecute:
         out.write_text('{"findings": [{"message": "stale"}]}', encoding="utf-8")
         proc = _mock_process(jsonl)
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError) as exc_info:
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
             await adapter.execute("test", {"output_file": str(out)})
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
 
     async def test_model_passed_to_subprocess(self) -> None:
         """R2-1: model 选项应出现在实际 exec 命令中。"""
-        proc = _mock_process(
-            (FIXTURES / "codex_events_success.jsonl").read_bytes()
-        )
+        proc = _mock_process((FIXTURES / "codex_events_success.jsonl").read_bytes())
         adapter = CodexAdapter()
         with patch(
-            "asyncio.create_subprocess_exec", AsyncMock(return_value=proc),
+            "asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
         ) as mock_exec:
             await adapter.execute("test", {"model": "codex-pro"})
         args = mock_exec.call_args[0]
@@ -592,7 +630,7 @@ class TestCodexAdapterExecute:
         output_text: str,
         stdout: bytes,
         stderr: bytes = b"",
-    ):
+    ) -> Callable[[], Coroutine[Any, Any, tuple[bytes, bytes]]]:
         async def _side_effect() -> tuple[bytes, bytes]:
             output_path.write_text(output_text, encoding="utf-8")
             return stdout, stderr
@@ -616,8 +654,10 @@ class TestCleanupProtocol:
         proc.kill = MagicMock()
         proc.wait = AsyncMock()
         adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             pytest.raises(CLIAdapterError):
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError),
+        ):
             await adapter.execute("test", {"timeout": 1})
         proc.terminate.assert_called_once()
 
@@ -633,9 +673,11 @@ class TestCleanupProtocol:
         adapter = CodexAdapter()
         mock_td = MagicMock()
         mock_td.name = "/tmp/fake"
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             patch("tempfile.TemporaryDirectory", return_value=mock_td), \
-             pytest.raises(CLIAdapterError):
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            patch("tempfile.TemporaryDirectory", return_value=mock_td),
+            pytest.raises(CLIAdapterError),
+        ):
             await adapter.execute(
                 "test",
                 {"timeout": 1, "output_schema": "/tmp/s.json"},

@@ -696,9 +696,6 @@ async def insert_preflight_results(
     await db.executemany(
         "INSERT INTO preflight_results (run_id, layer, check_item, status, message) "
         "VALUES (?, ?, ?, ?, ?)",
-        [
-            (run_id, r.layer, r.check_item, r.status, r.message)
-            for r in results
-        ],
+        [(run_id, r.layer, r.check_item, r.status, r.message) for r in results],
     )
     await db.commit()

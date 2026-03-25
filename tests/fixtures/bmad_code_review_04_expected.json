@@ -1,0 +1,10 @@
+{
+  "skill_type": "code_review",
+  "verdict": "approved",
+  "parser_mode": "deterministic",
+  "finding_count": 2,
+  "findings": [
+    {"severity": "suggestion", "category": "defer", "rule_id": "code_review.defer", "file_path": "N/A"},
+    {"severity": "suggestion", "category": "defer", "rule_id": "code_review.defer", "file_path": "N/A"}
+  ]
+}

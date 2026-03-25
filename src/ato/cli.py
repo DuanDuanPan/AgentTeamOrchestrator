@@ -139,9 +139,7 @@ def _render_summary(results: list[CheckResult], console: Console) -> None:
     if halt_count > 0:
         summary = Text(f"结果: ✖ 未就绪（{halt_count} 阻断）", style="red bold")
     elif warn_count > 0:
-        summary = Text(
-            f"结果: 就绪（{warn_count} 警告, {info_count} 信息）", style="yellow"
-        )
+        summary = Text(f"结果: 就绪（{warn_count} 警告, {info_count} 信息）", style="yellow")
     else:
         summary = Text("结果: ✔ 就绪", style="green")
 
@@ -512,9 +510,7 @@ def start_cmd(
     from ato.preflight import run_preflight
 
     try:
-        preflight_results = asyncio.run(
-            run_preflight(Path.cwd(), resolved_db, include_auth=False)
-        )
+        preflight_results = asyncio.run(run_preflight(Path.cwd(), resolved_db, include_auth=False))
     except click.exceptions.Exit:
         raise
     except Exception as exc:
