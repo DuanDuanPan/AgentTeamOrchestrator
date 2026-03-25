@@ -252,6 +252,32 @@ async def update_story_status(
         await db.commit()
 
 
+async def update_story_worktree_path(
+    db: aiosqlite.Connection,
+    story_id: str,
+    worktree_path: str | None,
+) -> None:
+    """更新 story 的 worktree_path 和 updated_at。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        story_id: Story 唯一标识。
+        worktree_path: Worktree 绝对路径，None 表示清空。
+
+    Raises:
+        ValueError: story_id 不存在。
+    """
+    now_iso = _dt_to_iso(datetime.now(tz=UTC))
+    cursor = await db.execute(
+        "UPDATE stories SET worktree_path = ?, updated_at = ? WHERE story_id = ?",
+        (worktree_path, now_iso, story_id),
+    )
+    if cursor.rowcount == 0:
+        msg = f"Story '{story_id}' not found in database"
+        raise ValueError(msg)
+    await db.commit()
+
+
 def _row_to_story(row: aiosqlite.Row) -> StoryRecord:
     """SQLite Row → StoryRecord（先反序列化 datetime 再 model_validate）。"""
     data = dict(row)
@@ -696,9 +722,6 @@ async def insert_preflight_results(
     await db.executemany(
         "INSERT INTO preflight_results (run_id, layer, check_item, status, message) "
         "VALUES (?, ?, ?, ?, ?)",
-        [
-            (run_id, r.layer, r.check_item, r.status, r.message)
-            for r in results
-        ],
+        [(run_id, r.layer, r.check_item, r.status, r.message) for r in results],
     )
     await db.commit()
