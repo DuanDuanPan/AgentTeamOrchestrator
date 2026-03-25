@@ -1,1 +1,331 @@
-"""convergent_loop — 审查→修复→复审质量门控。"""
+"""convergent_loop — 审查→修复→复审质量门控。
+
+Story 3.2a: 首轮全量 review 实现。
+后续 story 逐步扩展 fix dispatch (3.2b)、re-review (3.2c)、终止条件 (3.2d)。
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+from ato.adapters.bmad_adapter import record_parse_failure
+from ato.config import ConvergentLoopConfig
+from ato.models.schemas import (
+    BmadSkillType,
+    ConvergentLoopResult,
+    FindingRecord,
+    TransitionEvent,
+    compute_dedup_hash,
+)
+from ato.nudge import Nudge
+from ato.subprocess_mgr import SubprocessManager
+from ato.transition_queue import TransitionQueue
+
+logger: structlog.stdlib.BoundLogger = structlog.get_logger()
+
+# Type alias — BmadAdapter 通过 Protocol 风格使用，避免循环依赖
+# 实际类型是 ato.adapters.bmad_adapter.BmadAdapter
+_BmadAdapter = Any
+
+
+class ConvergentLoop:
+    """Convergent Loop 质量门控协议。
+
+    Story 3.2a 实现首轮全量 review：
+    - 调度 Codex reviewer agent 执行全量 code review
+    - 通过 BMAD adapter 解析 review 输出
+    - 将 findings 入库到 SQLite
+    - 评估收敛条件并提交状态转换事件
+    """
+
+    def __init__(
+        self,
+        *,
+        db_path: Path,
+        subprocess_mgr: SubprocessManager,
+        bmad_adapter: _BmadAdapter,
+        transition_queue: TransitionQueue,
+        config: ConvergentLoopConfig,
+        blocking_threshold: int,
+        nudge: Nudge | None = None,
+    ) -> None:
+        self._db_path = db_path
+        self._subprocess_mgr = subprocess_mgr
+        self._bmad_adapter = bmad_adapter
+        self._transition_queue = transition_queue
+        self._config = config
+        self._blocking_threshold = blocking_threshold
+        self._nudge = nudge
+
+    async def run_first_review(
+        self,
+        story_id: str,
+        worktree_path: str | None = None,
+        *,
+        artifact_payload: dict[str, Any] | None = None,
+    ) -> ConvergentLoopResult:
+        """执行首轮全量 review。
+
+        Args:
+            story_id: Story 唯一标识。
+            worktree_path: 显式传入的 worktree 路径。
+                若为 None，从 stories.worktree_path 读取。
+            artifact_payload: 可选的结构化 artifact JSON。
+                当前 MVP 无此参数，validation gate 安全跳过。
+
+        Returns:
+            ConvergentLoopResult 包含 round_num=1、converged 状态、finding 统计。
+
+        Raises:
+            ValueError: 无法解析 worktree_path。
+        """
+        from ato.models.db import get_connection, insert_findings_batch
+        from ato.validation import maybe_create_blocking_abnormal_approval
+
+        round_num = 1
+
+        # --- Deterministic Validation Gate (Task 3) ---
+        if artifact_payload is not None:
+            validation_result = await self._run_validation_gate(
+                story_id=story_id,
+                artifact_payload=artifact_payload,
+            )
+            if validation_result is not None:
+                return validation_result
+
+        # --- Resolve worktree path ---
+        resolved_path = await self._resolve_worktree_path(story_id, worktree_path)
+
+        # --- structlog: round start (Task 4.1) ---
+        logger.info(
+            "convergent_loop_round_start",
+            story_id=story_id,
+            round_num=round_num,
+            phase="reviewing",
+        )
+
+        # --- Dispatch review agent ---
+        review_prompt = (
+            f"Review all code in the worktree at {resolved_path}. "
+            f"Story: {story_id}. Perform a full code review."
+        )
+        result = await self._subprocess_mgr.dispatch_with_retry(
+            story_id=story_id,
+            phase="reviewing",
+            role="reviewer",
+            cli_tool="codex",
+            prompt=review_prompt,
+            options={"cwd": resolved_path, "sandbox": "read-only"},
+        )
+
+        # --- Parse review output via BMAD adapter ---
+        parse_result = await self._bmad_adapter.parse(
+            markdown_output=result.text_result,
+            skill_type=BmadSkillType.CODE_REVIEW,
+            story_id=story_id,
+        )
+
+        # --- Handle parse failure ---
+        if parse_result.verdict == "parse_failed":
+            db = await get_connection(self._db_path)
+            try:
+                await record_parse_failure(
+                    parse_result=parse_result,
+                    story_id=story_id,
+                    skill_type=BmadSkillType.CODE_REVIEW,
+                    db=db,
+                    notifier=self._nudge.notify if self._nudge else None,
+                )
+            finally:
+                await db.close()
+
+            # Parse failed → return non-converged with zero findings
+            return ConvergentLoopResult(
+                story_id=story_id,
+                round_num=round_num,
+                converged=False,
+                findings_total=0,
+                blocking_count=0,
+                suggestion_count=0,
+                open_count=0,
+            )
+
+        # --- Convert BmadFinding → FindingRecord and persist ---
+        now = datetime.now(tz=UTC)
+        records = [
+            FindingRecord(
+                finding_id=str(uuid.uuid4()),
+                story_id=story_id,
+                round_num=round_num,
+                severity=f.severity,
+                description=f.description,
+                status="open",
+                file_path=f.file_path,
+                rule_id=f.rule_id,
+                dedup_hash=f.dedup_hash
+                or compute_dedup_hash(f.file_path, f.rule_id, f.severity, f.description),
+                line_number=f.line,
+                created_at=now,
+            )
+            for f in parse_result.findings
+        ]
+
+        db = await get_connection(self._db_path)
+        try:
+            await insert_findings_batch(db, records)
+
+            # --- Blocking threshold escalation ---
+            await maybe_create_blocking_abnormal_approval(
+                db,
+                story_id,
+                round_num,
+                threshold=self._blocking_threshold,
+                nudge=self._nudge,
+            )
+        finally:
+            await db.close()
+
+        # --- Count findings by severity ---
+        blocking_count = sum(1 for r in records if r.severity == "blocking")
+        suggestion_count = sum(1 for r in records if r.severity == "suggestion")
+        findings_total = len(records)
+
+        # --- structlog: round complete (Task 4.2) ---
+        logger.info(
+            "convergent_loop_round_complete",
+            story_id=story_id,
+            round_num=round_num,
+            findings_total=findings_total,
+            open_count=findings_total,
+            blocking_count=blocking_count,
+            suggestion_count=suggestion_count,
+        )
+
+        # --- Convergence evaluation (first round) ---
+        converged = blocking_count == 0
+
+        if converged:
+            # --- structlog: converged (Task 4.3) ---
+            logger.info(
+                "convergent_loop_converged",
+                story_id=story_id,
+                round_num=round_num,
+                blocking_count=blocking_count,
+                suggestion_count=suggestion_count,
+            )
+            await self._transition_queue.submit(
+                TransitionEvent(
+                    story_id=story_id,
+                    event_name="review_pass",
+                    source="agent",
+                    submitted_at=datetime.now(tz=UTC),
+                )
+            )
+        else:
+            # --- structlog: needs fix (Task 4.3) ---
+            logger.info(
+                "convergent_loop_needs_fix",
+                story_id=story_id,
+                round_num=round_num,
+                blocking_count=blocking_count,
+            )
+            await self._transition_queue.submit(
+                TransitionEvent(
+                    story_id=story_id,
+                    event_name="review_fail",
+                    source="agent",
+                    submitted_at=datetime.now(tz=UTC),
+                )
+            )
+
+        return ConvergentLoopResult(
+            story_id=story_id,
+            round_num=round_num,
+            converged=converged,
+            findings_total=findings_total,
+            blocking_count=blocking_count,
+            suggestion_count=suggestion_count,
+            open_count=findings_total,
+            new_count=findings_total,
+        )
+
+    async def _resolve_worktree_path(
+        self,
+        story_id: str,
+        explicit_path: str | None,
+    ) -> str:
+        """解析 worktree 路径，不允许退化到仓库根目录。
+
+        优先级：explicit_path > stories.worktree_path > 报错
+        """
+        if explicit_path is not None:
+            return explicit_path
+
+        from ato.models.db import get_connection, get_story
+
+        db = await get_connection(self._db_path)
+        try:
+            story = await get_story(db, story_id)
+        finally:
+            await db.close()
+
+        if story is not None and story.worktree_path is not None:
+            return story.worktree_path
+
+        msg = (
+            f"Cannot resolve worktree path for story '{story_id}': "
+            "no explicit path provided and stories.worktree_path is empty. "
+            "Review must not run in the repository root directory."
+        )
+        raise ValueError(msg)
+
+    async def _run_validation_gate(
+        self,
+        *,
+        story_id: str,
+        artifact_payload: dict[str, Any],
+    ) -> ConvergentLoopResult | None:
+        """Deterministic validation gate (Task 3).
+
+        仅在提供 artifact_payload 时执行。验证失败时提交 validate_fail 事件
+        （story 回退到 creating），并返回提前结束的 ConvergentLoopResult；
+        验证通过时返回 None 继续流程。
+        """
+        from ato.validation import validate_artifact
+
+        validation_result = validate_artifact(artifact_payload, "review-findings.json")
+
+        if validation_result.passed:
+            return None
+
+        # Validation failed — submit validate_fail to roll back to creating
+        logger.warning(
+            "convergent_loop_validation_failed",
+            story_id=story_id,
+            error_count=len(validation_result.errors),
+            errors=[e.message for e in validation_result.errors],
+        )
+
+        await self._transition_queue.submit(
+            TransitionEvent(
+                story_id=story_id,
+                event_name="validate_fail",
+                source="agent",
+                submitted_at=datetime.now(tz=UTC),
+            )
+        )
+
+        return ConvergentLoopResult(
+            story_id=story_id,
+            round_num=1,
+            converged=False,
+            findings_total=0,
+            blocking_count=0,
+            suggestion_count=0,
+            open_count=0,
+        )
