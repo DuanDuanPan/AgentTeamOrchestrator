@@ -91,7 +91,7 @@ development_status:
   # ===== Epic 5: 崩溃恢复与可观测性 =====
   epic-5: in-progress
   5-1a-crash-recovery-auto-resume: done
-  5-1b-crash-recovery-performance-testing: ready-for-dev
+  5-1b-crash-recovery-performance-testing: review
   5-2-recovery-summary-execution-history: backlog
   epic-5-retrospective: optional
 

@@ -1,6 +1,6 @@
 # Story 5.1b: 崩溃恢复性能测试与验证
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -18,38 +18,38 @@ So that 恢复速度可预期，恢复行为可信赖。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 性能基准测试框架搭建 (AC: #1)
-  - [ ] 1.1 在 `tests/performance/` 下创建 `test_recovery_perf.py`
-  - [ ] 1.2 创建 `tests/performance/conftest.py`，复用 `insert_story()` / `insert_task()` 模式构造大规模数据库 fixture（10/100/500 个 running tasks，混合四种恢复分类）
-  - [ ] 1.3 使用 `time.perf_counter()` 仅计时 `await RecoveryEngine.run_recovery()` 的同步窗口
-  - [ ] 1.4 在计时结束后调用 `await engine.await_background_tasks()` 做清理，但不要把这段等待计入 AC1/NFR1 计时
-  - [ ] 1.5 为性能测试添加 `@pytest.mark.perf`
-- [ ] Task 2: 分层性能拆解测试 (AC: #1)
-  - [ ] 2.1 单独计时 SQLite 扫描阶段 (`get_running_tasks()` + `get_paused_tasks()`)
-  - [ ] 2.2 单独计时 PID 检查阶段（`_is_pid_alive()` × N tasks）
-  - [ ] 2.3 单独计时 artifact 检查阶段（`_artifact_exists()` × N tasks）
-  - [ ] 2.4 单独计时分类决策 + 恢复动作分派阶段（`_reattach()` / `_complete_from_artifact()` / `_reschedule()` / `_mark_needs_human()` 的同步入口，不等待后台 dispatch 完成）
-  - [ ] 2.5 添加 assert 检查各阶段耗时合理性，并验证分层测量结果与端到端 `run_recovery()` 量级一致
-- [ ] Task 3: 规模递增压力测试 (AC: #1)
-  - [ ] 3.1 10 tasks 场景 — 基线性能验证
-  - [ ] 3.2 100 tasks 场景 — 常规负载验证
-  - [ ] 3.3 500 tasks 场景 — 压力测试（超越 MVP 预期上限）
-  - [ ] 3.4 每个场景混合 4 种 recovery 分类（reattach/complete/reschedule/needs_human）
-- [ ] Task 4: 验证现有集成测试完整性 (AC: #2, #3)
-  - [ ] 4.1 审查现有 `tests/integration/test_crash_recovery.py` 是否已覆盖 4 种分类的完整性
-  - [ ] 4.2 如有遗漏分类场景，仅在该现有文件中补充测试；不要在 `tests/performance/` 中复制四类功能验证
-  - [ ] 4.3 验证每个场景的断言与 Story 5.1a AC 定义及当前 `_PHASE_SUCCESS_EVENT` 映射严格一致
-  - [ ] 4.4 验证 structlog 输出包含 `recovery_action`、`recovery_mode`、`duration_ms`、`dispatched` 等必要字段
-- [ ] Task 5: 性能回归检测机制 (AC: #1)
-  - [ ] 5.1 在性能测试中记录基线时间到 structlog
-  - [ ] 5.2 添加 hard assert: 100 tasks 场景的 `run_recovery()` 计时 ≤5s，500 tasks 场景 ≤30s
-  - [ ] 5.3 确保 `pyproject.toml` 注册 `perf` marker
-  - [ ] 5.4 明确性能测试的显式运行命令（如 `uv run pytest tests/performance/ -m perf`）；不要假设仅添加 marker 就会默认跳过该测试组
-- [ ] Task 6: 运行全量测试确认零回归 (AC: #1, #2, #3)
-  - [ ] 6.1 `uv run pytest` 全量通过
-  - [ ] 6.2 `uv run pytest tests/performance/ -m perf` 通过
-  - [ ] 6.3 `uv run ruff check src/ tests/`
-  - [ ] 6.4 `uv run mypy src/`
+- [x] Task 1: 性能基准测试框架搭建 (AC: #1)
+  - [x] 1.1 在 `tests/performance/` 下创建 `test_recovery_perf.py`
+  - [x] 1.2 创建 `tests/performance/conftest.py`，复用 `insert_story()` / `insert_task()` 模式构造大规模数据库 fixture（10/100/500 个 running tasks，混合四种恢复分类）
+  - [x] 1.3 使用 `time.perf_counter()` 仅计时 `await RecoveryEngine.run_recovery()` 的同步窗口
+  - [x] 1.4 在计时结束后调用 `await engine.await_background_tasks()` 做清理，但不要把这段等待计入 AC1/NFR1 计时
+  - [x] 1.5 为性能测试添加 `@pytest.mark.perf`
+- [x] Task 2: 分层性能拆解测试 (AC: #1)
+  - [x] 2.1 单独计时 SQLite 扫描阶段 (`get_running_tasks()` + `get_paused_tasks()`)
+  - [x] 2.2 单独计时 PID 检查阶段（`_is_pid_alive()` × N tasks）
+  - [x] 2.3 单独计时 artifact 检查阶段（`_artifact_exists()` × N tasks）
+  - [x] 2.4 单独计时分类决策 + 恢复动作分派阶段（`_reattach()` / `_complete_from_artifact()` / `_reschedule()` / `_mark_needs_human()` 的同步入口，不等待后台 dispatch 完成）
+  - [x] 2.5 添加 assert 检查各阶段耗时合理性，并验证分层测量结果与端到端 `run_recovery()` 量级一致
+- [x] Task 3: 规模递增压力测试 (AC: #1)
+  - [x] 3.1 10 tasks 场景 — 基线性能验证
+  - [x] 3.2 100 tasks 场景 — 常规负载验证
+  - [x] 3.3 500 tasks 场景 — 压力测试（超越 MVP 预期上限）
+  - [x] 3.4 每个场景混合 4 种 recovery 分类（reattach/complete/reschedule/needs_human）
+- [x] Task 4: 验证现有集成测试完整性 (AC: #2, #3)
+  - [x] 4.1 审查现有 `tests/integration/test_crash_recovery.py` 是否已覆盖 4 种分类的完整性
+  - [x] 4.2 如有遗漏分类场景，仅在该现有文件中补充测试；不要在 `tests/performance/` 中复制四类功能验证
+  - [x] 4.3 验证每个场景的断言与 Story 5.1a AC 定义及当前 `_PHASE_SUCCESS_EVENT` 映射严格一致
+  - [x] 4.4 验证 structlog 输出包含 `recovery_action`、`recovery_mode`、`duration_ms`、`dispatched` 等必要字段
+- [x] Task 5: 性能回归检测机制 (AC: #1)
+  - [x] 5.1 在性能测试中记录基线时间到 structlog
+  - [x] 5.2 添加 hard assert: 100 tasks 场景的 `run_recovery()` 计时 ≤5s，500 tasks 场景 ≤30s
+  - [x] 5.3 确保 `pyproject.toml` 注册 `perf` marker
+  - [x] 5.4 明确性能测试的显式运行命令（如 `uv run pytest tests/performance/ -m perf`）；不要假设仅添加 marker 就会默认跳过该测试组
+- [x] Task 6: 运行全量测试确认零回归 (AC: #1, #2, #3)
+  - [x] 6.1 `uv run pytest` 全量通过
+  - [x] 6.2 `uv run pytest tests/performance/ -m perf` 通过
+  - [x] 6.3 `uv run ruff check src/ tests/`
+  - [ ] 6.4 `uv run mypy src/` — 2 个预存 TUI 错误（src/ato/tui/app.py:21, src/ato/tui/dashboard.py:8 的 unused type:ignore），非本 story 引入，本 story 新增文件 mypy 通过
 
 ## Dev Notes
 
@@ -232,14 +232,34 @@ Interactive Session 判定: `RecoveryEngine.__init__` 接收 `interactive_phases
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- reattach PID 监控循环会永久轮询（PID mock 返回 alive），性能测试中改用 `_cancel_background_tasks()` 取消后台任务而非 `await_background_tasks()`
+
 ### Completion Notes List
+
+- ✅ Task 1: 创建 `tests/performance/` 目录结构（`__init__.py` + `conftest.py` + `test_recovery_perf.py`），conftest 提供 10/100/500 tasks 的 fixture，按 index % 4 均匀分配四种恢复分类
+- ✅ Task 2: TestLayeredPerformance 分别计时 SQLite 扫描、PID 检查、artifact 检查、分类决策四阶段，含分层-端到端一致性验证
+- ✅ Task 3: TestScaleProgression 验证 10/100/500 tasks 的分类分布正确性（每类 25% 均匀分布）
+- ✅ Task 4: 审查现有集成测试 — 四种分类已完整覆盖，仅补充 `dispatched` 字段断言缺口
+- ✅ Task 5: TestPerformanceRegression 包含 structlog 基线记录 + hard assert 阈值（100 tasks ≤5s, 500 tasks ≤30s），pyproject.toml 注册 `perf` marker
+- ✅ Task 6: 全量 891 测试通过，13 性能测试通过，ruff 零错误；mypy src/ 有 2 个预存 TUI 错误（非本 story 引入），本 story 新增文件 mypy 通过
 
 ### Change Log
 
 - 2026-03-25: validate-create-story 修订 —— 明确 NFR1 的计时边界只覆盖 `run_recovery()` 同步窗口；要求 `await_background_tasks()` 仅做清理不计时；收敛 perf marker 的实际使用方式；避免在性能测试中复制现有四分类功能回归
+- 2026-03-25: 完成全部 6 个 Task 实现 —— 13 个性能测试全部通过，NFR1 ≤30s 目标验证达成，集成测试补充 `dispatched` 字段断言
+- 2026-03-25: Code Review R1 修复 3 项 —— (高) PID/artifact 分层测试改为通过模块属性调用被测函数; (中) 分类决策测试补充完整 dispatch 动作循环 + 双边一致性断言; (低) 6.4 mypy 标记修正为未完成（预存 TUI 错误）
+- 2026-03-25: Code Review R2 修复 1 项 —— (中) PID/artifact 分层 benchmark 改为 mock os.kill/Path.exists 低层级，让 _is_pid_alive 的 errno 处理和 _artifact_exists 的 Path 构造逻辑完整执行；新增 _build_os_kill_mock + _build_path_exists_fn 到 conftest
 
 ### File List
+
+- tests/performance/__init__.py (新增)
+- tests/performance/conftest.py (新增)
+- tests/performance/test_recovery_perf.py (新增)
+- tests/integration/test_crash_recovery.py (修改 — 补充 `dispatched` 字段断言)
+- pyproject.toml (修改 — 注册 `perf` marker)
+- _bmad-output/implementation-artifacts/sprint-status.yaml (修改 — 状态更新)
+- _bmad-output/implementation-artifacts/5-1b-crash-recovery-performance-testing.md (修改 — 任务完成标记)
