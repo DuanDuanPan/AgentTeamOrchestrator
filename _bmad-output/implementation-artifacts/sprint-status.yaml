@@ -98,7 +98,7 @@ development_status:
   # ===== Epic 6: TUI 指挥台 =====
   epic-6: in-progress
   6-1a-tui-launch-sqlite-connection: done
-  6-1b-dark-theme-responsive-layout: ready-for-dev
+  6-1b-dark-theme-responsive-layout: done
   6-2a-three-question-header: backlog
   6-2b-dashboard-story-list: backlog
   6-3a-standard-approval-interaction: backlog

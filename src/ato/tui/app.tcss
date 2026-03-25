@@ -1,16 +1,111 @@
-/* ATO TUI 最小深色主题 */
+/* ATO TUI 深色主题 — Dracula 变体 9 语义色 */
 
+/* ===== 语义色彩变量 (AC1) ===== */
+$success: #50fa7b;
+$warning: #f1fa8c;
+$error: #ff5555;
+$info: #8be9fd;
+$accent: #bd93f9;
+$muted: #8390b7;
+$text: #f8f8f2;
 $background: #282a36;
 $surface: #44475a;
-$text: #f8f8f2;
+
+/* ===== 全局基础 (Task 1.2) ===== */
 
 Screen {
     background: $background;
+    color: $text;
 }
 
-DashboardScreen {
-    background: $surface;
+/* ===== 面板基础样式 (Task 1.3) ===== */
+
+.panel {
+    border: solid $muted;
+    padding: 1 2;
+    margin: 0 1;
+    background: $background;
+}
+
+.panel:focus-within {
+    border: solid $accent;
+}
+
+/* ===== 文字层级 (Task 1.4 / AC5) ===== */
+
+.h1 {
+    text-style: bold;
+    color: $accent;
+}
+
+.h2 {
+    text-style: bold;
     color: $text;
+}
+
+.body {
+    color: $text;
+}
+
+.secondary {
+    color: $muted;
+}
+
+.emphasis {
+    text-style: bold;
+}
+
+/* ===== DashboardScreen 容器 ===== */
+
+DashboardScreen {
+    height: 1fr;
+    background: $background;
+}
+
+/* ===== 三面板布局 ===== */
+
+.three-panel-container {
+    height: 1fr;
+}
+
+.left-panel {
+    width: 40%;
+    border: solid $muted;
+    padding: 1 2;
+}
+
+.left-panel:focus-within {
+    border: solid $accent;
+}
+
+.right-panel {
+    width: 60%;
+    border: solid $muted;
+    padding: 1 2;
+}
+
+.right-panel:focus-within {
+    border: solid $accent;
+}
+
+/* 超宽屏 180+ 列时由 Python 动态调整比例 */
+
+/* ===== Tab 模式 ===== */
+
+.tabbed-container {
+    height: 1fr;
+}
+
+/* ===== 降级模式 ===== */
+
+.degraded-container {
     height: 1fr;
     content-align: center middle;
+    color: $warning;
+}
+
+/* ===== ContentSwitcher ===== */
+
+ContentSwitcher {
+    height: 1fr;
 }
