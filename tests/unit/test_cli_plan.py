@@ -254,8 +254,18 @@ class TestRenderPlanOutput:
     def test_all_12_phases_present(self) -> None:
         output = self._capture(_story(), _make_phase_defs())
         phases = [
-            "queued", "creating", "validating", "dev_ready", "developing",
-            "reviewing", "fixing", "qa_testing", "uat", "merging", "regression", "done",
+            "queued",
+            "creating",
+            "validating",
+            "dev_ready",
+            "developing",
+            "reviewing",
+            "fixing",
+            "qa_testing",
+            "uat",
+            "merging",
+            "regression",
+            "done",
         ]
         for phase in phases:
             assert phase in output, f"Phase '{phase}' missing from output"

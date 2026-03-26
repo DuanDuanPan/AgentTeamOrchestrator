@@ -50,6 +50,27 @@ class Nudge:
             self._event.clear()
 
 
+def send_user_notification(level: str, message: str) -> None:
+    """发送用户可见通知。
+
+    MVP 实现：
+    - ``urgent`` / ``normal`` → terminal bell (``\\a``)
+    - ``silent`` → 无动作
+    - ``milestone`` → 暂仅保留枚举，无动作（Story 4.4 范围）
+
+    Args:
+        level: NotificationLevel 值。
+        message: 通知消息文本。
+    """
+    if level in ("urgent", "normal"):
+        import sys
+
+        sys.stderr.write("\a")
+        sys.stderr.flush()
+    # silent / milestone: 不发 bell
+    logger.info("notification_sent", level=level, message=message)
+
+
 def send_external_nudge(orchestrator_pid: int) -> None:
     """供外部进程（TUI / ``ato submit``）调用，通知 Orchestrator 立即轮询。
 

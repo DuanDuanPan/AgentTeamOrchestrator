@@ -507,11 +507,25 @@ async def count_tasks_by_status(db: aiosqlite.Connection, status: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def insert_approval(db: aiosqlite.Connection, approval: ApprovalRecord) -> None:
-    """插入一条 approval 记录。"""
+async def insert_approval(
+    db: aiosqlite.Connection,
+    approval: ApprovalRecord,
+    *,
+    commit: bool = True,
+) -> None:
+    """插入一条 approval 记录。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        approval: 待插入的 ApprovalRecord。
+        commit: 是否自动 commit。``False`` 时由调用方负责 commit，
+            用于 SAVEPOINT 事务内调用。
+    """
     await db.execute(
         "INSERT INTO approvals (approval_id, story_id, approval_type, status, "
-        "payload, decision, decided_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "payload, decision, decided_at, created_at, "
+        "recommended_action, risk_level, decision_reason, consumed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             approval.approval_id,
             approval.story_id,
@@ -521,9 +535,14 @@ async def insert_approval(db: aiosqlite.Connection, approval: ApprovalRecord) ->
             approval.decision,
             _dt_to_iso(approval.decided_at),
             _dt_to_iso(approval.created_at),
+            approval.recommended_action,
+            approval.risk_level,
+            approval.decision_reason,
+            _dt_to_iso(approval.consumed_at),
         ),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def get_pending_approvals(db: aiosqlite.Connection) -> list[ApprovalRecord]:
@@ -539,9 +558,108 @@ async def get_pending_approvals(db: aiosqlite.Connection) -> list[ApprovalRecord
 def _row_to_approval(row: aiosqlite.Row) -> ApprovalRecord:
     """SQLite Row → ApprovalRecord（先反序列化 datetime 再 model_validate）。"""
     data = dict(row)
-    for dt_field in ("decided_at", "created_at"):
-        data[dt_field] = _iso_to_dt(data[dt_field])
+    for dt_field in ("decided_at", "created_at", "consumed_at"):
+        if dt_field in data:
+            data[dt_field] = _iso_to_dt(data[dt_field])
     return ApprovalRecord.model_validate(data)
+
+
+async def update_approval_decision(
+    db: aiosqlite.Connection,
+    approval_id: str,
+    *,
+    status: str,
+    decision: str,
+    decision_reason: str | None = None,
+    decided_at: datetime,
+) -> None:
+    """更新审批决策。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        approval_id: Approval 唯一标识。
+        status: 新状态（approved / rejected）。
+        decision: 具体决策选项（如 restart / resume / approve）。
+        decision_reason: 可选决策理由。
+        decided_at: 决策时间戳。
+
+    Raises:
+        ValueError: approval_id 不存在。
+    """
+    cursor = await db.execute(
+        "UPDATE approvals SET status = ?, decision = ?, decision_reason = ?, decided_at = ? "
+        "WHERE approval_id = ?",
+        (status, decision, decision_reason, _dt_to_iso(decided_at), approval_id),
+    )
+    if cursor.rowcount == 0:
+        msg = f"Approval '{approval_id}' not found in database"
+        raise ValueError(msg)
+
+
+async def get_approval_by_id(
+    db: aiosqlite.Connection,
+    approval_id_prefix: str,
+) -> ApprovalRecord:
+    """按 ID 或前缀查询单条 approval。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        approval_id_prefix: 完整 ID 或 ≥4 字符前缀。
+
+    Returns:
+        匹配的 ApprovalRecord。
+
+    Raises:
+        ValueError: 未找到、前缀过短或多个匹配。
+    """
+    if len(approval_id_prefix) < 4:
+        msg = "approval_id 前缀至少需要 4 个字符"
+        raise ValueError(msg)
+
+    cursor = await db.execute(
+        "SELECT * FROM approvals WHERE approval_id LIKE ? || '%'",
+        (approval_id_prefix,),
+    )
+    rows = list(await cursor.fetchall())
+    if len(rows) == 0:
+        msg = f"未找到匹配的 approval: {approval_id_prefix}"
+        raise ValueError(msg)
+    if len(rows) > 1:
+        msg = f"前缀 '{approval_id_prefix}' 匹配到 {len(rows)} 条记录，请提供更长的前缀"
+        raise ValueError(msg)
+    return _row_to_approval(rows[0])
+
+
+async def get_decided_unconsumed_approvals(
+    db: aiosqlite.Connection,
+) -> list[ApprovalRecord]:
+    """查询已决策但未消费的 approvals（供 Orchestrator poll cycle 使用）。"""
+    cursor = await db.execute(
+        "SELECT * FROM approvals WHERE status != ? AND consumed_at IS NULL ORDER BY rowid",
+        ("pending",),
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_approval(r) for r in rows]
+
+
+async def mark_approval_consumed(
+    db: aiosqlite.Connection,
+    approval_id: str,
+    consumed_at: datetime,
+) -> None:
+    """标记 approval 已消费（仅在处理成功后调用）。
+
+    Raises:
+        ValueError: approval_id 不存在。
+    """
+    cursor = await db.execute(
+        "UPDATE approvals SET consumed_at = ? WHERE approval_id = ?",
+        (_dt_to_iso(consumed_at), approval_id),
+    )
+    if cursor.rowcount == 0:
+        msg = f"Approval '{approval_id}' not found in database"
+        raise ValueError(msg)
+    await db.commit()
 
 
 # ---------------------------------------------------------------------------

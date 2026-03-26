@@ -17,8 +17,60 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 5
+SCHEMA_VERSION: int = 6
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
+
+# ---------------------------------------------------------------------------
+# Approval 类型与通知级别
+# ---------------------------------------------------------------------------
+
+ApprovalType = Literal[
+    "merge_authorization",
+    "session_timeout",
+    "crash_recovery",
+    "blocking_abnormal",
+    "budget_exceeded",
+    "regression_failure",
+    "precommit_failure",
+    "convergent_loop_escalation",
+    "batch_confirmation",
+    "timeout",
+    "needs_human_review",
+]
+"""所有 approval 类型。"""
+
+NotificationLevel = Literal["urgent", "normal", "silent", "milestone"]
+"""用户可见通知级别。"""
+
+APPROVAL_TYPE_TO_NOTIFICATION: dict[str, NotificationLevel] = {
+    "regression_failure": "urgent",
+    "merge_authorization": "normal",
+    "session_timeout": "normal",
+    "crash_recovery": "normal",
+    "blocking_abnormal": "normal",
+    "budget_exceeded": "normal",
+    "timeout": "normal",
+    "convergent_loop_escalation": "normal",
+    "batch_confirmation": "normal",
+    "precommit_failure": "normal",
+    "needs_human_review": "normal",
+}
+"""approval_type → NotificationLevel 映射。"""
+
+APPROVAL_RECOMMENDED_ACTIONS: dict[str, str] = {
+    "merge_authorization": "approve",
+    "session_timeout": "restart",
+    "crash_recovery": "restart",
+    "blocking_abnormal": "human_review",
+    "budget_exceeded": "increase_budget",
+    "regression_failure": "fix_forward",
+    "timeout": "continue_waiting",
+    "convergent_loop_escalation": "escalate",
+    "batch_confirmation": "confirm",
+    "precommit_failure": "retry",
+    "needs_human_review": "review",
+}
+"""approval_type → 推荐操作映射。"""
 
 # ---------------------------------------------------------------------------
 # 错误分类枚举
@@ -276,6 +328,10 @@ class ApprovalRecord(_StrictBase):
     decision: str | None = None
     decided_at: datetime | None = None
     created_at: datetime
+    recommended_action: str | None = None
+    risk_level: Literal["high", "medium", "low"] | None = None
+    decision_reason: str | None = None
+    consumed_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -171,9 +171,7 @@ class TestLayeredPerformance:
         with patch("os.kill", new=os_kill_mock):
             t0 = time.perf_counter()
             results = [
-                _recovery_mod._is_pid_alive(task.pid)
-                for task in tasks
-                if task.pid is not None
+                _recovery_mod._is_pid_alive(task.pid) for task in tasks if task.pid is not None
             ]
             elapsed = time.perf_counter() - t0
 
@@ -314,12 +312,8 @@ class TestLayeredPerformance:
         await _cancel_background_tasks(engine_e2e)
 
         # 双边断言：分层总和与 E2E 在同一量级
-        assert layered_total < t_e2e * 3 + 0.5, (
-            f"Layered {layered_total:.3f}s >> E2E {t_e2e:.3f}s"
-        )
-        assert t_e2e < layered_total * 3 + 0.5, (
-            f"E2E {t_e2e:.3f}s >> Layered {layered_total:.3f}s"
-        )
+        assert layered_total < t_e2e * 3 + 0.5, f"Layered {layered_total:.3f}s >> E2E {t_e2e:.3f}s"
+        assert t_e2e < layered_total * 3 + 0.5, f"E2E {t_e2e:.3f}s >> Layered {layered_total:.3f}s"
 
 
 # ---------------------------------------------------------------------------
@@ -470,9 +464,7 @@ class TestPerformanceRegression:
         assert elapsed < 5.0, f"100 tasks: {elapsed:.3f}s > 5s"
 
         # 验证 structlog 包含 duration_ms
-        complete_events = [
-            e for e in captured_events if e.get("event") == "recovery_complete"
-        ]
+        complete_events = [e for e in captured_events if e.get("event") == "recovery_complete"]
         assert len(complete_events) == 1
         assert "duration_ms" in complete_events[0]
 
@@ -517,9 +509,7 @@ class TestPerformanceRegression:
         assert elapsed < 30.0, f"500 tasks: {elapsed:.3f}s > 30s"
 
         # 验证 structlog 基线记录
-        complete_events = [
-            e for e in captured_events if e.get("event") == "recovery_complete"
-        ]
+        complete_events = [e for e in captured_events if e.get("event") == "recovery_complete"]
         assert len(complete_events) == 1
         event = complete_events[0]
         assert event["recovery_mode"] == "crash"

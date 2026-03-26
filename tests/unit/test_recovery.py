@@ -15,7 +15,10 @@ import pytest
 
 from ato.models.db import (
     get_connection,
+    get_findings_by_story,
     get_paused_tasks,
+    get_tasks_by_story,
+    insert_findings_batch,
     insert_story,
     insert_task,
 )
@@ -24,8 +27,10 @@ from ato.models.schemas import (
     ApprovalRecord,
     CLIAdapterError,
     ErrorCategory,
+    FindingRecord,
     StoryRecord,
     TaskRecord,
+    compute_dedup_hash,
 )
 from ato.recovery import (
     RecoveryEngine,
@@ -94,6 +99,31 @@ def _make_task(
         pid=pid,
         expected_artifact=expected_artifact,
         started_at=_NOW,
+    )
+
+
+def _make_open_finding(
+    *,
+    finding_id: str,
+    story_id: str,
+    severity: str = "blocking",
+    description: str = "existing issue",
+    file_path: str = "src/existing.py",
+    rule_id: str = "R001",
+    status: str = "open",
+    round_num: int = 1,
+) -> FindingRecord:
+    return FindingRecord(
+        finding_id=finding_id,
+        story_id=story_id,
+        round_num=round_num,
+        severity=severity,  # type: ignore[arg-type]
+        description=description,
+        status=status,  # type: ignore[arg-type]
+        file_path=file_path,
+        rule_id=rule_id,
+        dedup_hash=compute_dedup_hash(file_path, rule_id, severity, description),
+        created_at=_NOW,
     )
 
 
@@ -1314,6 +1344,88 @@ class TestConvergentLoopPromptFormat:
         assert "Recommendation" in prompt
         assert "Quality Score" in prompt
         assert "Critical Issues" in prompt
+
+    async def test_reviewing_retry_with_open_findings_uses_scoped_rereview(
+        self,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """reviewing retry 若已有 open findings，应保留 re-review scope 和下一轮 round_num。"""
+        from ato.models.schemas import BmadFinding, BmadParseResult, BmadSkillType
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task("t1", "s1", status="pending", pid=None, phase="reviewing"),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    _make_open_finding(
+                        finding_id="f-prev-1",
+                        story_id="s1",
+                        description="existing issue",
+                        file_path="src/existing.py",
+                        rule_id="R001",
+                        round_num=1,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.CODE_REVIEW,
+            verdict="changes_requested",
+            findings=[
+                BmadFinding(
+                    severity="blocking",
+                    category="test",
+                    description="newly introduced issue",
+                    file_path="src/new.py",
+                    rule_id="R002",
+                    line=8,
+                )
+            ],
+            parser_mode="deterministic",
+            raw_markdown_hash="h",
+            raw_output_preview="preview",
+            parsed_at=_NOW,
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+        )
+
+        task = _make_task("t1", "s1", status="pending", pid=None, phase="reviewing")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine._dispatch_convergent_loop(task)
+
+        prompt = _mock_recovery_adapter.execute.call_args[0][0]
+        assert "SCOPED RE-REVIEW" in prompt
+        assert "Do NOT perform a full review" in prompt
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db, "s1")
+            findings = await get_findings_by_story(db, "s1")
+        finally:
+            await db.close()
+
+        assert len(tasks) == 1
+        assert tasks[0].task_id == "t1"
+        assert {f.round_num for f in findings} == {1, 2}
 
 
 # ---------------------------------------------------------------------------
