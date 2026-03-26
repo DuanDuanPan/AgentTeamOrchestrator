@@ -8,7 +8,6 @@ from pathlib import Path
 from ato.models.db import (
     get_connection,
     get_story,
-    get_tasks_by_status,
     insert_story,
     insert_task,
     update_task_status,
