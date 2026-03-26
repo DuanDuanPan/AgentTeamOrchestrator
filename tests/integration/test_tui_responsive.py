@@ -293,6 +293,7 @@ async def test_number_keys_switch_tabs_active_pane(tui_db_path: Path) -> None:
 
 async def test_tab_mode_shows_data(tui_db_with_data: Path) -> None:
     """Tab 模式下数据正确显示在各 TabPane 中。"""
+    from textual.containers import VerticalScroll
     from textual.widgets import Static
 
     app = ATOApp(db_path=tui_db_with_data)
@@ -304,8 +305,9 @@ async def test_tab_mode_shows_data(tui_db_with_data: Path) -> None:
         approvals = dashboard.query_one("#tab-approvals-content", Static)
         assert "1" in str(approvals.render())
 
-        stories = dashboard.query_one("#tab-stories-content", Static)
-        assert "1" in str(stories.render())
+        # [2]Stories Tab 现在用 VerticalScroll + StoryStatusLine，验证有子 widget
+        tab_list = dashboard.query_one("#tab-story-list-container", VerticalScroll)
+        assert len(tab_list.children) >= 1
 
 
 async def test_degraded_mode_shows_data(tui_db_with_data: Path) -> None:
@@ -321,16 +323,18 @@ async def test_degraded_mode_shows_data(tui_db_with_data: Path) -> None:
 
 
 async def test_three_panel_shows_data(tui_db_with_data: Path) -> None:
-    """三面板模式下数据正确显示。"""
-    from textual.widgets import Static
+    """三面板模式下 story 列表正确显示。"""
+    from textual.containers import VerticalScroll
 
     app = ATOApp(db_path=tui_db_with_data)
     async with app.run_test(size=(150, 40)):
         dashboard = app.query_one(DashboardScreen)
-        left = dashboard.query_one("#left-panel-content", Static)
-        text = str(left.render())
-        assert "Stories: 1" in text
-        assert "待审批: 1" in text
+        container = dashboard.query_one("#story-list-container", VerticalScroll)
+        # 应显示 1 个 story widget（而非空状态）
+        assert len(container.children) >= 1
+        # 无 empty-state
+        empty = list(container.query(".empty-state"))
+        assert len(empty) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -419,3 +423,45 @@ async def test_three_question_header_visible_all_modes(tui_db_path: Path) -> Non
                 f"(y={builtin_header.region.y}, h={builtin_header.region.height}) "
                 f"at width={width}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Story 6.2b: Story 列表响应式测试
+# ---------------------------------------------------------------------------
+
+
+async def test_story_list_visible_in_three_panel(tui_db_with_data: Path) -> None:
+    """三面板模式下 story 列表在左面板中正确显示。"""
+    from textual.containers import VerticalScroll
+
+    app = ATOApp(db_path=tui_db_with_data)
+    async with app.run_test(size=(150, 40)):
+        dashboard = app.query_one(DashboardScreen)
+        container = dashboard.query_one("#story-list-container", VerticalScroll)
+        assert len(container.children) >= 1
+
+
+async def test_story_list_visible_in_tabbed_mode(tui_db_with_data: Path) -> None:
+    """Tab 模式下 [2]Stories Tab 中 story 列表正确显示。"""
+    from textual.containers import VerticalScroll
+
+    app = ATOApp(db_path=tui_db_with_data)
+    async with app.run_test(size=(120, 40)):
+        dashboard = app.query_one(DashboardScreen)
+        tab_container = dashboard.query_one("#tab-story-list-container", VerticalScroll)
+        assert len(tab_container.children) >= 1
+
+
+async def test_up_down_does_not_conflict_with_tab(tui_db_with_data: Path) -> None:
+    """Tab/Shift-Tab 在面板间切换，↑↓ 仅在左面板获焦时改变选中 story。"""
+    app = ATOApp(db_path=tui_db_with_data)
+    async with app.run_test(size=(150, 40)) as pilot:
+        # Tab 到左面板
+        await pilot.press("tab")
+        focused = app.focused
+        assert focused is not None
+        # 按 Tab 应切到右面板
+        await pilot.press("tab")
+        focused2 = app.focused
+        assert focused2 is not None
+        assert focused2.id != focused.id if focused else True

@@ -118,3 +118,33 @@ DashboardScreen {
 ContentSwitcher {
     height: 1fr;
 }
+
+/* ===== StoryStatusLine / HeartbeatIndicator (Story 6.2b) ===== */
+
+StoryStatusLine {
+    height: 1;
+    padding: 0 1;
+}
+
+HeartbeatIndicator {
+    height: 1;
+    padding: 0 1;
+}
+
+.story-row {
+    height: 1;
+}
+
+.selected-story {
+    background: $accent 20%;
+    color: $text;
+}
+
+/* ===== 空状态 (Story 6.2b) ===== */
+
+.empty-state {
+    content-align: center middle;
+    color: $muted;
+    text-style: italic;
+    height: 1fr;
+}

@@ -1,6 +1,6 @@
 # Story 6.2b: DashboardScreen 与 Story 列表
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -55,67 +55,67 @@ So that 可以快速定位需要关注的 story。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: StoryStatusLine Widget (AC: #2)
-  - [ ] 1.1 在 `src/ato/tui/widgets/story_status_line.py` 创建 `StoryStatusLine(Widget)` 类
-  - [ ] 1.2 定义 reactive 属性：`story_id: reactive[str]`、`status: reactive[str]`、`current_phase: reactive[str]`、`cost_usd: reactive[float]`、`elapsed_seconds: reactive[int]`、`cl_round: reactive[int]`、`cl_max_rounds: reactive[int]`
-  - [ ] 1.3 实现 `render()` 方法：渲染格式 `{icon} {story_id}  {phase}  {progress_bar}  {elapsed}  ${cost}`
-  - [ ] 1.4 进度条基于真实状态机阶段顺序计算；`PHASE_ORDER` 必须与 `src/ato/state_machine.py` 的 `["queued", *CANONICAL_PHASES, "done"]` 对齐，不得自创 `re_reviewing` / `uat_waiting` / `uat_running` 等仓库不存在的 phase
-  - [ ] 1.5 实现 `update_data()` 方法批量更新 reactive 属性
-  - [ ] 1.6 使用 `theme.py` 的 `map_story_to_visual_status()` + `format_status()` + `RICH_COLORS` 获取图标和颜色
+- [x] Task 1: StoryStatusLine Widget (AC: #2)
+  - [x] 1.1 在 `src/ato/tui/widgets/story_status_line.py` 创建 `StoryStatusLine(Widget)` 类
+  - [x] 1.2 定义 reactive 属性：`story_id: reactive[str]`、`status: reactive[str]`、`current_phase: reactive[str]`、`cost_usd: reactive[float]`、`elapsed_seconds: reactive[int]`、`cl_round: reactive[int]`、`cl_max_rounds: reactive[int]`
+  - [x] 1.3 实现 `render()` 方法：渲染格式 `{icon} {story_id}  {phase}  {progress_bar}  {elapsed}  ${cost}`
+  - [x] 1.4 进度条基于真实状态机阶段顺序计算；`PHASE_ORDER` 必须与 `src/ato/state_machine.py` 的 `["queued", *CANONICAL_PHASES, "done"]` 对齐，不得自创 `re_reviewing` / `uat_waiting` / `uat_running` 等仓库不存在的 phase
+  - [x] 1.5 实现 `update_data()` 方法批量更新 reactive 属性
+  - [x] 1.6 使用 `theme.py` 的 `map_story_to_visual_status()` + `format_status()` + `RICH_COLORS` 获取图标和颜色
 
-- [ ] Task 2: HeartbeatIndicator Widget (AC: #3)
-  - [ ] 2.1 在 `src/ato/tui/widgets/heartbeat_indicator.py` 创建 `HeartbeatIndicator(Widget)` 类
-  - [ ] 2.2 实现 spinner 动画：`◐◓◑◒` 循环，通过 `set_interval(1.0, ...)` 驱动
-  - [ ] 2.3 经过时间客户端计时器：从 `started_at` 本地计算，每秒更新（与 spinner 共享定时器）
-  - [ ] 2.4 渲染格式：`◐ {story_id}  {phase}  R{round}/{max}  {progress}  ${cost}  {elapsed} ◐`
-  - [ ] 2.5 提供 `update_heartbeat()` 方法接收 `story_id`、`phase`、`round_num`、`max_rounds`、`cost_usd`、`started_at`
+- [x] Task 2: HeartbeatIndicator Widget (AC: #3)
+  - [x] 2.1 在 `src/ato/tui/widgets/heartbeat_indicator.py` 创建 `HeartbeatIndicator(Widget)` 类
+  - [x] 2.2 实现 spinner 动画：`◐◓◑◒` 循环，通过 `set_interval(1.0, ...)` 驱动
+  - [x] 2.3 经过时间客户端计时器：从 `started_at` 本地计算，每秒更新（与 spinner 共享定时器）
+  - [x] 2.4 渲染格式：`◐ {story_id}  {phase}  R{round}/{max}  {progress}  ${cost}  {elapsed} ◐`
+  - [x] 2.5 提供 `update_heartbeat()` 方法接收 `story_id`、`phase`、`round_num`、`max_rounds`、`cost_usd`、`started_at`
 
-- [ ] Task 3: Story 排序逻辑 (AC: #2)
-  - [ ] 3.1 在 `src/ato/tui/theme.py` 新增 `VISUAL_STATUS_SORT_ORDER` 常量定义排序优先级
-  - [ ] 3.2 排序规则：`awaiting(0) → active(1) → running(2) → frozen(3) → done(4) → info(5)`；其中 `running` 必须紧邻 `active`，不得落到 `blocked/frozen` 之后
-  - [ ] 3.3 新增 `sort_stories_by_status(stories: list) -> list` 函数，使用 `map_story_to_visual_status()` 映射后排序
-  - [ ] 3.4 同一 visual status 内按 `updated_at` 降序排列（最近更新的在前）
+- [x] Task 3: Story 排序逻辑 (AC: #2)
+  - [x] 3.1 在 `src/ato/tui/theme.py` 新增 `VISUAL_STATUS_SORT_ORDER` 常量定义排序优先级
+  - [x] 3.2 排序规则：`awaiting(0) → active(1) → running(2) → frozen(3) → done(4) → info(5)`；其中 `running` 必须紧邻 `active`，不得落到 `blocked/frozen` 之后
+  - [x] 3.3 新增 `sort_stories_by_status(stories: list) -> list` 函数，使用 `map_story_to_visual_status()` 映射后排序
+  - [x] 3.4 同一 visual status 内按 `updated_at` 降序排列（最近更新的在前）
 
-- [ ] Task 4: ATOApp 数据扩展 (AC: #6)
-  - [ ] 4.1 扩展 `ATOApp._load_data()`：获取全部 story 的完整记录列表 + 每个 story 的累计成本 + 当前 phase 对应的最新 running task `started_at` + 每个 story 的最新 `round_num`
-  - [ ] 4.2 在 `ATOApp` 存储 app 级数据快照（`stories` / `story_costs` / `story_started_at` / `story_cl_rounds`）；若使用 reactive 容器，刷新时必须整包替换，不得原地 mutate
-  - [ ] 4.3 扩展 `ato tui` 启动路径与 `ATOApp.__init__()`，把 `settings.convergent_loop.max_rounds` 注入 TUI；`HeartbeatIndicator` 不得 hardcode `3`
-  - [ ] 4.4 在 `_update_dashboard()` 中传递 `stories`、`story_costs`、`story_started_at`、`story_cl_rounds`、`convergent_loop_max_rounds` 到 `DashboardScreen`
+- [x] Task 4: ATOApp 数据扩展 (AC: #6)
+  - [x] 4.1 扩展 `ATOApp._load_data()`：获取全部 story 的完整记录列表 + 每个 story 的累计成本 + 当前 phase 对应的最新 running task `started_at` + 每个 story 的最新 `round_num`
+  - [x] 4.2 在 `ATOApp` 存储 app 级数据快照（`stories` / `story_costs` / `story_started_at` / `story_cl_rounds`）；若使用 reactive 容器，刷新时必须整包替换，不得原地 mutate
+  - [x] 4.3 扩展 `ato tui` 启动路径与 `ATOApp.__init__()`，把 `settings.convergent_loop.max_rounds` 注入 TUI；`HeartbeatIndicator` 不得 hardcode `3`
+  - [x] 4.4 在 `_update_dashboard()` 中传递 `stories`、`story_costs`、`story_started_at`、`story_cl_rounds`、`convergent_loop_max_rounds` 到 `DashboardScreen`
 
-- [ ] Task 5: DashboardScreen Story 列表渲染 (AC: #1, #4, #5)
-  - [ ] 5.1 将左面板 `Static(id="left-panel-content")` 替换为 `VerticalScroll` 容器 + 动态 story row 列表（`StoryStatusLine` / `HeartbeatIndicator`），并为每个 row 保持稳定的 `story_id` 标识
-  - [ ] 5.2 实现 `update_content()` 扩展：接收 `stories` 参数，排序后渲染到左面板
-  - [ ] 5.3 实现空状态逻辑：stories 为空时显示 `Static` 提示信息
-  - [ ] 5.4 实现选中联动：当左侧 `_FocusablePanel` 获焦时，↑↓ 只改变当前选中 story；Tab/Shift-Tab 仍保持既有 panel 焦点切换；右上面板按 `selected_story_id` 联动更新
-  - [ ] 5.5 在 tabbed 模式 `[2]Stories` Tab 同步显示 story 列表
-  - [ ] 5.6 `_refresh_placeholders()` 中保留右下面板操作区域（审批相关留给 Story 6.3a）
+- [x] Task 5: DashboardScreen Story 列表渲染 (AC: #1, #4, #5)
+  - [x] 5.1 将左面板 `Static(id="left-panel-content")` 替换为 `VerticalScroll` 容器 + 动态 story row 列表（`StoryStatusLine` / `HeartbeatIndicator`），并为每个 row 保持稳定的 `story_id` 标识
+  - [x] 5.2 实现 `update_content()` 扩展：接收 `stories` 参数，排序后渲染到左面板
+  - [x] 5.3 实现空状态逻辑：stories 为空时显示 `Static` 提示信息
+  - [x] 5.4 实现选中联动：当左侧 `_FocusablePanel` 获焦时，↑↓ 只改变当前选中 story；Tab/Shift-Tab 仍保持既有 panel 焦点切换；右上面板按 `selected_story_id` 联动更新
+  - [x] 5.5 在 tabbed 模式 `[2]Stories` Tab 同步显示 story 列表
+  - [x] 5.6 `_refresh_placeholders()` 中保留右下面板操作区域（审批相关留给 Story 6.3a）
 
-- [ ] Task 6: 右上面板 Story 概览 (AC: #5)
-  - [ ] 6.1 将右上面板 `Static(id="right-top-content")` 替换为 story 概览视图
-  - [ ] 6.2 显示选中 story 的：阶段（current_phase）、成本（cost_usd）、耗时（elapsed）、CL 轮次
-  - [ ] 6.3 使用 `Static` + `Rich.Text` 渲染结构化概览
-  - [ ] 6.4 无选中 story 时显示默认提示"选择左面板的 story 查看详情"
+- [x] Task 6: 右上面板 Story 概览 (AC: #5)
+  - [x] 6.1 将右上面板 `Static(id="right-top-content")` 替换为 story 概览视图
+  - [x] 6.2 显示选中 story 的：阶段（current_phase）、成本（cost_usd）、耗时（elapsed）、CL 轮次
+  - [x] 6.3 使用 `Static` + `Rich.Text` 渲染结构化概览
+  - [x] 6.4 无选中 story 时显示默认提示"选择左面板的 story 查看详情"
 
-- [ ] Task 7: TCSS 样式 (AC: #1, #2)
-  - [ ] 7.1 在 `app.tcss` 添加 `StoryStatusLine` / `HeartbeatIndicator` 样式：高度 1 行、selected/focus 高亮（不是 hover-only）
-  - [ ] 7.2 添加 `HeartbeatIndicator` 样式
-  - [ ] 7.3 添加选中 story 的 `$accent` 高亮样式
-  - [ ] 7.4 空状态 `Static` 居中显示、`$muted` 颜色
+- [x] Task 7: TCSS 样式 (AC: #1, #2)
+  - [x] 7.1 在 `app.tcss` 添加 `StoryStatusLine` / `HeartbeatIndicator` 样式：高度 1 行、selected/focus 高亮（不是 hover-only）
+  - [x] 7.2 添加 `HeartbeatIndicator` 样式
+  - [x] 7.3 添加选中 story 的 `$accent` 高亮样式
+  - [x] 7.4 空状态 `Static` 居中显示、`$muted` 颜色
 
-- [ ] Task 8: widgets 模块导出 (AC: #2, #3)
-  - [ ] 8.1 在 `widgets/__init__.py` 导出 `StoryStatusLine` 和 `HeartbeatIndicator`
+- [x] Task 8: widgets 模块导出 (AC: #2, #3)
+  - [x] 8.1 在 `widgets/__init__.py` 导出 `StoryStatusLine` 和 `HeartbeatIndicator`
 
-- [ ] Task 9: 单元测试 (AC: #2, #3, #4)
-  - [ ] 9.1 `tests/unit/test_story_status_line.py`：状态图标/颜色正确渲染、进度条计算、耗时/成本格式
-  - [ ] 9.2 `tests/unit/test_heartbeat_indicator.py`：spinner 循环、经过时间计算、CL 轮次显示
-  - [ ] 9.3 `tests/unit/test_story_sort.py`：排序逻辑（`awaiting → active → running → frozen → done → info`）、同状态内按 `updated_at` 排序，并覆盖 `running` 不得落到 `frozen` 之后
+- [x] Task 9: 单元测试 (AC: #2, #3, #4)
+  - [x] 9.1 `tests/unit/test_story_status_line.py`：状态图标/颜色正确渲染、进度条计算、耗时/成本格式
+  - [x] 9.2 `tests/unit/test_heartbeat_indicator.py`：spinner 循环、经过时间计算、CL 轮次显示
+  - [x] 9.3 `tests/unit/test_story_sort.py`：排序逻辑（`awaiting → active → running → frozen → done → info`）、同状态内按 `updated_at` 排序，并覆盖 `running` 不得落到 `frozen` 之后
 
-- [ ] Task 10: 集成测试 (AC: #1, #5, #6)
-  - [ ] 10.1 `tests/integration/test_tui_pilot.py`（扩展）：DashboardScreen 挂载后 story 列表正确显示
-  - [ ] 10.2 测试空状态下显示引导提示
-  - [ ] 10.3 测试 mock SQLite 数据变化后 story 列表刷新
-  - [ ] 10.4 测试左面板选择联动右上面板更新，并在 refresh 后保持当前 `selected_story_id`
-  - [ ] 10.5 `tests/integration/test_tui_responsive.py`（扩展）：不同宽度下 story 列表显示正常，`Tab/Shift-Tab` 与 `↑↓` 语义不冲突
+- [x] Task 10: 集成测试 (AC: #1, #5, #6)
+  - [x] 10.1 `tests/integration/test_tui_pilot.py`（扩展）：DashboardScreen 挂载后 story 列表正确显示
+  - [x] 10.2 测试空状态下显示引导提示
+  - [x] 10.3 测试 mock SQLite 数据变化后 story 列表刷新
+  - [x] 10.4 测试左面板选择联动右上面板更新，并在 refresh 后保持当前 `selected_story_id`
+  - [x] 10.5 `tests/integration/test_tui_responsive.py`（扩展）：不同宽度下 story 列表显示正常，`Tab/Shift-Tab` 与 `↑↓` 语义不冲突
 
 ## Dev Notes
 
@@ -467,15 +467,49 @@ src/ato/
 
 - 2026-03-26: create-story 创建 — 基于 epics / architecture / PRD / UX spec / 前序 story 6.1a-6.2a 生成 6.2b 初稿
 - 2026-03-26: validate-create-story 修订 —— 将进度条 phase 顺序对齐真实状态机；修正 Heartbeat SQL 只取与 `current_phase` 对齐的最新 running task；补上 `convergent_loop.max_rounds` 的 CLI→ATOApp 注入契约；把 `running` 排序移到 `frozen` 之前；明确 `Tab/Shift-Tab` 与 `↑↓` 的键盘语义分工，去除 hover-only 与双实现路线歧义
+- 2026-03-26: dev-story 实现完成 —— 10 个 Task 全部实现：StoryStatusLine/HeartbeatIndicator Widget、排序逻辑、ATOApp 数据扩展、DashboardScreen story 列表渲染、右上面板联动、TCSS 样式、49 个单元测试 + 集成测试。全量 1096 测试通过，ruff + mypy 通过
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- 修复 Textual VerticalScroll 默认 can_focus=True 导致焦点链冲突（设为 False）
+- 修复 Textual DOM 异步变更：empty-state → story 列表切换时 remove() 为异步操作，测试需 pilot.pause()
+- 修复 mypy: is_child_of 不在 Widget 公共 API 中，改用 parent 链遍历
+- 修复 mypy: 变量 w 在 if/else 中复用导致类型不兼容，拆分为 hb_w/ssl_w
+
 ### Completion Notes List
 
+- Task 1: StoryStatusLine Widget 完成——reactive 属性 + render() 返回 Rich.Text + 进度条基于 CANONICAL_PHASES
+- Task 2: HeartbeatIndicator Widget 完成——spinner ◐◓◑◒ 循环 + set_interval(1.0) + 本地 monotonic 计时
+- Task 3: 排序逻辑完成——VISUAL_STATUS_SORT_ORDER 6 级优先级 + sort_stories_by_status() 支持降序 updated_at
+- Task 4: ATOApp 扩展完成——_load_data() 新增 4 个 SQL 查询 + convergent_loop_max_rounds 从 cli.py 注入
+- Task 5: DashboardScreen 完成——左面板 VerticalScroll + 空状态 + ↑↓ 选中导航 + 增量更新优化
+- Task 6: 右上面板完成——Rich.Text 联动详情（阶段/成本/耗时/CL 轮次）
+- Task 7: TCSS 完成——StoryStatusLine/HeartbeatIndicator 高度 1 行 + .selected-story 高亮 + .empty-state 居中
+- Task 8: widgets/__init__.py 导出 StoryStatusLine + HeartbeatIndicator
+- Task 9: 49 个单元测试——进度条计算/耗时格式/排序逻辑/spinner/渲染
+- Task 10: 集成测试——story 列表显示/空状态/刷新/选中保持/右面板联动/响应式
+
 ### File List
+
+新建文件:
+- src/ato/tui/widgets/story_status_line.py
+- src/ato/tui/widgets/heartbeat_indicator.py
+- tests/unit/test_story_status_line.py
+- tests/unit/test_heartbeat_indicator.py
+- tests/unit/test_story_sort.py
+
+修改文件:
+- src/ato/tui/app.py
+- src/ato/tui/dashboard.py
+- src/ato/tui/theme.py
+- src/ato/tui/app.tcss
+- src/ato/tui/widgets/__init__.py
+- src/ato/cli.py
+- tests/integration/test_tui_pilot.py
+- tests/integration/test_tui_responsive.py

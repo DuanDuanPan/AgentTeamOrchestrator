@@ -49,11 +49,23 @@ class ATOApp(App[None]):
     # 响应式布局模式 (AC3)
     layout_mode: reactive[str] = reactive("three-panel")
 
-    def __init__(self, *, db_path: Path, orchestrator_pid: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        db_path: Path,
+        orchestrator_pid: int | None = None,
+        convergent_loop_max_rounds: int = 3,
+    ) -> None:
         super().__init__()
         self._db_path = db_path
         self._orchestrator_pid = orchestrator_pid
+        self._convergent_loop_max_rounds = convergent_loop_max_rounds
         self._last_refresh_time: float = time.monotonic()
+        # Story 列表数据快照（_load_data 填充）
+        self._stories: list[dict[str, object]] = []
+        self._story_costs: dict[str, float] = {}
+        self._story_started_at: dict[str, str] = {}
+        self._story_cl_rounds: dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         """骨架布局：Header + ThreeQuestionHeader + DashboardScreen + Footer。"""
@@ -177,6 +189,39 @@ class ATOApp(App[None]):
 
             # 4. 最后更新时间
             self.last_updated = datetime.now(tz=UTC).strftime("%H:%M:%S")
+
+            # 5. Story 列表完整记录（Story 6.2b）
+            cursor = await db.execute(
+                "SELECT story_id, title, status, current_phase, worktree_path, "
+                "created_at, updated_at FROM stories ORDER BY updated_at DESC"
+            )
+            story_rows = await cursor.fetchall()
+            self._stories = [dict(row) for row in story_rows]
+
+            # 6. 每个 story 的累计成本
+            cursor = await db.execute(
+                "SELECT story_id, COALESCE(SUM(cost_usd), 0.0) as total_cost "
+                "FROM cost_log GROUP BY story_id"
+            )
+            self._story_costs = {str(row[0]): float(row[1]) for row in await cursor.fetchall()}
+
+            # 7. 与 story.current_phase 对齐的最新 running task started_at
+            cursor = await db.execute(
+                "SELECT t.story_id, MAX(t.started_at) AS started_at "
+                "FROM tasks t "
+                "JOIN stories s ON s.story_id = t.story_id "
+                "WHERE t.status = 'running' "
+                "AND t.phase = s.current_phase "
+                "AND t.started_at IS NOT NULL "
+                "GROUP BY t.story_id"
+            )
+            self._story_started_at = {str(row[0]): str(row[1]) for row in await cursor.fetchall()}
+
+            # 8. CL 当前轮次
+            cursor = await db.execute(
+                "SELECT story_id, MAX(round_num) as current_round FROM findings GROUP BY story_id"
+            )
+            self._story_cl_rounds = {str(row[0]): int(row[1]) for row in await cursor.fetchall()}
         finally:
             await db.close()
 
@@ -195,6 +240,11 @@ class ATOApp(App[None]):
                 pending_approvals=self.pending_approvals,
                 today_cost_usd=self.today_cost_usd,
                 last_updated=self.last_updated,
+                stories=self._stories,
+                story_costs=self._story_costs,
+                story_started_at=self._story_started_at,
+                story_cl_rounds=self._story_cl_rounds,
+                convergent_loop_max_rounds=self._convergent_loop_max_rounds,
             )
         except NoMatches:
             pass  # DashboardScreen 尚未挂载
