@@ -216,6 +216,35 @@ async def _migrate_v5_to_v6(db: aiosqlite.Connection) -> None:
             await db.execute(f"ALTER TABLE approvals ADD COLUMN {col} TEXT")
 
 
+@_register(7)
+async def _migrate_v6_to_v7(db: aiosqlite.Connection) -> None:
+    """v6 → v7: 新增 merge_queue 和 merge_queue_state 表（Story 4.2）。"""
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS merge_queue (
+            id          INTEGER PRIMARY KEY,
+            story_id    TEXT NOT NULL UNIQUE,
+            approval_id TEXT NOT NULL,
+            approved_at TEXT NOT NULL,
+            enqueued_at TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'waiting',
+            regression_task_id TEXT,
+            pre_merge_head TEXT
+        )"""
+    )
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS merge_queue_state (
+            id                      INTEGER PRIMARY KEY CHECK (id = 1),
+            frozen                  INTEGER NOT NULL DEFAULT 0,
+            frozen_reason           TEXT,
+            frozen_at               TEXT,
+            current_merge_story_id  TEXT
+        )"""
+    )
+    await db.execute("INSERT OR IGNORE INTO merge_queue_state (id, frozen) VALUES (1, 0)")
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

@@ -260,3 +260,47 @@ class TestAtoApproveInvalidDecision:
                 await db.close()
 
         asyncio.run(_verify())
+
+
+# ---------------------------------------------------------------------------
+# Story 4.2 追加测试：新 approval 类型元数据
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalMetadataStory42:
+    """验证 Story 4.2 新增 approval 类型的 CLI 元数据。"""
+
+    def test_approval_summary_rebase_conflict(self) -> None:
+        from ato.cli import _approval_summary
+
+        summary = _approval_summary("rebase_conflict", None)
+        assert "Rebase" in summary
+
+    def test_regression_failure_default_options_align_story_4_2(self) -> None:
+        from ato.cli import _DEFAULT_VALID_OPTIONS
+
+        options = _DEFAULT_VALID_OPTIONS["regression_failure"]
+        assert "revert" in options
+        assert "fix_forward" in options
+        assert "pause" in options
+
+    def test_rebase_conflict_default_options(self) -> None:
+        from ato.cli import _DEFAULT_VALID_OPTIONS
+
+        options = _DEFAULT_VALID_OPTIONS["rebase_conflict"]
+        assert "manual_resolve" in options
+        assert "skip" in options
+        assert "abandon" in options
+
+    def test_precommit_failure_default_options(self) -> None:
+        from ato.cli import _DEFAULT_VALID_OPTIONS
+
+        options = _DEFAULT_VALID_OPTIONS["precommit_failure"]
+        assert "retry" in options
+        assert "manual_fix" in options
+        assert "skip" in options
+
+    def test_rebase_conflict_icon_exists(self) -> None:
+        from ato.cli import _APPROVAL_TYPE_ICONS
+
+        assert "rebase_conflict" in _APPROVAL_TYPE_ICONS

@@ -14,6 +14,7 @@ import structlog
 from structlog.contextvars import bind_contextvars
 
 from ato.config import ATOSettings
+from ato.merge_queue import MergeQueue, get_regression_recovery_story_id
 from ato.models.db import (
     get_connection,
     get_decided_unconsumed_approvals,
@@ -24,6 +25,7 @@ from ato.models.db import (
 from ato.models.schemas import ApprovalRecord, RecoveryResult, TaskRecord, TransitionEvent
 from ato.nudge import Nudge
 from ato.transition_queue import TransitionQueue
+from ato.worktree_mgr import WorktreeManager
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
@@ -244,6 +246,8 @@ class Orchestrator:
         self._pid_path = db_path.parent / "orchestrator.pid"
         self._background_tasks: list[asyncio.Task[None]] = []
         self._inflight_restart_dispatches: set[str] = set()
+        self._merge_queue: MergeQueue | None = None
+        self._worktree_mgr: WorktreeManager | None = None
 
     async def run(self) -> None:
         """主入口——启动 → 轮询 → 停止。
@@ -282,6 +286,20 @@ class Orchestrator:
         self._tq = TransitionQueue(self._db_path, nudge=self._nudge)
         await self._tq.start()
 
+        # 初始化 WorktreeManager 和 MergeQueue
+        project_root = self._db_path.parent.parent  # .ato/state.db → project_root
+        self._worktree_mgr = WorktreeManager(
+            project_root=project_root,
+            db_path=self._db_path,
+        )
+        self._merge_queue = MergeQueue(
+            db_path=self._db_path,
+            worktree_mgr=self._worktree_mgr,
+            transition_queue=self._tq,
+            settings=self._settings,
+        )
+        await self._merge_queue.recover_stale_lock()
+
         # 恢复检测
         db = await get_connection(self._db_path)
         try:
@@ -305,9 +323,7 @@ class Orchestrator:
             for bg in self._background_tasks:
                 bg.cancel()
             results = await asyncio.gather(*self._background_tasks, return_exceptions=True)
-            cancelled_count = sum(
-                1 for r in results if isinstance(r, asyncio.CancelledError)
-            )
+            cancelled_count = sum(1 for r in results if isinstance(r, asyncio.CancelledError))
             if cancelled_count:
                 logger.info(
                     "shutdown_background_tasks_cancelled",
@@ -438,6 +454,17 @@ class Orchestrator:
 
         # 审批消费
         await self._process_approval_decisions()
+
+        # 为 merging 阶段的 story 创建 merge_authorization approval（幂等）
+        await self._create_merge_authorizations()
+
+        # 驱动 merge queue（在 approval 消费之后）
+        if self._merge_queue is not None:
+            await self._merge_queue.process_next()
+
+        # 检测 regression 任务完成
+        if self._merge_queue is not None:
+            await self._merge_queue.check_regression_completion()
 
         # 调度待执行任务（由 approval restart/resume 产生的 pending tasks）
         await self._dispatch_pending_tasks()
@@ -651,9 +678,7 @@ class Orchestrator:
                     task_id=task.task_id,
                     story_id=task.story_id,
                 )
-                await self._mark_dispatch_failed(
-                    task, error_message="dispatch_failed:no_worktree"
-                )
+                await self._mark_dispatch_failed(task, error_message="dispatch_failed:no_worktree")
                 return
 
             base_commit = await self._get_base_commit(Path(worktree_path))
@@ -754,9 +779,7 @@ class Orchestrator:
             engine = RecoveryEngine(
                 db_path=self._db_path,
                 subprocess_mgr=None,
-                transition_queue=self._tq
-                if self._tq is not None
-                else self._create_tq_stub(),
+                transition_queue=self._tq if self._tq is not None else self._create_tq_stub(),
                 nudge=self._nudge,
                 interactive_phases=interactive_phases,
                 convergent_loop_phases=convergent_loop_phases,
@@ -832,9 +855,7 @@ class Orchestrator:
                 f"Please perform the work for this phase.{story_ctx}"
             )
 
-            options: dict[str, object] | None = (
-                {"cwd": worktree_path} if worktree_path else None
-            )
+            options: dict[str, object] | None = {"cwd": worktree_path} if worktree_path else None
 
             result = await mgr.dispatch_with_retry(
                 story_id=task.story_id,
@@ -883,13 +904,86 @@ class Orchestrator:
     async def _get_base_commit(worktree_path: Path) -> str:
         """读取 worktree 的 HEAD commit hash。"""
         proc = await asyncio.create_subprocess_exec(
-            "git", "rev-parse", "HEAD",
+            "git",
+            "rev-parse",
+            "HEAD",
             cwd=str(worktree_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await proc.communicate()
         return stdout.decode().strip() or "HEAD"
+
+    async def _create_merge_authorizations(self) -> None:
+        """为处于 merging 阶段的 story 创建 merge_authorization approval。
+
+        幂等：已有 pending/decided 未消费 approval 或 merge queue entry 时跳过。
+        """
+        from ato.approval_helpers import create_approval
+        from ato.models.db import (
+            get_merge_queue_entry,
+            get_merge_queue_state,
+            get_pending_approvals,
+        )
+
+        db = await get_connection(self._db_path)
+        try:
+            # 查找处于 merging 阶段的 stories
+            cursor = await db.execute(
+                "SELECT story_id FROM stories WHERE current_phase = 'merging'"
+            )
+            merging_stories = [row[0] for row in await cursor.fetchall()]
+            if not merging_stories:
+                return
+
+            queue_state = await get_merge_queue_state(db)
+            recovery_story_id = get_regression_recovery_story_id(
+                queue_state.frozen_reason if queue_state.frozen else None
+            )
+
+            # 收集已有 pending merge_authorization 的 story_id
+            pending = await get_pending_approvals(db)
+            stories_with_pending_auth = {
+                a.story_id for a in pending if a.approval_type == "merge_authorization"
+            }
+
+            # 收集已有 decided 但未消费的 merge_authorization
+            decided = await get_decided_unconsumed_approvals(db)
+            stories_with_decided_auth = {
+                a.story_id for a in decided if a.approval_type == "merge_authorization"
+            }
+
+            for story_id in merging_stories:
+                if queue_state.frozen and story_id != recovery_story_id:
+                    logger.info(
+                        "merge_authorization_skipped_frozen",
+                        story_id=story_id,
+                        recovery_story_id=recovery_story_id,
+                    )
+                    continue
+                # 跳过已有 approval 的
+                if story_id in stories_with_pending_auth:
+                    continue
+                if story_id in stories_with_decided_auth:
+                    continue
+                # 跳过已在 merge queue 中的
+                entry = await get_merge_queue_entry(db, story_id)
+                if entry is not None:
+                    continue
+
+                await create_approval(
+                    db,
+                    story_id=story_id,
+                    approval_type="merge_authorization",
+                    payload_dict={"options": ["approve", "reject"]},
+                    nudge=self._nudge,
+                )
+                logger.info(
+                    "merge_authorization_created",
+                    story_id=story_id,
+                )
+        finally:
+            await db.close()
 
     async def _handle_approval_decision(self, approval: ApprovalRecord) -> bool:
         """根据 approval_type + decision 映射处理动作。
@@ -958,24 +1052,200 @@ class Orchestrator:
             return False
 
         if atype == "merge_authorization":
-            logger.info(
-                "approval_merge_authorization",
+            if decision == "approve":
+                if self._merge_queue is not None and approval.decided_at is not None:
+                    await self._merge_queue.enqueue(
+                        approval.story_id,
+                        approval.approval_id,
+                        approval.decided_at,
+                    )
+                    logger.info(
+                        "merge_authorization_consumed",
+                        approval_id=approval.approval_id,
+                        story_id=approval.story_id,
+                    )
+                return True
+            if decision == "reject":
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            logger.warning(
+                "approval_unrecognized_decision",
                 approval_id=approval.approval_id,
-                story_id=approval.story_id,
+                approval_type=atype,
                 decision=decision,
-                note="Story 4.2 范围，此处仅 log",
             )
-            return True
+            return False
 
         if atype == "regression_failure":
-            logger.info(
-                "approval_regression_failure",
+            if decision == "revert":
+                # 安全 revert merge 引入的所有 commit（additive，不丢历史）
+                if self._worktree_mgr is not None:
+                    from ato.models.db import get_merge_queue_entry
+
+                    db = await get_connection(self._db_path)
+                    try:
+                        entry = await get_merge_queue_entry(db, approval.story_id)
+                    finally:
+                        await db.close()
+
+                    if entry and entry.pre_merge_head:
+                        success, stderr = await self._worktree_mgr.revert_merge_range(
+                            entry.pre_merge_head
+                        )
+                    else:
+                        logger.error(
+                            "regression_revert_no_pre_merge_head",
+                            story_id=approval.story_id,
+                            note="No pre_merge_head recorded, cannot safely revert",
+                        )
+                        success, stderr = False, "No pre_merge_head recorded"
+                    if not success:
+                        logger.error(
+                            "regression_revert_failed",
+                            story_id=approval.story_id,
+                            stderr=stderr,
+                        )
+                        return False
+                if self._merge_queue is not None:
+                    from ato.models.db import complete_merge
+
+                    db = await get_connection(self._db_path)
+                    try:
+                        await complete_merge(db, approval.story_id, success=False)
+                    finally:
+                        await db.close()
+                    await self._merge_queue.unfreeze("revert completed")
+                if self._worktree_mgr is not None:
+                    await self._worktree_mgr.cleanup(approval.story_id)
+                return True
+            if decision == "fix_forward":
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="regression_fail",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                db = await get_connection(self._db_path)
+                try:
+                    from ato.models.db import remove_from_merge_queue, set_current_merge_story
+
+                    await remove_from_merge_queue(db, approval.story_id)
+                    await set_current_merge_story(db, None)
+                finally:
+                    await db.close()
+                # queue 保持冻结——main 仍处于 regression-failed 状态
+                # 仅 recovery story 可在冻结期间重新 merge，成功通过 regression 后再解冻
+                return True
+            if decision == "pause":
+                logger.info(
+                    "regression_failure_pause",
+                    story_id=approval.story_id,
+                    note="Queue remains frozen, operator chose to pause",
+                )
+                return True
+            logger.warning(
+                "approval_unrecognized_decision",
                 approval_id=approval.approval_id,
-                story_id=approval.story_id,
+                approval_type=atype,
                 decision=decision,
-                note="Story 4.5 范围，此处仅 log",
             )
-            return True
+            return False
+
+        if atype == "rebase_conflict":
+            if decision == "manual_resolve":
+                # 操作者将在 worktree 中手动解决冲突
+                # 从 merge queue 移除，保留 worktree；story 不 escalate
+                if self._merge_queue is not None:
+                    from ato.models.db import (
+                        remove_from_merge_queue,
+                        set_current_merge_story,
+                    )
+
+                    db = await get_connection(self._db_path)
+                    try:
+                        await remove_from_merge_queue(db, approval.story_id)
+                        await set_current_merge_story(db, None)
+                    finally:
+                        await db.close()
+                logger.info(
+                    "rebase_conflict_manual_resolve",
+                    story_id=approval.story_id,
+                    note="Operator will resolve conflict manually in worktree",
+                )
+                return True
+            if decision == "skip":
+                if self._merge_queue is not None:
+                    from ato.models.db import remove_from_merge_queue, set_current_merge_story
+
+                    db = await get_connection(self._db_path)
+                    try:
+                        await remove_from_merge_queue(db, approval.story_id)
+                        await set_current_merge_story(db, None)
+                    finally:
+                        await db.close()
+                return True
+            if decision == "abandon":
+                if self._merge_queue is not None:
+                    from ato.models.db import remove_from_merge_queue, set_current_merge_story
+
+                    db = await get_connection(self._db_path)
+                    try:
+                        await remove_from_merge_queue(db, approval.story_id)
+                        await set_current_merge_story(db, None)
+                    finally:
+                        await db.close()
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            logger.warning(
+                "approval_unrecognized_decision",
+                approval_id=approval.approval_id,
+                approval_type=atype,
+                decision=decision,
+            )
+            return False
+
+        if atype == "precommit_failure":
+            if decision == "retry":
+                # Re-enqueue for another merge attempt
+                logger.info(
+                    "precommit_failure_retry",
+                    story_id=approval.story_id,
+                )
+                return True
+            if decision == "manual_fix":
+                return await self._reschedule_interactive_task(approval, mode="restart")
+            if decision == "skip":
+                logger.info(
+                    "precommit_failure_skip",
+                    story_id=approval.story_id,
+                )
+                return True
+            logger.warning(
+                "approval_unrecognized_decision",
+                approval_id=approval.approval_id,
+                approval_type=atype,
+                decision=decision,
+            )
+            return False
 
         if atype in ("needs_human_review", "convergent_loop_escalation"):
             if decision == "retry":

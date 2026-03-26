@@ -1186,6 +1186,7 @@ _APPROVAL_TYPE_ICONS: dict[str, str] = {
     "batch_confirmation": "📦",
     "timeout": "⏳",
     "precommit_failure": "🔧",
+    "rebase_conflict": "⚡",
     "needs_human_review": "👁",
 }
 
@@ -1208,6 +1209,7 @@ def _approval_summary(approval_type: str, payload: str | None) -> str:
         "batch_confirmation": "Batch 确认",
         "timeout": "任务超时",
         "precommit_failure": "Pre-commit 检查失败",
+        "rebase_conflict": "Rebase 冲突需处理",
         "needs_human_review": "需要人工审阅",
     }
     summary = templates.get(approval_type, approval_type)
@@ -1322,11 +1324,12 @@ _DEFAULT_VALID_OPTIONS: dict[str, list[str]] = {
     "crash_recovery": ["restart", "resume", "abandon"],
     "blocking_abnormal": ["confirm_fix", "human_review"],
     "budget_exceeded": ["increase_budget", "reject"],
-    "regression_failure": ["fix_forward", "reject"],
+    "regression_failure": ["revert", "fix_forward", "pause"],
     "timeout": ["continue_waiting", "abandon"],
     "convergent_loop_escalation": ["retry", "skip", "escalate"],
     "batch_confirmation": ["confirm", "reject"],
-    "precommit_failure": ["retry", "skip"],
+    "precommit_failure": ["retry", "manual_fix", "skip"],
+    "rebase_conflict": ["manual_resolve", "skip", "abandon"],
     "needs_human_review": ["retry", "skip", "escalate"],
 }
 

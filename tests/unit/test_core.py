@@ -1130,3 +1130,331 @@ class TestConvergentRestartSingleApproval:
             )
         finally:
             await db2.close()
+
+
+# ---------------------------------------------------------------------------
+# Story 4.2 — Merge Queue 集成测试
+# ---------------------------------------------------------------------------
+
+
+class TestMergeAuthorizationCreation:
+    """merging 阶段 merge_authorization approval 创建测试。"""
+
+    async def test_merging_phase_creates_merge_authorization_once(
+        self, initialized_db_path: Path
+    ) -> None:
+        """进入 merging 时创建 approval，且幂等不重复创建。"""
+        from ato.models.db import (
+            get_connection,
+            get_pending_approvals,
+            insert_story,
+        )
+        from ato.models.schemas import StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s1",
+                    title="Test story",
+                    status="in_progress",
+                    current_phase="merging",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = MagicMock()
+        orchestrator._nudge = MagicMock()
+
+        # First call should create the approval
+        await orchestrator._create_merge_authorizations()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            merge_auths = [a for a in pending if a.approval_type == "merge_authorization"]
+            assert len(merge_auths) == 1
+        finally:
+            await db.close()
+
+        # Second call should NOT create a duplicate
+        await orchestrator._create_merge_authorizations()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            merge_auths = [a for a in pending if a.approval_type == "merge_authorization"]
+            assert len(merge_auths) == 1  # still just 1
+        finally:
+            await db.close()
+
+    async def test_frozen_queue_only_authorizes_recovery_story(
+        self, initialized_db_path: Path
+    ) -> None:
+        """冻结期间只允许触发冻结的 recovery story 重新拿 merge_authorization。"""
+        from ato.models.db import (
+            get_connection,
+            get_pending_approvals,
+            insert_story,
+            set_merge_queue_frozen,
+        )
+        from ato.models.schemas import StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            for story_id in ("s1", "s2"):
+                await insert_story(
+                    db,
+                    StoryRecord(
+                        story_id=story_id,
+                        title=f"Test story {story_id}",
+                        status="in_progress",
+                        current_phase="merging",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                )
+            await set_merge_queue_frozen(
+                db,
+                frozen=True,
+                reason="regression failed for s1",
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = MagicMock()
+        orchestrator._nudge = MagicMock()
+
+        with patch("ato.core.logger") as mock_logger:
+            await orchestrator._create_merge_authorizations()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            merge_auths = [a for a in pending if a.approval_type == "merge_authorization"]
+            assert len(merge_auths) == 1
+            assert merge_auths[0].story_id == "s1"
+        finally:
+            await db.close()
+
+        mock_logger.info.assert_any_call(
+            "merge_authorization_skipped_frozen",
+            story_id="s2",
+            recovery_story_id="s1",
+        )
+
+
+class TestMergeAuthorizationConsumption:
+    """merge_authorization 消费测试。"""
+
+    async def test_approve_enqueues(self, initialized_db_path: Path) -> None:
+        """approve 决策调用 merge_queue.enqueue()。"""
+        from ato.models.schemas import ApprovalRecord
+
+        now = datetime.now(tz=UTC)
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._tq = AsyncMock()
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="merge_authorization",
+            status="approved",
+            decision="approve",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+        orchestrator._merge_queue.enqueue.assert_awaited_once_with("s1", "appr-1", now)
+
+    async def test_reject_escalates(self, initialized_db_path: Path) -> None:
+        """reject 决策提交 escalate transition。"""
+        from ato.models.schemas import ApprovalRecord
+
+        now = datetime.now(tz=UTC)
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._tq = AsyncMock()
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="merge_authorization",
+            status="rejected",
+            decision="reject",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+        orchestrator._tq.submit.assert_awaited_once()
+        event = orchestrator._tq.submit.call_args[0][0]
+        assert event.event_name == "escalate"
+
+    async def test_regression_failure_fix_forward(
+        self, initialized_db_path: Path
+    ) -> None:
+        """fix_forward 提交 regression_fail transition，清理旧 row 且 queue 保持冻结。"""
+        from ato.models.db import (
+            enqueue_merge,
+            get_connection,
+            get_merge_queue_entry,
+            insert_story,
+            set_merge_queue_frozen,
+        )
+        from ato.models.schemas import ApprovalRecord, StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s1",
+                    title="Test story",
+                    status="in_progress",
+                    current_phase="regression",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await enqueue_merge(db, "s1", "merge-appr-1", now, now)
+            await db.execute(
+                "UPDATE merge_queue SET status = 'regression_pending' WHERE story_id = ?",
+                ("s1",),
+            )
+            await db.commit()
+            await set_merge_queue_frozen(
+                db,
+                frozen=True,
+                reason="crash during regression for s1",
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._tq = AsyncMock()
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="regression_failure",
+            status="approved",
+            decision="fix_forward",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+        orchestrator._tq.submit.assert_awaited_once()
+        event = orchestrator._tq.submit.call_args[0][0]
+        assert event.event_name == "regression_fail"
+
+        db = await get_connection(initialized_db_path)
+        try:
+            entry = await get_merge_queue_entry(db, "s1")
+            cursor = await db.execute(
+                "SELECT frozen FROM merge_queue_state WHERE id = 1",
+            )
+            frozen_row = await cursor.fetchone()
+            assert entry is None
+            assert frozen_row is not None
+            assert frozen_row[0] == 1
+        finally:
+            await db.close()
+
+        orchestrator._merge_queue.unfreeze.assert_not_awaited()
+
+    async def test_regression_failure_revert_failure_keeps_queue_frozen(
+        self, initialized_db_path: Path
+    ) -> None:
+        """revert 失败时不得解冻 queue，也不得清理 worktree。"""
+        from ato.models.db import (
+            enqueue_merge,
+            get_connection,
+            insert_story,
+            set_merge_queue_frozen,
+        )
+        from ato.models.schemas import ApprovalRecord, StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s1",
+                    title="Test story",
+                    status="in_progress",
+                    current_phase="regression",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await enqueue_merge(db, "s1", "merge-appr-1", now, now)
+            await db.execute(
+                "UPDATE merge_queue SET status = 'failed', pre_merge_head = ? WHERE story_id = ?",
+                ("abc123", "s1"),
+            )
+            await db.commit()
+            await set_merge_queue_frozen(
+                db,
+                frozen=True,
+                reason="regression failed for s1",
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._worktree_mgr = AsyncMock()
+        orchestrator._worktree_mgr.revert_merge_range = AsyncMock(
+            return_value=(False, "revert conflict"),
+        )
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="regression_failure",
+            status="approved",
+            decision="revert",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+
+        assert result is False
+        orchestrator._merge_queue.unfreeze.assert_not_awaited()
+        orchestrator._worktree_mgr.cleanup.assert_not_awaited()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT frozen FROM merge_queue_state WHERE id = 1",
+            )
+            frozen_row = await cursor.fetchone()
+            assert frozen_row is not None
+            assert frozen_row[0] == 1
+        finally:
+            await db.close()
