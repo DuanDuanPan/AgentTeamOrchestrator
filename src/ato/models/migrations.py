@@ -201,6 +201,21 @@ async def _migrate_v4_to_v5(db: aiosqlite.Connection) -> None:
     await db.execute("CREATE INDEX IF NOT EXISTS idx_findings_dedup ON findings(dedup_hash)")
 
 
+async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
+    """检查 SQLite 表中是否存在指定列。"""
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    return any(row[1] == column for row in rows)
+
+
+@_register(6)
+async def _migrate_v5_to_v6(db: aiosqlite.Connection) -> None:
+    """v5 → v6: approvals 表新增 4 列（Story 4.1）。"""
+    for col in ("recommended_action", "risk_level", "decision_reason", "consumed_at"):
+        if not await _column_exists(db, "approvals", col):
+            await db.execute(f"ALTER TABLE approvals ADD COLUMN {col} TEXT")
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

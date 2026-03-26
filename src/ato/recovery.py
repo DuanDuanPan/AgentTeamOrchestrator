@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import json
 import os
 import time
 import uuid
@@ -437,11 +436,74 @@ class RecoveryEngine:
         finally:
             await db.close()
 
-    async def _dispatch_convergent_loop(self, task: TaskRecord) -> None:
+    async def _dispatch_reviewing_convergent_loop(
+        self,
+        task: TaskRecord,
+        *,
+        worktree_path: str,
+        max_concurrent: int,
+    ) -> None:
+        """reviewing phase 恢复要区分 full review 与 scoped re-review。"""
+        from ato.adapters.bmad_adapter import BmadAdapter
+        from ato.config import ConvergentLoopConfig
+        from ato.convergent_loop import ConvergentLoop
+        from ato.models.db import get_connection, get_open_findings
+
+        db = await get_connection(self._db_path)
+        try:
+            previous_findings = await get_open_findings(db, task.story_id)
+        finally:
+            await db.close()
+
+        adapter = _create_adapter("codex")
+        mgr = SubprocessManager(
+            max_concurrent=max_concurrent,
+            adapter=adapter,
+            db_path=self._db_path,
+        )
+        bmad = BmadAdapter()
+        loop = ConvergentLoop(
+            db_path=self._db_path,
+            subprocess_mgr=mgr,
+            bmad_adapter=bmad,
+            transition_queue=self._transition_queue,
+            config=self._settings.convergent_loop
+            if self._settings is not None
+            else ConvergentLoopConfig(),
+            blocking_threshold=(
+                self._settings.cost.blocking_threshold if self._settings is not None else 10
+            ),
+            nudge=self._nudge,
+        )
+
+        if previous_findings:
+            round_num = max(f.round_num for f in previous_findings) + 1
+            await loop.run_rereview(
+                task.story_id,
+                round_num,
+                worktree_path=worktree_path,
+                task_id=task.task_id,
+                is_retry=True,
+            )
+            return
+
+        await loop.run_first_review(
+            task.story_id,
+            worktree_path,
+            task_id=task.task_id,
+            is_retry=True,
+        )
+
+    async def _dispatch_convergent_loop(self, task: TaskRecord) -> bool:
         """Phase-aware convergent loop dispatch：按 phase 使用正确的 role/event/skill。
 
-        不调用 ConvergentLoop.run_first_review()（硬编码 reviewing 语义）。
-        自行构建完整流程：dispatch CLI → BMAD parse → findings 入库 → 评估 → transition。
+        reviewing 需要额外保留 re-review scope/round 语义；
+        其他 convergent_loop phase 仍走 phase-aware recovery 管道。
+
+        Returns:
+            True 表示实际执行了 dispatch（或已内部处理 parse failure 等），
+            False 表示前置条件不满足或异常——已内部 escalate（_mark_dispatch_failed），
+            caller 不应重复 escalate。
         """
         try:
             from ato.adapters.bmad_adapter import BmadAdapter, record_parse_failure
@@ -469,7 +531,8 @@ class RecoveryEngine:
                     task_id=task.task_id,
                     phase=task.phase,
                 )
-                return
+                await self._mark_dispatch_failed(task)
+                return False
 
             # 解析 worktree path
             if worktree_path is None:
@@ -488,7 +551,16 @@ class RecoveryEngine:
                     task_id=task.task_id,
                     story_id=task.story_id,
                 )
-                return
+                await self._mark_dispatch_failed(task)
+                return False
+
+            if task.phase == "reviewing":
+                await self._dispatch_reviewing_convergent_loop(
+                    task,
+                    worktree_path=worktree_path,
+                    max_concurrent=max_concurrent,
+                )
+                return True
 
             # Dispatch CLI（使用 task 的原始 role 和 cli_tool）
             cli_tool = phase_cfg.get("cli_tool", task.cli_tool)
@@ -542,6 +614,7 @@ class RecoveryEngine:
                         story_id=task.story_id,
                         skill_type=skill_type,
                         db=db,
+                        task_id=task.task_id,
                         notifier=self._nudge.notify if self._nudge else None,
                     )
                 finally:
@@ -551,7 +624,7 @@ class RecoveryEngine:
                     task_id=task.task_id,
                     phase=task.phase,
                 )
-                return
+                return True  # dispatch 已执行，parse 失败已记录
 
             # Findings → DB
             now = datetime.now(tz=UTC)
@@ -614,6 +687,7 @@ class RecoveryEngine:
                 blocking_count=blocking_count,
                 transition_event=event_name,
             )
+            return True
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -623,6 +697,7 @@ class RecoveryEngine:
                 story_id=task.story_id,
             )
             await self._mark_dispatch_failed(task)
+            return False
 
     async def _dispatch_structured_job(self, task: TaskRecord) -> None:
         """后台 dispatch structured_job：遵守 config 的 model/timeout/sandbox/并发。"""
@@ -718,10 +793,9 @@ class RecoveryEngine:
 
     async def _mark_needs_human(self, task: TaskRecord) -> None:
         """原子标记 task=failed + 创建 approval（SAVEPOINT 保证全有或全无）。"""
-        from ato.models.db import _dt_to_iso, get_connection
-
-        now = datetime.now(tz=UTC)
-        approval_id = str(uuid.uuid4())
+        from ato.approval_helpers import create_approval
+        from ato.models.db import get_connection
+        from ato.nudge import send_user_notification
 
         db = await get_connection(self._db_path)
         try:
@@ -731,28 +805,16 @@ class RecoveryEngine:
                     "UPDATE tasks SET status = ?, error_message = ? WHERE task_id = ?",
                     ("failed", "crash_recovery:needs_human", task.task_id),
                 )
-                await db.execute(
-                    "INSERT INTO approvals "
-                    "(approval_id, story_id, approval_type, status, payload, "
-                    "decision, decided_at, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        approval_id,
-                        task.story_id,
-                        "crash_recovery",
-                        "pending",
-                        json.dumps(
-                            {
-                                "task_id": task.task_id,
-                                "phase": task.phase,
-                                "options": ["restart", "resume", "abandon"],
-                                "recommended_action": "restart",
-                            }
-                        ),
-                        None,
-                        None,
-                        _dt_to_iso(now),
-                    ),
+                await create_approval(
+                    db,
+                    story_id=task.story_id,
+                    approval_type="crash_recovery",
+                    payload_dict={
+                        "task_id": task.task_id,
+                        "phase": task.phase,
+                        "options": ["restart", "resume", "abandon"],
+                    },
+                    commit=False,
                 )
                 await db.execute("RELEASE SAVEPOINT needs_human")
             except BaseException:
@@ -763,8 +825,13 @@ class RecoveryEngine:
         finally:
             await db.close()
 
+        # commit 后再发 nudge / bell（create_approval commit=False 时已抑制）
+        from ato.models.schemas import APPROVAL_TYPE_TO_NOTIFICATION
+
         if self._nudge is not None:
             self._nudge.notify()
+        level = APPROVAL_TYPE_TO_NOTIFICATION.get("crash_recovery", "normal")
+        send_user_notification(level, f"新审批: crash_recovery (story: {task.story_id})")
 
         logger.info(
             "recovery_action_needs_human",

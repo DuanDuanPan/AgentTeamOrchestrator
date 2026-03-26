@@ -349,3 +349,784 @@ async def _insert_test_task(
         await insert_task(db, task)
     finally:
         await db.close()
+
+
+async def _insert_test_approval(
+    db_path: Path,
+    *,
+    approval_id: str = "aaaa1111-2222-3333-4444-555566667777",
+    story_id: str = "test-story-1",
+    approval_type: str = "session_timeout",
+    status: str = "approved",
+    decision: str = "restart",
+) -> None:
+    """插入一条已决策的 approval（先确保对应 story 存在）。"""
+    from ato.models.db import get_connection, insert_approval, insert_story
+    from ato.models.schemas import ApprovalRecord, StoryRecord
+
+    now = datetime.now(tz=UTC)
+    db = await get_connection(db_path)
+    try:
+        existing = await db.execute("SELECT 1 FROM stories WHERE story_id = ?", (story_id,))
+        if await existing.fetchone() is None:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id=story_id,
+                    title="Test Story",
+                    status="in_progress",
+                    current_phase="developing",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+
+        await insert_approval(
+            db,
+            ApprovalRecord(
+                approval_id=approval_id,
+                story_id=story_id,
+                approval_type=approval_type,
+                status=status,
+                decision=decision,
+                decided_at=now,
+                created_at=now,
+                payload='{"task_id": "t1"}',
+            ),
+        )
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator 审批消费测试 (Story 4.1)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessApprovalDecisions:
+    async def test_session_timeout_restart(self, initialized_db_path: Path) -> None:
+        """超时审批消费 — restart 决策应重置 task 为 pending。"""
+        # 插入关联 task（failed 状态，对应 payload 中的 task_id）
+        await _insert_test_task(
+            initialized_db_path, status="failed", task_id="t1", story_id="test-story-1"
+        )
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_type="session_timeout",
+            decision="restart",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            # 验证 consumed
+            remaining = await get_decided_unconsumed_approvals(db)
+            assert len(remaining) == 0
+
+            # 验证 task 被重置为 pending
+            cursor = await db.execute("SELECT status FROM tasks WHERE task_id = ?", ("t1",))
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "pending"
+        finally:
+            await db.close()
+
+    async def test_crash_recovery_resume(self, initialized_db_path: Path) -> None:
+        """crash_recovery + resume 应标记 task 为 pending + resume_requested。"""
+        await _insert_test_task(
+            initialized_db_path, status="failed", task_id="t1", story_id="test-story-1"
+        )
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="bbbb2222-0000-0000-0000-000000000000",
+            approval_type="crash_recovery",
+            decision="resume",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db)
+            assert len(remaining) == 0
+
+            # 验证 task 为 pending + resume 标记
+            cursor = await db.execute(
+                "SELECT status, expected_artifact FROM tasks WHERE task_id = ?", ("t1",)
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "pending"
+            assert row[1] == "resume_requested"
+        finally:
+            await db.close()
+
+    async def test_blocking_abnormal_consumed(self, initialized_db_path: Path) -> None:
+        """blocking 审批消费。"""
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="cccc3333-0000-0000-0000-000000000000",
+            approval_type="blocking_abnormal",
+            decision="confirm_fix",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        # 需要 TQ 才能 submit transition
+        orchestrator._tq = AsyncMock()
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db)
+            assert len(remaining) == 0
+        finally:
+            await db.close()
+
+        # 验证 TQ 收到了 transition event
+        orchestrator._tq.submit.assert_awaited_once()
+
+    async def test_approval_non_blocking_other_stories(self, initialized_db_path: Path) -> None:
+        """审批等待不阻塞其他 story。
+
+        验证：pending approval 属于 story-A，同时 story-B 的 task 不受影响。
+        """
+        # 插入两个 story
+        from ato.models.db import get_connection, insert_story
+        from ato.models.schemas import StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            for sid in ("story-a", "story-b"):
+                existing = await db.execute("SELECT 1 FROM stories WHERE story_id = ?", (sid,))
+                if await existing.fetchone() is None:
+                    await insert_story(
+                        db,
+                        StoryRecord(
+                            story_id=sid,
+                            title=f"Test {sid}",
+                            status="in_progress",
+                            current_phase="developing",
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                    )
+        finally:
+            await db.close()
+
+        # story-a 有 pending approval
+        from ato.models.db import get_connection as gc2
+        from ato.models.db import insert_approval
+        from ato.models.schemas import ApprovalRecord
+
+        db2 = await gc2(initialized_db_path)
+        try:
+            await insert_approval(
+                db2,
+                ApprovalRecord(
+                    approval_id="dddd4444-0000-0000-0000-000000000001",
+                    story_id="story-a",
+                    approval_type="session_timeout",
+                    status="pending",
+                    created_at=now,
+                ),
+            )
+        finally:
+            await db2.close()
+
+        # _process_approval_decisions 不会阻塞 — story-b 不受影响
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()  # 无异常 = 非阻塞
+
+    async def test_needs_human_review_retry(self, initialized_db_path: Path) -> None:
+        """needs_human_review + retry 应重调度 task。"""
+        await _insert_test_task(
+            initialized_db_path, status="failed", task_id="t1", story_id="test-story-1"
+        )
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="ffff6666-0000-0000-0000-000000000000",
+            approval_type="needs_human_review",
+            decision="retry",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db)
+            assert len(remaining) == 0
+
+            cursor = await db.execute("SELECT status FROM tasks WHERE task_id = ?", ("t1",))
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "pending"
+        finally:
+            await db.close()
+
+    async def test_needs_human_review_escalate(self, initialized_db_path: Path) -> None:
+        """needs_human_review + escalate 应触发 escalate transition。"""
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="gggg7777-0000-0000-0000-000000000000",
+            approval_type="needs_human_review",
+            decision="escalate",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db)
+            assert len(remaining) == 0
+        finally:
+            await db.close()
+
+        orchestrator._tq.submit.assert_awaited_once()
+
+    async def test_unrecognized_decision_not_consumed(self, initialized_db_path: Path) -> None:
+        """无法识别的 decision 不会被消费（留待人工检查）。"""
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="eeee5555-0000-0000-0000-000000000000",
+            approval_type="session_timeout",
+            decision="foo_invalid",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db)
+            # 无效 decision 不应被消费
+            assert len(remaining) == 1
+            assert remaining[0].decision == "foo_invalid"
+        finally:
+            await db.close()
+
+    async def test_restart_then_poll_dispatches_interactive_task(
+        self, initialized_db_path: Path
+    ) -> None:
+        """端到端：approval restart → task pending → dispatch_interactive 被调用。
+
+        验证调度链完整性：approval 消费后 task 变为 pending(restart_requested)，
+        _dispatch_pending_tasks() 识别为 interactive phase 并调用
+        _dispatch_interactive_restart()。
+        """
+        from ato.config import PhaseDefinition
+
+        # 插入 failed task (developing = interactive phase) + decided restart approval
+        await _insert_test_task(
+            initialized_db_path, status="failed", task_id="t1", story_id="test-story-1"
+        )
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_type="session_timeout",
+            decision="restart",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+
+        # Step 1: 消费 approval → task 变为 pending + restart_requested
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, expected_artifact FROM tasks WHERE task_id = ?", ("t1",)
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "pending"
+            assert row[1] == "restart_requested"
+        finally:
+            await db.close()
+
+        # Step 2: dispatch pending → _dispatch_interactive_restart 被调用
+        # mock build_phase_definitions 使 developing 被识别为 interactive
+        mock_phase_defs = [
+            PhaseDefinition(
+                name="developing",
+                role="developer",
+                cli_tool="claude",
+                model="opus",
+                sandbox=None,
+                phase_type="interactive_session",
+                next_on_success="reviewing",
+                next_on_failure=None,
+                timeout_seconds=7200,
+            ),
+        ]
+        with (
+            patch("ato.config.build_phase_definitions", return_value=mock_phase_defs),
+            patch.object(
+                orchestrator,
+                "_dispatch_interactive_restart",
+                new_callable=AsyncMock,
+            ) as mock_dispatch,
+        ):
+            await orchestrator._dispatch_pending_tasks()
+            # 等待 background task
+            await asyncio.sleep(0.05)
+
+            mock_dispatch.assert_called_once()
+            call_args = mock_dispatch.call_args
+            dispatched_task = call_args[0][0]  # positional arg
+            assert dispatched_task.task_id == "t1"
+            assert call_args[1]["resume"] is False  # keyword arg
+
+    async def test_restart_convergent_loop_task_uses_convergent_dispatch(
+        self, initialized_db_path: Path
+    ) -> None:
+        """convergent_loop phase 的 retry 走 _dispatch_convergent_restart()，
+        确保经过 BMAD parse/findings/convergence 管道，不会直接发 review_pass。
+        """
+        from ato.config import PhaseDefinition
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t1",
+            story_id="test-story-1",
+        )
+        from ato.models.db import get_connection, update_task_status
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await update_task_status(
+                db,
+                "t1",
+                "pending",
+                expected_artifact="restart_requested",
+            )
+            await db.execute("UPDATE tasks SET phase = 'reviewing' WHERE task_id = 't1'")
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+
+        mock_phase_defs = [
+            PhaseDefinition(
+                name="reviewing",
+                role="reviewer",
+                cli_tool="codex",
+                model="opus",
+                sandbox="read-only",
+                phase_type="convergent_loop",
+                next_on_success="fixing",
+                next_on_failure=None,
+                timeout_seconds=1800,
+            ),
+        ]
+        with (
+            patch("ato.config.build_phase_definitions", return_value=mock_phase_defs),
+            patch.object(
+                orchestrator,
+                "_dispatch_convergent_restart",
+                new_callable=AsyncMock,
+            ) as mock_convergent,
+            patch.object(
+                orchestrator,
+                "_dispatch_batch_restart",
+                new_callable=AsyncMock,
+            ) as mock_batch,
+        ):
+            await orchestrator._dispatch_pending_tasks()
+            await asyncio.sleep(0.05)
+
+            # convergent_loop phase 走 convergent 路径，NOT batch
+            mock_convergent.assert_called_once()
+            mock_batch.assert_not_called()
+            dispatched_task = mock_convergent.call_args[0][0]
+            assert dispatched_task.task_id == "t1"
+
+    async def test_pending_restart_task_not_dispatched_twice_while_in_flight(
+        self, initialized_db_path: Path
+    ) -> None:
+        """同一个 restart_requested task 在首次后台调度未结束前不能重复调度。"""
+        from ato.config import PhaseDefinition
+        from ato.models.db import get_connection, update_task_status
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t1",
+            story_id="test-story-1",
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await update_task_status(
+                db,
+                "t1",
+                "pending",
+                expected_artifact="restart_requested",
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+
+        mock_phase_defs = [
+            PhaseDefinition(
+                name="developing",
+                role="developer",
+                cli_tool="claude",
+                model="opus",
+                sandbox=None,
+                phase_type="interactive_session",
+                next_on_success="reviewing",
+                next_on_failure=None,
+                timeout_seconds=7200,
+            ),
+        ]
+
+        release_dispatch = asyncio.Event()
+
+        async def blocking_dispatch(task: object, *, resume: bool = False) -> None:
+            assert resume is False
+            assert getattr(task, "task_id", None) == "t1"
+            await release_dispatch.wait()
+
+        with (
+            patch("ato.config.build_phase_definitions", return_value=mock_phase_defs),
+            patch.object(
+                orchestrator,
+                "_dispatch_interactive_restart",
+                new_callable=AsyncMock,
+            ) as mock_dispatch,
+        ):
+            mock_dispatch.side_effect = blocking_dispatch
+
+            await orchestrator._dispatch_pending_tasks()
+            await asyncio.sleep(0.05)
+
+            await orchestrator._dispatch_pending_tasks()
+            await asyncio.sleep(0.05)
+
+            assert mock_dispatch.await_count == 1
+
+            release_dispatch.set()
+            await asyncio.gather(*orchestrator._background_tasks, return_exceptions=True)
+
+    async def test_interactive_restart_deletes_sidecar(
+        self, initialized_db_path: Path
+    ) -> None:
+        """restart 模式下 _dispatch_interactive_restart 删除 sidecar，
+        防止 dispatch_interactive fallback 读取旧 session_id。
+        """
+        # 创建 sidecar 文件
+        ato_dir = initialized_db_path.parent
+        sessions_dir = ato_dir / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = sessions_dir / "test-story-1.json"
+        sidecar.write_text('{"session_id": "old-session-id", "pid": 99999}')
+        assert sidecar.exists()
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="pending",
+            task_id="t1",
+            story_id="test-story-1",
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+
+        from ato.models.schemas import TaskRecord
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="test-story-1",
+            phase="developing",
+            role="developer",
+            cli_tool="claude",
+            status="pending",
+        )
+
+        # mock SubprocessManager.dispatch_interactive 以避免真正启动终端
+        with (
+            patch("ato.subprocess_mgr.SubprocessManager") as mock_mgr_cls,
+            patch("ato.adapters.claude_cli.ClaudeAdapter"),
+            patch.object(
+                orchestrator, "_get_base_commit",
+                new_callable=AsyncMock, return_value="abc123",
+            ),
+        ):
+            mock_mgr = AsyncMock()
+            mock_mgr.dispatch_interactive = AsyncMock(return_value="new-task-id")
+            mock_mgr_cls.return_value = mock_mgr
+
+            # 设置 story 的 worktree_path
+            from ato.models.db import get_connection
+
+            db = await get_connection(initialized_db_path)
+            try:
+                await db.execute(
+                    "UPDATE stories SET worktree_path = ? WHERE story_id = ?",
+                    ("/tmp/test-worktree", "test-story-1"),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+
+            await orchestrator._dispatch_interactive_restart(task, resume=False)
+
+            # sidecar 应已被删除
+            assert not sidecar.exists()
+            # dispatch_interactive 应被调用
+            mock_mgr.dispatch_interactive.assert_awaited_once()
+
+    async def test_needs_human_review_retry_no_task_id_not_consumed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """needs_human_review + retry，payload 无 task_id 时 approval 不被消费。
+
+        真实 parse-failure 路径：record_parse_failure 未传 task_id 时，
+        retry 无法定位目标 task，approval 应保留不消费。
+        """
+        from ato.models.db import get_connection, insert_approval, insert_story
+        from ato.models.schemas import ApprovalRecord, StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            existing = await db.execute(
+                "SELECT 1 FROM stories WHERE story_id = ?", ("test-story-1",)
+            )
+            if await existing.fetchone() is None:
+                await insert_story(
+                    db,
+                    StoryRecord(
+                        story_id="test-story-1",
+                        title="Test Story",
+                        status="in_progress",
+                        current_phase="developing",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                )
+
+            # 真实 parse-failure payload：无 task_id
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="hhhh8888-0000-0000-0000-000000000000",
+                    story_id="test-story-1",
+                    approval_type="needs_human_review",
+                    status="approved",
+                    decision="retry",
+                    decided_at=now,
+                    created_at=now,
+                    payload='{"reason": "bmad_parse_failed", "skill_type": "code_review", '
+                    '"parser_mode": "failed", "error": "No structure found", '
+                    '"raw_output_preview": "raw text", '
+                    '"options": ["retry", "skip", "escalate"]}',
+                ),
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection as gc2
+        from ato.models.db import get_decided_unconsumed_approvals
+
+        db2 = await gc2(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db2)
+            # 无 task_id → reschedule 失败 → 不消费
+            assert len(remaining) == 1
+            assert remaining[0].approval_id == "hhhh8888-0000-0000-0000-000000000000"
+        finally:
+            await db2.close()
+
+    async def test_needs_human_review_retry_with_task_id_consumed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """needs_human_review + retry，payload 含 task_id 时 approval 被消费且 task 重调度。"""
+        # 插入 failed task
+        await _insert_test_task(
+            initialized_db_path, status="failed", task_id="t1", story_id="test-story-1"
+        )
+
+        from ato.models.db import get_connection, insert_approval
+        from ato.models.schemas import ApprovalRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="iiii9999-0000-0000-0000-000000000000",
+                    story_id="test-story-1",
+                    approval_type="needs_human_review",
+                    status="approved",
+                    decision="retry",
+                    decided_at=now,
+                    created_at=now,
+                    payload='{"reason": "bmad_parse_failed", "task_id": "t1", '
+                    '"options": ["retry", "skip", "escalate"]}',
+                ),
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection as gc3
+        from ato.models.db import get_decided_unconsumed_approvals
+
+        db3 = await gc3(initialized_db_path)
+        try:
+            # approval 应被消费
+            remaining = await get_decided_unconsumed_approvals(db3)
+            assert len(remaining) == 0
+
+            # task 应被重置为 pending
+            cursor = await db3.execute("SELECT status FROM tasks WHERE task_id = ?", ("t1",))
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "pending"
+        finally:
+            await db3.close()
+
+
+# ---------------------------------------------------------------------------
+# Convergent restart 异常路径：不得重复创建 approval
+# ---------------------------------------------------------------------------
+
+
+class TestConvergentRestartSingleApproval:
+    """_dispatch_convergent_restart 遇到内部 recovery 异常时只应生成一条 approval。
+
+    回归测试：RecoveryEngine._dispatch_convergent_loop() except 分支已调用
+    _mark_dispatch_failed，外层不应再次调用。
+    """
+
+    async def test_inner_exception_creates_single_approval(
+        self, initialized_db_path: Path
+    ) -> None:
+        from ato.config import PhaseDefinition
+        from ato.models.db import get_connection, get_pending_approvals, update_task_status
+
+        # 插入一条 reviewing phase 的 pending task
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t-conv-1",
+            story_id="test-story-conv",
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await update_task_status(
+                db,
+                "t-conv-1",
+                "pending",
+                expected_artifact="restart_requested",
+            )
+            await db.execute(
+                "UPDATE tasks SET phase = 'reviewing' WHERE task_id = 't-conv-1'"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+
+        mock_phase_defs = [
+            PhaseDefinition(
+                name="reviewing",
+                role="reviewer",
+                cli_tool="codex",
+                model="opus",
+                sandbox="read-only",
+                phase_type="convergent_loop",
+                next_on_success="fixing",
+                next_on_failure=None,
+                timeout_seconds=1800,
+            ),
+        ]
+
+        # RecoveryEngine._dispatch_convergent_loop 内部抛异常
+        # 它的 except 分支会调用 _mark_dispatch_failed → 生成 approval #1
+        # _dispatch_convergent_restart 收到 False 后不应再次 _mark_dispatch_failed
+        async def mock_dispatch_convergent_loop(task: object) -> bool:
+            """模拟内部异常已被处理并升级。"""
+            from ato.recovery import RecoveryEngine
+
+            # 直接调用 recovery engine 的 _mark_dispatch_failed
+            engine = RecoveryEngine(
+                db_path=initialized_db_path,
+                subprocess_mgr=None,
+                transition_queue=MagicMock(),
+                nudge=MagicMock(),
+            )
+            task_rec = task  # type: ignore[assignment]
+            await engine._mark_dispatch_failed(task_rec)
+            return False
+
+        with (
+            patch("ato.config.build_phase_definitions", return_value=mock_phase_defs),
+            patch(
+                "ato.recovery.RecoveryEngine._dispatch_convergent_loop",
+                side_effect=mock_dispatch_convergent_loop,
+            ),
+        ):
+            await orchestrator._dispatch_pending_tasks()
+            # 等后台 task 完成
+            await asyncio.sleep(0.1)
+            for bg in orchestrator._background_tasks:
+                if not bg.done():
+                    await asyncio.wait_for(bg, timeout=2.0)
+
+        # 验证：只有一条 crash_recovery pending approval
+        db2 = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db2)
+            crash_approvals = [
+                a for a in approvals if a.approval_type == "crash_recovery"
+            ]
+            assert len(crash_approvals) == 1, (
+                f"Expected exactly 1 crash_recovery approval, got {len(crash_approvals)}"
+            )
+        finally:
+            await db2.close()

@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-24
-last_updated: 2026-03-25
+last_updated: 2026-03-25T00:00:00
 project: AgentTeamOrchestrator
 project_key: NOKEY
 tracking_system: file-system
@@ -81,7 +81,7 @@ development_status:
 
   # ===== Epic 4: 人机协作与审批队列 =====
   epic-4: in-progress
-  4-1-approval-queue-nudge: ready-for-dev
+  4-1-approval-queue-nudge: done
   4-2-merge-queue-regression-safety: backlog
   4-3-uat-interactive-session-completion: backlog
   4-4-notification-cli-quality: backlog

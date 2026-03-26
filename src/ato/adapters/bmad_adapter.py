@@ -15,7 +15,6 @@ import json
 import re
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from uuid import uuid4
 
 import structlog
 
@@ -76,6 +75,7 @@ async def record_parse_failure(
     story_id: str,
     skill_type: BmadSkillType,
     db: Any,
+    task_id: str | None = None,
     notifier: ParseFailureNotifier | None = None,
 ) -> ApprovalRecord:
     """记录解析失败，创建 needs_human_review approval 并通知 Orchestrator。
@@ -88,37 +88,31 @@ async def record_parse_failure(
         story_id: 关联的 story ID。
         skill_type: BMAD skill 类型。
         db: aiosqlite 连接。
+        task_id: 关联的 task ID（可选）。提供时写入 payload 以便 retry 能定位目标 task。
         notifier: 可选的通知回调。
 
     Returns:
         创建的 ApprovalRecord。
     """
-    from ato.models.db import insert_approval
+    from ato.approval_helpers import create_approval
 
-    now = datetime.now(tz=UTC)
-    payload = json.dumps(
-        {
-            "reason": "bmad_parse_failed",
-            "skill_type": skill_type.value,
-            "parser_mode": parse_result.parser_mode,
-            "error": parse_result.parse_error,
-            "raw_output_preview": parse_result.raw_output_preview,
-        }
-    )
-    approval = ApprovalRecord.model_validate(
-        {
-            "approval_id": str(uuid4()),
-            "story_id": story_id,
-            "approval_type": "needs_human_review",
-            "status": "pending",
-            "payload": payload,
-            "decision": None,
-            "decided_at": None,
-            "created_at": now,
-        }
-    )
+    payload: dict[str, Any] = {
+        "reason": "bmad_parse_failed",
+        "skill_type": skill_type.value,
+        "parser_mode": parse_result.parser_mode,
+        "error": parse_result.parse_error,
+        "raw_output_preview": parse_result.raw_output_preview,
+        "options": ["retry", "skip", "escalate"],
+    }
+    if task_id is not None:
+        payload["task_id"] = task_id
 
-    await insert_approval(db, approval)
+    approval = await create_approval(
+        db,
+        story_id=story_id,
+        approval_type="needs_human_review",
+        payload_dict=payload,
+    )
 
     logger.warning(
         "bmad_parse_failure_recorded",
@@ -129,6 +123,7 @@ async def record_parse_failure(
         raw_output_preview=parse_result.raw_output_preview[:_PREVIEW_MAX_CHARS],
     )
 
+    # 兼容原有 notifier callback（进程内 nudge 或 mock）
     if notifier is not None:
         notifier()
 

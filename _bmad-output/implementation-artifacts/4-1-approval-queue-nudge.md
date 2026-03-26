@@ -1,6 +1,6 @@
 # Story 4.1: Approval Queue 与 Nudge 通知机制
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -74,45 +74,45 @@ So that 所有判断性决策集中管理，决策记录持久化。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 扩展 ApprovalRecord 模型与 DB 层 (AC: #1, #3, #6)
-  - [ ] 1.1 在 `src/ato/models/schemas.py` 中增加：
+- [x] Task 1: 扩展 ApprovalRecord 模型与 DB 层 (AC: #1, #3, #6)
+  - [x] 1.1 在 `src/ato/models/schemas.py` 中增加：
     - `ApprovalType = Literal["merge_authorization", "session_timeout", "crash_recovery", "blocking_abnormal", "budget_exceeded", "regression_failure", "precommit_failure", "convergent_loop_escalation", "batch_confirmation", "timeout", "needs_human_review"]`
     - `NotificationLevel = Literal["urgent", "normal", "silent", "milestone"]`
     - `APPROVAL_TYPE_TO_NOTIFICATION: dict[str, NotificationLevel]` 映射表
     - 扩展 `ApprovalRecord` 增加 `recommended_action: str | None = None`、`risk_level: Literal["high", "medium", "low"] | None = None`、`decision_reason: str | None = None`、`consumed_at: datetime | None = None`
-  - [ ] 1.2 在 `src/ato/models/db.py` 中增加：
+  - [x] 1.2 在 `src/ato/models/db.py` 中增加：
     - `update_approval_decision(db, approval_id, status, decision, decision_reason, decided_at)` — 更新审批决策
     - `get_approval_by_id(db, approval_id_prefix)` — 按 ID / 前缀查询单条 approval；多个命中时报“前缀不够长”
     - `get_decided_unconsumed_approvals(db)` — 查询 `status != 'pending' AND consumed_at IS NULL` 的 approvals（供 poll cycle 消费）
     - `mark_approval_consumed(db, approval_id, consumed_at)` — 仅在处理成功后标记消费
-  - [ ] 1.3 在 `src/ato/models/migrations.py` 中：
+  - [x] 1.3 在 `src/ato/models/migrations.py` 中：
     - 新增迁移：ALTER TABLE approvals ADD COLUMN `recommended_action TEXT`
     - 新增迁移：ALTER TABLE approvals ADD COLUMN `risk_level TEXT`
     - 新增迁移：ALTER TABLE approvals ADD COLUMN `decision_reason TEXT`
     - 新增迁移：ALTER TABLE approvals ADD COLUMN `consumed_at TEXT`
     - 递增 `PRAGMA user_version`
 
-- [ ] Task 2: 扩展 nudge.py 为通知子系统 (AC: #4, #5)
-  - [ ] 2.1 在 `src/ato/nudge.py` 中增加：
+- [x] Task 2: 扩展 nudge.py 为通知子系统 (AC: #4, #5)
+  - [x] 2.1 在 `src/ato/nudge.py` 中增加：
     - `NotificationLevel`（从 `schemas.py` 导入）
     - `send_user_notification(level: NotificationLevel, message: str)` 函数
     - MVP 实现：approval 创建路径只需覆盖 `urgent` / `normal` bell；`silent` 无动作，`milestone` 暂仅保留共享枚举
     - structlog 记录通知事件 `notification_sent`（含 level、message）
-  - [ ] 2.2 保持现有 `Nudge` 类和 `send_external_nudge()` 不变
+  - [x] 2.2 保持现有 `Nudge` 类和 `send_external_nudge()` 不变
 
-- [ ] Task 3: 实现 `ato approvals` CLI 命令 (AC: #2)
-  - [ ] 3.1 在 `src/ato/cli.py` 中新增 `approvals` 命令：
+- [x] Task 3: 实现 `ato approvals` CLI 命令 (AC: #2)
+  - [x] 3.1 在 `src/ato/cli.py` 中新增 `approvals` 命令：
     - 参数：`--db-path`（复用现有 pattern）、`--json`（可选 JSON 输出）
     - 调用 `get_pending_approvals(db)` 查询
     - 使用 `rich.table.Table` 格式化输出：类型图标、approval_id（前 8 位）、story_id、摘要、推荐操作、风险级别、创建时间
     - 摘要必须由 `approval_type + payload` 的确定性模板函数生成；不要直接回显原始 JSON
     - 无 pending 时输出 `✔ 无待处理审批`
-  - [ ] 3.2 审批类型图标映射：
+  - [x] 3.2 审批类型图标映射：
     - `merge_authorization` → `🔀`、`session_timeout` → `⏱`、`crash_recovery` → `↩`、`blocking_abnormal` → `⚠`、`budget_exceeded` → `💰`、`regression_failure` → `✖`、`convergent_loop_escalation` → `🔄`、`batch_confirmation` → `📦`、`timeout` → `⏳`、`precommit_failure` → `🔧`、`needs_human_review` → `👁`
     - 未知类型使用稳定 fallback（如 `?`），避免 CLI 因新类型崩溃
 
-- [ ] Task 4: 实现 `ato approve` CLI 命令 (AC: #3)
-  - [ ] 4.1 在 `src/ato/cli.py` 中新增 `approve` 命令：
+- [x] Task 4: 实现 `ato approve` CLI 命令 (AC: #3)
+  - [x] 4.1 在 `src/ato/cli.py` 中新增 `approve` 命令：
     - 参数：`approval_id: str`（位置参数）、`--decision: str`（必填）、`--reason: str`（可选理由）、`--db-path`
     - 流程：
       1. 复用 `submit` 命令模式：`asyncio.run(_approve_async(...))` + `get_connection(db_path)`；不要退回同步 `sqlite3.connect`
@@ -127,8 +127,8 @@ So that 所有判断性决策集中管理，决策记录持久化。
       8. rich 格式化输出确认信息（控制在 80 列内）
     - 错误处理："发生了什么 + 你的选项"格式输出到 stderr
 
-- [ ] Task 5: Orchestrator poll cycle 审批消费 (AC: #7)
-  - [ ] 5.1 在 `src/ato/core.py` 中新增 `_process_approval_decisions()` 方法：
+- [x] Task 5: Orchestrator poll cycle 审批消费 (AC: #7)
+  - [x] 5.1 在 `src/ato/core.py` 中新增 `_process_approval_decisions()` 方法：
     - 在 `_poll_cycle()` 中调用，位于现有检查之后
     - 查询已决策但未消费的 approvals（`get_decided_unconsumed_approvals(db)`），不要仅依赖内存时间窗
     - 根据 `approval_type` + `decision` 映射处理：
@@ -140,23 +140,23 @@ So that 所有判断性决策集中管理，决策记录持久化。
       - `merge_authorization` + `"approve"` → 触发 merge 流程（Story 4.2 范围，此处仅 log）
       - `regression_failure` → Story 4.5 范围，此处仅 log
     - 对每条 approval：只有在动作 / 事件提交成功后才 `mark_approval_consumed(...)`
-  - [ ] 5.2 不使用 `_last_approval_check` 作为唯一幂等来源；跨重启去重必须落在 DB 的 `consumed_at`
+  - [x] 5.2 不使用 `_last_approval_check` 作为唯一幂等来源；跨重启去重必须落在 DB 的 `consumed_at`
 
-- [ ] Task 6: 统一 approval 创建辅助函数 (AC: #1, #6)
-  - [ ] 6.1 在 `src/ato/models/db.py` 或新建 `src/ato/approval_helpers.py` 中创建：
+- [x] Task 6: 统一 approval 创建辅助函数 (AC: #1, #6)
+  - [x] 6.1 在 `src/ato/models/db.py` 或新建 `src/ato/approval_helpers.py` 中创建：
     - 推荐新建 `src/ato/approval_helpers.py`，避免把通知 / nudge 逻辑塞进 `models/db.py`
     - `create_approval(db, story_id, approval_type, payload_dict, recommended_action, risk_level, nudge, orchestrator_pid) -> ApprovalRecord`
     - 自动生成 `approval_id`（UUID4）、`created_at`
     - 插入 DB 并 commit 后，再发送 nudge / bell；不要在 SQLite 写事务中 await 外部 IO
     - structlog 记录 `approval_created` 事件
-  - [ ] 6.2 重构现有 approval 创建点：
+  - [x] 6.2 重构现有 approval 创建点：
     - `core.py._check_interactive_timeouts()` → 调用 `create_approval()`
     - `validation.py.maybe_create_blocking_abnormal_approval()` → 调用 `create_approval()`
     - `recovery.py` 的 `crash_recovery` approval 创建 → 调用 `create_approval()`
     - `adapters/bmad_adapter.py.record_parse_failure()` → 调用 `create_approval()`
 
-- [ ] Task 7: 测试 (AC: #1-#7)
-  - [ ] 7.1 `tests/unit/test_approval.py`（新文件）：
+- [x] Task 7: 测试 (AC: #1-#7)
+  - [x] 7.1 `tests/unit/test_approval.py`（新文件）：
     - `test_create_approval_inserts_and_nudges` — 创建 approval 写入 DB + 触发 nudge
     - `test_update_approval_decision` — 更新决策后 status / decision / decision_reason / decided_at 正确
     - `test_get_pending_approvals_filters_decided` — 仅返回 pending
@@ -164,14 +164,14 @@ So that 所有判断性决策集中管理，决策记录持久化。
     - `test_get_decided_unconsumed_approvals_and_mark_consumed` — DB 幂等消费
     - `test_notification_level_mapping` — 已存在 approval 类型（含 `crash_recovery`）正确映射到通知级别
     - `test_send_user_notification_bell` — `urgent` / `normal` 触发 bell，`silent` 无动作
-  - [ ] 7.2 `tests/unit/test_cli_approval.py`（新文件）：
+  - [x] 7.2 `tests/unit/test_cli_approval.py`（新文件）：
     - `test_ato_approvals_empty` — 无 pending 时输出 ✔
     - `test_ato_approvals_list` — 有 pending 时 rich 表格输出
     - `test_ato_approve_success` — 正常审批流程
     - `test_ato_approve_ambiguous_prefix` — 多个前缀命中时提示用户补长前缀
     - `test_ato_approve_not_found` — approval 不存在时错误信息
     - `test_ato_approve_already_decided` — 重复决策时错误信息
-  - [ ] 7.3 `tests/unit/test_core.py`（追加）：
+  - [x] 7.3 `tests/unit/test_core.py`（追加）：
     - `test_process_approval_decisions_session_timeout` — 超时审批消费
     - `test_process_approval_decisions_crash_recovery` — 现有 crash recovery approval 可被统一消费
     - `test_process_approval_decisions_blocking_abnormal` — blocking 审批消费
@@ -332,14 +332,56 @@ APPROVAL_RECOMMENDED_ACTIONS: dict[str, str] = {
 ### Change Log
 
 - 2026-03-25: create-story 创建 — 基于 Epic 4 / PRD / 架构 / UX spec 与现有 approval 代码路径生成完整开发上下文
+- 2026-03-26: code-review Patch 修复 R1 — 3 个 Patch 级问题修复（restart/resume 恢复动作 + decision 校验 + escalation 可执行语义），4 个新测试，876 总通过
+- 2026-03-26: code-review Patch 修复 R2 — 2 个 Patch 级问题修复（pending task 调度链 + parse-failure retry 空消费），3 个新测试，879 总通过
+- 2026-03-26: code-review Patch 修复 R3 — 2 个 Patch 级问题修复（真正 SubprocessManager dispatch 替代 DB-only 状态变更 + convergent_loop 主路径传入 task_id），880 总通过
+- 2026-03-26: code-review Patch 修复 R4 — 2 个 Patch 级问题修复（convergent_loop retry 走完整 BMAD parse 管道 + interactive restart 删除 sidecar 防止复用旧 session），881 总通过
+- 2026-03-25: dev-story 实现完成 — 全部 7 个 Task 完成，22 个新测试通过，872 总测试通过，ruff/mypy 全绿
 - 2026-03-25: validate-create-story 修订 —— 补回现有 `crash_recovery` approval 类型与创建路径；为 FR20 补齐 `decision_reason` 持久化；把审批消费改为 `consumed_at` 幂等模型而非错误复用 `expected_artifact` / 内存时间窗；纠正 `blocking_abnormal` 推荐动作与 UX 规范冲突；改正 `ato approve` 的 SQLite 接入方式并新增 CLI/TUI 语义对齐约束
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
+Claude Opus 4.6 (1M context)
+
 ### Debug Log References
+
+- migration v6 idempotency fix: ALTER TABLE ADD COLUMN 不支持 IF NOT EXISTS，改用 PRAGMA table_info 检测
+- SAVEPOINT 兼容: insert_approval 新增 commit=False 参数，recovery.py SAVEPOINT 内调用时不提前 commit
+- CLI 测试: CliRunner.invoke 在 async 测试内调用 asyncio.run() 会冲突，改为 sync test + asyncio.run() helper
 
 ### Completion Notes List
 
+- ✅ Task 1: schemas.py 新增 ApprovalType/NotificationLevel/映射表，扩展 ApprovalRecord 4 新字段；db.py 新增 4 个 CRUD 函数；migrations.py v5→v6 幂等迁移
+- ✅ Task 2: nudge.py 新增 send_user_notification()，urgent/normal 触发 terminal bell，silent 无动作
+- ✅ Task 3: cli.py 新增 `ato approvals` 命令，rich 表格 + --json 输出，类型图标映射，确定性摘要模板
+- ✅ Task 4: cli.py 新增 `ato approve` 命令，前缀匹配，二元/多选状态写入规则，nudge 通知
+- ✅ Task 5: core.py 新增 _process_approval_decisions()，DB consumed_at 幂等，6 种 approval_type 处理映射
+- ✅ Task 6: 新建 approval_helpers.py 统一创建 API，重构 core.py/validation.py/recovery.py/bmad_adapter.py 4 处创建点
+- ✅ Task 7: 22 个新测试全部通过（test_approval.py 11 + test_cli_approval.py 7 + test_core.py 4）
+- ✅ Patch 1: _handle_approval_decision restart/resume 分支改为实际调用 _reschedule_interactive_task()，不再仅 log
+- ✅ Patch 2: _approve_async 新增 _extract_valid_options() 校验 decision 合法性，无效 decision 拒绝写入
+- ✅ Patch 3: record_parse_failure payload 补齐 options; consumer 补 needs_human_review/convergent_loop_escalation 专用分支; validation.py 补 blocking_abnormal options
+- ✅ Patch 4: _poll_cycle 新增 _dispatch_pending_tasks() 扫描 pending task 并推进到 running，关闭 approval→reschedule→dispatch 调度链
+- ✅ Patch 5: _reschedule_interactive_task 返回 bool; _handle_approval_decision 尊重返回值（无 task_id 时不消费）; record_parse_failure 新增 task_id 参数; recovery.py 传入 task.task_id
+- ✅ Patch 6: _dispatch_pending_tasks 改为真正 SubprocessManager dispatch — interactive→dispatch_interactive()（新终端），batch→dispatch_with_retry(is_retry=True)（后台子进程）；旧 DB-only 占位实现完全替换
+- ✅ Patch 7: convergent_loop run_first_review/run_rereview 预生成 task_id 传入 dispatch_with_retry + record_parse_failure，主路径 parse-failure approval 可定位目标 task
+- ✅ Patch 8: _dispatch_pending_tasks 三路分派：interactive→dispatch_interactive, convergent_loop→RecoveryEngine._dispatch_convergent_loop（完整 BMAD parse/findings/convergence 管道），structured_job→dispatch_with_retry
+- ✅ Patch 9: _dispatch_interactive_restart restart 模式删除 sidecar 文件，阻止 dispatch_interactive 的 fallback 读取旧 session_id 导致 restart 变 resume
+
 ### File List
+
+- `src/ato/models/schemas.py` — 新增 ApprovalType, NotificationLevel, 映射表, 扩展 ApprovalRecord
+- `src/ato/models/db.py` — 扩展 insert_approval (commit 参数), 新增 update_approval_decision, get_approval_by_id, get_decided_unconsumed_approvals, mark_approval_consumed
+- `src/ato/models/migrations.py` — 新增 _column_exists, _migrate_v5_to_v6 (v6 迁移)
+- `src/ato/nudge.py` — 新增 send_user_notification()
+- `src/ato/cli.py` — 新增 approvals, approve 命令, _approval_summary, _APPROVAL_TYPE_ICONS
+- `src/ato/core.py` — 新增 _process_approval_decisions, _handle_approval_decision
+- `src/ato/approval_helpers.py` — 新文件, create_approval() 统一 API
+- `src/ato/validation.py` — 重构为使用 create_approval()
+- `src/ato/recovery.py` — 重构 _mark_needs_human 为使用 create_approval()
+- `src/ato/adapters/bmad_adapter.py` — 重构 record_parse_failure 为使用 create_approval()
+- `tests/unit/test_approval.py` — 新文件, 11 个测试
+- `tests/unit/test_cli_approval.py` — 新文件, 8 个测试
+- `tests/unit/test_core.py` — 追加 4 个审批消费测试

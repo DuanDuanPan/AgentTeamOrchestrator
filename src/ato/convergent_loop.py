@@ -81,6 +81,8 @@ class ConvergentLoop:
         worktree_path: str | None = None,
         *,
         artifact_payload: dict[str, Any] | None = None,
+        task_id: str | None = None,
+        is_retry: bool = False,
     ) -> ConvergentLoopResult:
         """执行首轮全量 review。
 
@@ -128,6 +130,7 @@ class ConvergentLoop:
             f"in the worktree at {resolved_path}. "
             f"Story: {story_id}. Review mode: branch diff against main."
         )
+        review_task_id = task_id or str(uuid.uuid4())
         result = await self._subprocess_mgr.dispatch_with_retry(
             story_id=story_id,
             phase="reviewing",
@@ -135,6 +138,8 @@ class ConvergentLoop:
             cli_tool="codex",
             prompt=review_prompt,
             options={"cwd": resolved_path, "sandbox": "read-only"},
+            task_id=review_task_id,
+            is_retry=is_retry,
         )
 
         # --- Parse review output via BMAD adapter ---
@@ -153,6 +158,7 @@ class ConvergentLoop:
                     story_id=story_id,
                     skill_type=BmadSkillType.CODE_REVIEW,
                     db=db,
+                    task_id=review_task_id,
                     notifier=self._nudge.notify if self._nudge else None,
                 )
             finally:
@@ -563,6 +569,9 @@ class ConvergentLoop:
         story_id: str,
         round_num: int,
         worktree_path: str | None = None,
+        *,
+        task_id: str | None = None,
+        is_retry: bool = False,
     ) -> ConvergentLoopResult:
         """执行 scoped re-review：仅验证上轮 open findings 的闭合状态。
 
@@ -609,6 +618,7 @@ class ConvergentLoop:
         rereview_prompt = self._build_rereview_prompt(previous_findings, resolved_path)
 
         # --- Dispatch Codex reviewer agent ---
+        rereview_task_id = task_id or str(uuid.uuid4())
         result = await self._subprocess_mgr.dispatch_with_retry(
             story_id=story_id,
             phase="reviewing",
@@ -616,6 +626,8 @@ class ConvergentLoop:
             cli_tool="codex",
             prompt=rereview_prompt,
             options={"cwd": resolved_path, "sandbox": "read-only"},
+            task_id=rereview_task_id,
+            is_retry=is_retry,
         )
 
         # --- Parse re-review output via BMAD adapter ---
@@ -634,6 +646,7 @@ class ConvergentLoop:
                     story_id=story_id,
                     skill_type=BmadSkillType.CODE_REVIEW,
                     db=db,
+                    task_id=rereview_task_id,
                     notifier=self._nudge.notify if self._nudge else None,
                 )
             finally:

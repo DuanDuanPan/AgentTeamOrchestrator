@@ -7,8 +7,6 @@ Blocking 阈值 escalation 通过 approval 记录通知操作者。
 from __future__ import annotations
 
 import json
-import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +14,8 @@ import aiosqlite
 import structlog
 from jsonschema import Draft202012Validator
 
-from ato.models.db import count_findings_by_severity, insert_approval
+from ato.models.db import count_findings_by_severity
 from ato.models.schemas import (
-    ApprovalRecord,
     ConfigError,
     SchemaValidationIssue,
     ValidationResult,
@@ -174,22 +171,22 @@ async def maybe_create_blocking_abnormal_approval(
             )
             return True
 
-    # 创建 blocking_abnormal approval
-    approval = ApprovalRecord(
-        approval_id=str(uuid.uuid4()),
+    # 创建 blocking_abnormal approval（使用统一 API）
+    from ato.approval_helpers import create_approval
+
+    approval = await create_approval(
+        db,
         story_id=story_id,
         approval_type="blocking_abnormal",
-        status="pending",
-        payload=json.dumps(
-            {
-                "blocking_count": blocking_count,
-                "threshold": threshold,
-                "round_num": round_num,
-            }
-        ),
-        created_at=datetime.now(tz=UTC),
+        payload_dict={
+            "blocking_count": blocking_count,
+            "threshold": threshold,
+            "round_num": round_num,
+            "options": ["confirm_fix", "human_review"],
+        },
+        nudge=nudge,
+        orchestrator_pid=orchestrator_pid,
     )
-    await insert_approval(db, approval)
     logger.warning(
         "blocking_threshold_exceeded",
         story_id=story_id,
@@ -198,13 +195,5 @@ async def maybe_create_blocking_abnormal_approval(
         threshold=threshold,
         approval_id=approval.approval_id,
     )
-
-    # 按调用上下文发送 nudge
-    if nudge is not None:
-        nudge.notify()
-    elif orchestrator_pid is not None:
-        from ato.nudge import send_external_nudge
-
-        send_external_nudge(orchestrator_pid)
 
     return True

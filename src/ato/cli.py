@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -1113,3 +1114,280 @@ async def _submit_async(
     _send_nudge_safe(pid_path)
 
     typer.echo(f"✅ Story '{story_id}' interactive session 已完成。")
+
+
+# ---------------------------------------------------------------------------
+# ato approvals — 审批队列查看
+# ---------------------------------------------------------------------------
+
+# 审批类型图标映射
+_APPROVAL_TYPE_ICONS: dict[str, str] = {
+    "merge_authorization": "🔀",
+    "session_timeout": "⏱",
+    "crash_recovery": "↩",
+    "blocking_abnormal": "⚠",
+    "budget_exceeded": "💰",
+    "regression_failure": "✖",
+    "convergent_loop_escalation": "🔄",
+    "batch_confirmation": "📦",
+    "timeout": "⏳",
+    "precommit_failure": "🔧",
+    "needs_human_review": "👁",
+}
+
+
+def _approval_summary(approval_type: str, payload: str | None) -> str:
+    """从 approval_type + payload 生成确定性摘要。"""
+    payload_dict: dict[str, object] = {}
+    if payload:
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            payload_dict = json.loads(payload)
+
+    templates: dict[str, str] = {
+        "merge_authorization": "Merge 授权请求",
+        "session_timeout": "Interactive session 超时",
+        "crash_recovery": "崩溃恢复决策",
+        "blocking_abnormal": "Blocking 异常数量超阈值",
+        "budget_exceeded": "预算超限",
+        "regression_failure": "回归测试失败",
+        "convergent_loop_escalation": "Convergent Loop 需人工介入",
+        "batch_confirmation": "Batch 确认",
+        "timeout": "任务超时",
+        "precommit_failure": "Pre-commit 检查失败",
+        "needs_human_review": "需要人工审阅",
+    }
+    summary = templates.get(approval_type, approval_type)
+
+    # 附加关键 payload 信息
+    if approval_type == "session_timeout" and "elapsed_seconds" in payload_dict:
+        elapsed = payload_dict["elapsed_seconds"]
+        summary += f" ({elapsed}s)"
+    elif approval_type == "blocking_abnormal" and "blocking_count" in payload_dict:
+        count = payload_dict["blocking_count"]
+        threshold = payload_dict.get("threshold", "?")
+        summary += f" ({count}/{threshold})"
+    elif approval_type == "crash_recovery" and "phase" in payload_dict:
+        summary += f" (phase: {payload_dict['phase']})"
+
+    return summary
+
+
+@app.command("approvals")
+def approvals_cmd(
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    output_json: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+) -> None:
+    """查看审批队列。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        asyncio.run(_approvals_async(resolved_db, output_json))
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+async def _approvals_async(db_path: Path, output_json: bool) -> None:
+    """approvals 命令的异步实现。"""
+    from ato.models.db import get_connection, get_pending_approvals
+
+    db = await get_connection(db_path)
+    try:
+        pending = await get_pending_approvals(db)
+    finally:
+        await db.close()
+
+    if not pending:
+        if output_json:
+            typer.echo(json.dumps({"approvals": [], "message": "无待处理审批"}))
+        else:
+            typer.echo("✔ 无待处理审批")
+        return
+
+    if output_json:
+        data = {
+            "approvals": [
+                {
+                    "approval_id": a.approval_id,
+                    "story_id": a.story_id,
+                    "approval_type": a.approval_type,
+                    "summary": _approval_summary(a.approval_type, a.payload),
+                    "recommended_action": a.recommended_action,
+                    "risk_level": a.risk_level,
+                    "created_at": a.created_at.isoformat(),
+                }
+                for a in pending
+            ]
+        }
+        typer.echo(json.dumps(data, ensure_ascii=False))
+        return
+
+    from rich.table import Table
+
+    table = Table(title="待处理审批")
+    table.add_column("类型", width=4)
+    table.add_column("ID", width=8)
+    table.add_column("Story", width=20)
+    table.add_column("摘要", min_width=20)
+    table.add_column("推荐", width=12)
+    table.add_column("风险", width=6)
+    table.add_column("创建时间", width=16)
+
+    for a in pending:
+        icon = _APPROVAL_TYPE_ICONS.get(a.approval_type, "?")
+        short_id = a.approval_id[:8]
+        summary = _approval_summary(a.approval_type, a.payload)
+        recommended = a.recommended_action or "-"
+        risk = a.risk_level or "-"
+        created = a.created_at.strftime("%m-%d %H:%M")
+        table.add_row(icon, short_id, a.story_id, summary, recommended, risk, created)
+
+    _console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# ato approve — 审批决策提交
+# ---------------------------------------------------------------------------
+
+
+# 二元审批关键字
+_BINARY_DECISIONS = {"approve", "reject"}
+
+# 无 payload.options 时的默认合法选项（按 approval_type）
+_DEFAULT_VALID_OPTIONS: dict[str, list[str]] = {
+    "merge_authorization": ["approve", "reject"],
+    "session_timeout": ["restart", "resume", "abandon"],
+    "crash_recovery": ["restart", "resume", "abandon"],
+    "blocking_abnormal": ["confirm_fix", "human_review"],
+    "budget_exceeded": ["increase_budget", "reject"],
+    "regression_failure": ["fix_forward", "reject"],
+    "timeout": ["continue_waiting", "abandon"],
+    "convergent_loop_escalation": ["retry", "skip", "escalate"],
+    "batch_confirmation": ["confirm", "reject"],
+    "precommit_failure": ["retry", "skip"],
+    "needs_human_review": ["retry", "skip", "escalate"],
+}
+
+
+def _extract_valid_options(approval: object) -> list[str]:
+    """从 approval 的 payload.options 提取合法决策选项。
+
+    优先使用 payload 中定义的 options（创建时可自定义），
+    fallback 到 _DEFAULT_VALID_OPTIONS。
+    """
+    # approval 是 ApprovalRecord，但为避免导入循环用 duck typing
+    payload_str = getattr(approval, "payload", None)
+    approval_type = getattr(approval, "approval_type", "")
+
+    if payload_str:
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            payload = json.loads(payload_str)
+            options = payload.get("options")
+            if isinstance(options, list) and all(isinstance(o, str) for o in options):
+                return options
+
+    return _DEFAULT_VALID_OPTIONS.get(approval_type, [])
+
+
+@app.command("approve")
+def approve_cmd(
+    approval_id: str = typer.Argument(..., help="Approval ID（前缀 ≥4 字符）"),
+    decision: str = typer.Option(..., "--decision", "-d", help="决策选项"),
+    reason: str | None = typer.Option(None, "--reason", "-r", help="决策理由（可选）"),
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+) -> None:
+    """提交审批决策。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        asyncio.run(_approve_async(resolved_db, approval_id, decision, reason))
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+async def _approve_async(
+    db_path: Path,
+    approval_id_prefix: str,
+    decision: str,
+    reason: str | None,
+) -> None:
+    """approve 命令的异步实现。"""
+    from ato.models.db import (
+        get_approval_by_id,
+        get_connection,
+        update_approval_decision,
+    )
+
+    db = await get_connection(db_path)
+    try:
+        # 查询 approval
+        try:
+            approval = await get_approval_by_id(db, approval_id_prefix)
+        except ValueError as exc:
+            typer.echo(f"查询失败: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        # 验证 pending
+        if approval.status != "pending":
+            typer.echo(
+                f"此审批已处理 (status={approval.status})。\n"
+                "选项: 运行 `ato approvals` 查看待处理审批。",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        # 校验 decision 合法性
+        valid_options = _extract_valid_options(approval)
+        if valid_options and decision not in valid_options:
+            typer.echo(
+                f"无效的决策选项: '{decision}'。\n该审批的合法选项: {', '.join(valid_options)}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        # 解析 status 写入规则
+        now = datetime.now(tz=UTC)
+        if decision in _BINARY_DECISIONS:
+            write_status = "approved" if decision == "approve" else "rejected"
+        else:
+            # 多选审批统一写 approved
+            write_status = "approved"
+
+        await update_approval_decision(
+            db,
+            approval.approval_id,
+            status=write_status,
+            decision=decision,
+            decision_reason=reason,
+            decided_at=now,
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    # 发送 nudge
+    pid_path = db_path.parent / "orchestrator.pid"
+    _send_nudge_safe(pid_path)
+
+    # 确认输出
+    icon = _APPROVAL_TYPE_ICONS.get(approval.approval_type, "?")
+    _console.print(
+        f"{icon} 审批已提交: {approval.approval_id[:8]}... → {decision} ({write_status})"
+    )

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import signal
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,11 +16,12 @@ from structlog.contextvars import bind_contextvars
 from ato.config import ATOSettings
 from ato.models.db import (
     get_connection,
+    get_decided_unconsumed_approvals,
     get_tasks_by_status,
-    insert_approval,
+    mark_approval_consumed,
     mark_running_tasks_paused,
 )
-from ato.models.schemas import ApprovalRecord, RecoveryResult, TransitionEvent
+from ato.models.schemas import ApprovalRecord, RecoveryResult, TaskRecord, TransitionEvent
 from ato.nudge import Nudge
 from ato.transition_queue import TransitionQueue
 
@@ -115,22 +114,18 @@ async def _check_interactive_timeouts(
         if task.story_id in stories_with_timeout:
             continue
 
-        approval = ApprovalRecord(
-            approval_id=str(uuid.uuid4()),
+        from ato.approval_helpers import create_approval
+
+        await create_approval(
+            db,
             story_id=task.story_id,
             approval_type="session_timeout",
-            status="pending",
-            payload=json.dumps(
-                {
-                    "task_id": task.task_id,
-                    "elapsed_seconds": elapsed,
-                    "options": ["restart", "resume", "abandon"],
-                    "recommended_action": "restart",
-                }
-            ),
-            created_at=now,
+            payload_dict={
+                "task_id": task.task_id,
+                "elapsed_seconds": elapsed,
+                "options": ["restart", "resume", "abandon"],
+            },
         )
-        await insert_approval(db, approval)
         stories_with_timeout.add(task.story_id)
         logger.warning(
             "interactive_session_timeout",
@@ -207,6 +202,8 @@ class Orchestrator:
         self._tq: TransitionQueue | None = None
         self._running = True
         self._pid_path = db_path.parent / "orchestrator.pid"
+        self._background_tasks: list[asyncio.Task[None]] = []
+        self._inflight_restart_dispatches: set[str] = set()
 
     async def run(self) -> None:
         """主入口——启动 → 轮询 → 停止。
@@ -255,13 +252,29 @@ class Orchestrator:
         logger.info("orchestrator_started", polling_interval=self._settings.polling_interval)
 
     async def _shutdown(self) -> None:
-        """优雅停止：标记 running tasks → 停止 TransitionQueue → 删除 PID。
+        """优雅停止：取消后台 dispatch → 标记 running tasks → 停止 TQ → 删除 PID。
 
         对部分初始化（_startup 中途失败）安全——每个阶段独立 try/except。
         所有资源无条件清理；如果关键操作（task paused）失败则最终 re-raise，
         让调用方知道这不是一次干净的停止。
         """
         shutdown_error: Exception | None = None
+
+        # 0. 取消并等待 orchestrator 自己创建的 background dispatch tasks
+        if self._background_tasks:
+            for bg in self._background_tasks:
+                bg.cancel()
+            results = await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            cancelled_count = sum(
+                1 for r in results if isinstance(r, asyncio.CancelledError)
+            )
+            if cancelled_count:
+                logger.info(
+                    "shutdown_background_tasks_cancelled",
+                    total=len(self._background_tasks),
+                    cancelled=cancelled_count,
+                )
+            self._background_tasks.clear()
 
         # 1. 标记所有 running tasks 为 paused（DB 可能尚未就绪）
         try:
@@ -368,6 +381,660 @@ class Orchestrator:
                         )
             finally:
                 await db.close()
+
+        # 审批消费
+        await self._process_approval_decisions()
+
+        # 调度待执行任务（由 approval restart/resume 产生的 pending tasks）
+        await self._dispatch_pending_tasks()
+
+    async def _process_approval_decisions(self) -> None:
+        """消费已决策的 approvals，触发对应恢复动作或状态转换。
+
+        幂等性通过 DB ``consumed_at`` 保证——跨重启安全。
+        仅等待审批的 story 暂停，其他 stories 正常推进（非阻塞）。
+        """
+        db = await get_connection(self._db_path)
+        try:
+            approvals = await get_decided_unconsumed_approvals(db)
+            if not approvals:
+                return
+
+            now = datetime.now(tz=UTC)
+            for approval in approvals:
+                try:
+                    handled = await self._handle_approval_decision(approval)
+                    if handled:
+                        await mark_approval_consumed(db, approval.approval_id, now)
+                        logger.info(
+                            "approval_consumed",
+                            approval_id=approval.approval_id,
+                            approval_type=approval.approval_type,
+                            decision=approval.decision,
+                        )
+                except Exception:
+                    logger.exception(
+                        "approval_consumption_failed",
+                        approval_id=approval.approval_id,
+                        approval_type=approval.approval_type,
+                    )
+        finally:
+            await db.close()
+
+    async def _dispatch_pending_tasks(self) -> None:
+        """扫描由 approval restart/resume 产生的 pending task 并真正调度执行。
+
+        仅处理 expected_artifact 为 'restart_requested' 或 'resume_requested' 的 task
+        （由 _reschedule_interactive_task() 设置），避免误触碰初始阶段创建的 pending task。
+
+        Interactive phase → SubprocessManager.dispatch_interactive()（开新终端）
+        Non-interactive phase → SubprocessManager.dispatch_with_retry()（后台子进程）
+        """
+        db = await get_connection(self._db_path)
+        try:
+            pending_tasks = await get_tasks_by_status(db, "pending")
+            if not pending_tasks:
+                return
+        finally:
+            await db.close()
+
+        # 仅拾取由 approval 重调度产生的 task
+        rescheduled = [
+            t
+            for t in pending_tasks
+            if t.expected_artifact in ("restart_requested", "resume_requested")
+        ]
+        if not rescheduled:
+            return
+
+        # 构建 phase 类型集合
+        from ato.config import build_phase_definitions
+
+        phase_defs = build_phase_definitions(self._settings)
+        interactive_phases = {
+            pd.name for pd in phase_defs if pd.phase_type == "interactive_session"
+        }
+        convergent_loop_phases = {
+            pd.name for pd in phase_defs if pd.phase_type == "convergent_loop"
+        }
+
+        for task in rescheduled:
+            if task.task_id in self._inflight_restart_dispatches:
+                logger.debug(
+                    "task_dispatch_already_inflight",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                )
+                continue
+
+            resume = task.expected_artifact == "resume_requested"
+            is_interactive = task.phase in interactive_phases
+            is_convergent = task.phase in convergent_loop_phases
+            self._inflight_restart_dispatches.add(task.task_id)
+
+            try:
+                if is_interactive:
+                    dispatch_type = "interactive"
+                    bg = asyncio.create_task(
+                        self._dispatch_interactive_restart(task, resume=resume),
+                        name=f"dispatch-interactive-{task.task_id}",
+                    )
+                elif is_convergent:
+                    dispatch_type = "convergent_loop"
+                    bg = asyncio.create_task(
+                        self._dispatch_convergent_restart(task),
+                        name=f"dispatch-convergent-{task.task_id}",
+                    )
+                else:
+                    dispatch_type = "structured_job"
+                    bg = asyncio.create_task(
+                        self._dispatch_batch_restart(task),
+                        name=f"dispatch-batch-{task.task_id}",
+                    )
+            except Exception:
+                self._inflight_restart_dispatches.discard(task.task_id)
+                raise
+
+            def _clear_inflight(
+                completed: asyncio.Task[None],
+                *,
+                task_id: str = task.task_id,
+            ) -> None:
+                self._inflight_restart_dispatches.discard(task_id)
+                with contextlib.suppress(ValueError):
+                    self._background_tasks.remove(completed)
+
+            bg.add_done_callback(_clear_inflight)
+            self._background_tasks.append(bg)
+
+            logger.info(
+                "task_dispatch_scheduled",
+                task_id=task.task_id,
+                story_id=task.story_id,
+                phase=task.phase,
+                mode="resume" if resume else "restart",
+                dispatch=dispatch_type,
+            )
+
+    async def _mark_dispatch_failed(self, task: TaskRecord, *, error_message: str) -> None:
+        """将 dispatch 失败的 task 原子标记为 failed 并创建 approval。
+
+        防止 task 卡在 pending 无人处理：approval 已被消费后，如果 dispatch
+        在真正执行前失败（如无 worktree），必须升级为新的 approval 让操作者重新决策。
+        """
+        from ato.approval_helpers import create_approval
+        from ato.nudge import send_user_notification
+
+        db = await get_connection(self._db_path)
+        try:
+            await db.execute("SAVEPOINT dispatch_failed")
+            try:
+                await db.execute(
+                    "UPDATE tasks SET status = ?, error_message = ? WHERE task_id = ?",
+                    ("failed", error_message, task.task_id),
+                )
+                await create_approval(
+                    db,
+                    story_id=task.story_id,
+                    approval_type="crash_recovery",
+                    payload_dict={
+                        "task_id": task.task_id,
+                        "phase": task.phase,
+                        "options": ["restart", "resume", "abandon"],
+                    },
+                    commit=False,
+                )
+                await db.execute("RELEASE SAVEPOINT dispatch_failed")
+            except BaseException:
+                await db.execute("ROLLBACK TO SAVEPOINT dispatch_failed")
+                await db.execute("RELEASE SAVEPOINT dispatch_failed")
+                raise
+            await db.commit()
+        finally:
+            await db.close()
+
+        # commit 后再发 nudge / bell（create_approval commit=False 时已抑制）
+        from ato.models.schemas import APPROVAL_TYPE_TO_NOTIFICATION
+
+        self._nudge.notify()
+        level = APPROVAL_TYPE_TO_NOTIFICATION.get("crash_recovery", "normal")
+        send_user_notification(level, f"新审批: crash_recovery (story: {task.story_id})")
+
+        logger.warning(
+            "dispatch_failed_escalated",
+            task_id=task.task_id,
+            story_id=task.story_id,
+            phase=task.phase,
+            error_message=error_message,
+        )
+
+    async def _dispatch_interactive_restart(
+        self,
+        task: TaskRecord,
+        *,
+        resume: bool = False,
+    ) -> None:
+        """实际启动 interactive session（在新终端窗口中）。
+
+        标记旧 task 为 failed → SubprocessManager.dispatch_interactive() 创建新 task。
+        """
+        from ato.models.db import get_connection as _gc
+        from ato.models.db import get_story, update_task_status
+        from ato.subprocess_mgr import SubprocessManager
+
+        try:
+            db = await _gc(self._db_path)
+            try:
+                story = await get_story(db, task.story_id)
+            finally:
+                await db.close()
+
+            worktree_path = story.worktree_path if story else None
+            if worktree_path is None:
+                logger.error(
+                    "dispatch_interactive_no_worktree",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                )
+                await self._mark_dispatch_failed(
+                    task, error_message="dispatch_failed:no_worktree"
+                )
+                return
+
+            base_commit = await self._get_base_commit(Path(worktree_path))
+
+            # 创建 adapter + SubprocessManager
+            from ato.adapters.claude_cli import ClaudeAdapter
+
+            adapter = ClaudeAdapter()
+            mgr = SubprocessManager(
+                max_concurrent=1,
+                adapter=adapter,
+                db_path=self._db_path,
+            )
+
+            # 标记旧 task 为 failed（dispatch_interactive 会创建新 task）
+            db2 = await _gc(self._db_path)
+            try:
+                await update_task_status(
+                    db2,
+                    task.task_id,
+                    "failed",
+                    error_message="replaced_by_restart",
+                )
+            finally:
+                await db2.close()
+
+            # 构建 prompt
+            story_ctx = ""
+            if task.context_briefing:
+                story_ctx = f"\n\nPrevious context: {task.context_briefing}"
+            prompt = (
+                f"Interactive session restart for story {task.story_id}, "
+                f"phase {task.phase}. "
+                f"Please continue the work for this phase.{story_ctx}"
+            )
+
+            ato_dir = self._db_path.parent
+
+            # restart 时删除 sidecar，防止 dispatch_interactive 的 fallback 读取旧 session_id
+            # resume 时保留 sidecar，让 dispatch_interactive 自动从中读取 session_id
+            if not resume:
+                sidecar_path = ato_dir / "sessions" / f"{task.story_id}.json"
+                if sidecar_path.exists():
+                    sidecar_path.unlink()
+                    logger.info(
+                        "sidecar_deleted_for_restart",
+                        story_id=task.story_id,
+                        sidecar_path=str(sidecar_path),
+                    )
+
+            new_task_id = await mgr.dispatch_interactive(
+                story_id=task.story_id,
+                phase=task.phase,
+                role=task.role,
+                prompt=prompt,
+                worktree_path=Path(worktree_path),
+                base_commit=base_commit,
+                ato_dir=ato_dir,
+                session_id=None,
+            )
+
+            logger.info(
+                "dispatch_interactive_restart_done",
+                old_task_id=task.task_id,
+                new_task_id=new_task_id,
+                story_id=task.story_id,
+                phase=task.phase,
+                resume=resume,
+            )
+        except Exception:
+            logger.exception(
+                "dispatch_interactive_restart_failed",
+                task_id=task.task_id,
+                story_id=task.story_id,
+            )
+            await self._mark_dispatch_failed(
+                task, error_message="dispatch_failed:interactive_restart_exception"
+            )
+
+    async def _dispatch_convergent_restart(self, task: TaskRecord) -> None:
+        """重新调度 convergent_loop phase：走完整 BMAD parse → findings → convergence 管道。
+
+        委托给 RecoveryEngine._dispatch_convergent_loop()，确保 retry 后的 reviewer
+        输出仍经过 parse、findings 入库和 convergence 判定，而非直接发 review_pass。
+        """
+        from ato.config import build_phase_definitions
+        from ato.recovery import RecoveryEngine
+
+        try:
+            phase_defs = build_phase_definitions(self._settings)
+            interactive_phases = {
+                pd.name for pd in phase_defs if pd.phase_type == "interactive_session"
+            }
+            convergent_loop_phases = {
+                pd.name for pd in phase_defs if pd.phase_type == "convergent_loop"
+            }
+
+            engine = RecoveryEngine(
+                db_path=self._db_path,
+                subprocess_mgr=None,
+                transition_queue=self._tq
+                if self._tq is not None
+                else self._create_tq_stub(),
+                nudge=self._nudge,
+                interactive_phases=interactive_phases,
+                convergent_loop_phases=convergent_loop_phases,
+                settings=self._settings,
+            )
+
+            dispatched = await engine._dispatch_convergent_loop(task)
+
+            if dispatched:
+                logger.info(
+                    "dispatch_convergent_restart_done",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                )
+            else:
+                # _dispatch_convergent_loop 已内部 escalate（_mark_dispatch_failed），
+                # caller 只记日志，不重复创建 approval。
+                logger.warning(
+                    "dispatch_convergent_restart_noop",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                )
+        except Exception:
+            # engine 构建前的异常（build_phase_definitions 等），需要 caller 处理
+            logger.exception(
+                "dispatch_convergent_restart_failed",
+                task_id=task.task_id,
+                story_id=task.story_id,
+            )
+            await self._mark_dispatch_failed(
+                task, error_message="dispatch_failed:convergent_restart_exception"
+            )
+
+    async def _dispatch_batch_restart(self, task: TaskRecord) -> None:
+        """后台重新调度 structured_job phase（非 convergent_loop、非 interactive）。
+
+        复用 SubprocessManager.dispatch_with_retry(is_retry=True)。
+        """
+        from ato.models.db import get_connection as _gc
+        from ato.models.db import get_story
+        from ato.subprocess_mgr import SubprocessManager
+
+        try:
+            db = await _gc(self._db_path)
+            try:
+                story = await get_story(db, task.story_id)
+            finally:
+                await db.close()
+
+            worktree_path = story.worktree_path if story else None
+
+            # 创建 adapter + SubprocessManager
+            from ato.recovery import _create_adapter
+
+            adapter = _create_adapter(task.cli_tool)
+            mgr = SubprocessManager(
+                max_concurrent=self._settings.max_concurrent_agents
+                if hasattr(self._settings, "max_concurrent_agents")
+                else 4,
+                adapter=adapter,
+                db_path=self._db_path,
+            )
+
+            # 构建 prompt
+            story_ctx = ""
+            if task.context_briefing:
+                story_ctx = f"\n\nPrevious context: {task.context_briefing}"
+            prompt = (
+                f"Restart for story {task.story_id}, phase {task.phase}. "
+                f"The previous task needs to be retried. "
+                f"Please perform the work for this phase.{story_ctx}"
+            )
+
+            options: dict[str, object] | None = (
+                {"cwd": worktree_path} if worktree_path else None
+            )
+
+            result = await mgr.dispatch_with_retry(
+                story_id=task.story_id,
+                phase=task.phase,
+                role=task.role,
+                cli_tool=task.cli_tool,
+                prompt=prompt,
+                options=options,
+                task_id=task.task_id,
+                is_retry=True,
+            )
+
+            # 成功后提交 transition event
+            if result.status == "success" and self._tq is not None:
+                from ato.recovery import _PHASE_SUCCESS_EVENT
+
+                event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
+                if event_name is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=task.story_id,
+                            event_name=event_name,
+                            source="agent",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+
+            logger.info(
+                "dispatch_batch_restart_done",
+                task_id=task.task_id,
+                story_id=task.story_id,
+                phase=task.phase,
+                result_status=result.status,
+            )
+        except Exception:
+            logger.exception(
+                "dispatch_batch_restart_failed",
+                task_id=task.task_id,
+                story_id=task.story_id,
+            )
+            await self._mark_dispatch_failed(
+                task, error_message="dispatch_failed:batch_restart_exception"
+            )
+
+    @staticmethod
+    async def _get_base_commit(worktree_path: Path) -> str:
+        """读取 worktree 的 HEAD commit hash。"""
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD",
+            cwd=str(worktree_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return stdout.decode().strip() or "HEAD"
+
+    async def _handle_approval_decision(self, approval: ApprovalRecord) -> bool:
+        """根据 approval_type + decision 映射处理动作。
+
+        Returns:
+            True 表示处理成功，可标记 consumed。
+            False 表示 decision 无法识别，不消费（留给下次或人工检查）。
+        """
+        atype = approval.approval_type
+        decision = approval.decision or ""
+
+        if atype in ("session_timeout", "crash_recovery"):
+            if decision == "restart":
+                return await self._reschedule_interactive_task(approval, mode="restart")
+            if decision == "resume":
+                return await self._reschedule_interactive_task(approval, mode="resume")
+            if decision == "abandon":
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            # 未识别的 decision → 不消费
+            logger.warning(
+                "approval_unrecognized_decision",
+                approval_id=approval.approval_id,
+                approval_type=atype,
+                decision=decision,
+            )
+            return False
+
+        if atype == "blocking_abnormal":
+            if decision == "confirm_fix":
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="review_fail",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            if decision == "human_review":
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            logger.warning(
+                "approval_unrecognized_decision",
+                approval_id=approval.approval_id,
+                approval_type=atype,
+                decision=decision,
+            )
+            return False
+
+        if atype == "merge_authorization":
+            logger.info(
+                "approval_merge_authorization",
+                approval_id=approval.approval_id,
+                story_id=approval.story_id,
+                decision=decision,
+                note="Story 4.2 范围，此处仅 log",
+            )
+            return True
+
+        if atype == "regression_failure":
+            logger.info(
+                "approval_regression_failure",
+                approval_id=approval.approval_id,
+                story_id=approval.story_id,
+                decision=decision,
+                note="Story 4.5 范围，此处仅 log",
+            )
+            return True
+
+        if atype in ("needs_human_review", "convergent_loop_escalation"):
+            if decision == "retry":
+                return await self._reschedule_interactive_task(approval, mode="restart")
+            if decision == "skip":
+                # skip = 人工确认可跳过，escalate story
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            if decision == "escalate":
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            logger.warning(
+                "approval_unrecognized_decision",
+                approval_id=approval.approval_id,
+                approval_type=atype,
+                decision=decision,
+            )
+            return False
+
+        # 其他未知类型：log 并标记消费（防止阻塞队列）
+        logger.warning(
+            "approval_consumed_unknown_type",
+            approval_id=approval.approval_id,
+            approval_type=atype,
+            decision=decision,
+        )
+        return True
+
+    async def _reschedule_interactive_task(
+        self,
+        approval: ApprovalRecord,
+        *,
+        mode: str,
+    ) -> bool:
+        """重调度 interactive task（restart 或 resume）。
+
+        从 approval.payload 提取 task_id，重置 task 状态为 pending。
+        - restart: 清空所有执行状态，下轮 poll 重新调度。
+        - resume: 设置 expected_artifact 标记，让调度器知道用 --resume 模式。
+
+        Returns:
+            True 表示成功重调度，False 表示 payload 中无 task_id 无法重调度。
+        """
+        import json
+
+        from ato.models.db import update_task_status
+
+        task_id: str | None = None
+        if approval.payload:
+            try:
+                payload = json.loads(approval.payload)
+                task_id = payload.get("task_id")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        if task_id is None:
+            logger.warning(
+                "approval_reschedule_no_task_id",
+                approval_id=approval.approval_id,
+                story_id=approval.story_id,
+                mode=mode,
+            )
+            return False
+
+        db = await get_connection(self._db_path)
+        try:
+            if mode == "restart":
+                await update_task_status(
+                    db,
+                    task_id,
+                    "pending",
+                    pid=None,
+                    started_at=None,
+                    completed_at=None,
+                    exit_code=None,
+                    error_message=None,
+                    expected_artifact="restart_requested",
+                )
+            elif mode == "resume":
+                await update_task_status(
+                    db,
+                    task_id,
+                    "pending",
+                    pid=None,
+                    expected_artifact="resume_requested",
+                    error_message=None,
+                )
+        finally:
+            await db.close()
+
+        logger.info(
+            f"approval_action_{mode}",
+            approval_id=approval.approval_id,
+            story_id=approval.story_id,
+            task_id=task_id,
+        )
+        return True
 
     async def _detect_recovery_mode(self, db: object) -> RecoveryResult | None:
         """启动时扫描 tasks 表并执行恢复。
