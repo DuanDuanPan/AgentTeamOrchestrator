@@ -56,6 +56,7 @@ _PHASE_FAIL_EVENT: dict[str, str] = {
     "validating": "validate_fail",
     "reviewing": "review_fail",
     "qa_testing": "qa_fail",
+    "uat": "uat_fail",
 }
 
 # Phase → BMAD skill type 映射（仅 convergent_loop phases）

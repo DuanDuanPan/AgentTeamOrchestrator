@@ -87,6 +87,7 @@ phases:
     role: developer
     type: interactive_session
     next_on_success: merging
+    next_on_failure: fixing
 
   - name: merging
     role: developer

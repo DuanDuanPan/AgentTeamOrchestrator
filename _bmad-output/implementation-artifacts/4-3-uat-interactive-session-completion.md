@@ -1,6 +1,6 @@
 # Story 4.3: UAT 与 Interactive Session 完成检测
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -41,35 +41,35 @@ And 选项通过 approval 机制呈现
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 添加 `uat_fail` 状态转换 (AC: #1)
-  - [ ] 1.1 在 `state_machine.py` 添加 `uat_fail = uat.to(fixing)` 转换
-  - [ ] 1.2 更新 `CANONICAL_PHASE_MAP` 中 uat 的 fail 分支映射: `"uat": ("merging", "fixing")`
-  - [ ] 1.3 更新 `_PHASE_SUCCESS_EVENT` 在 recovery.py 中确认 uat 映射正确
-  - [ ] 1.4 编写 `uat_fail` 转换单元测试（正向 + 非法状态拒绝）
+- [x] Task 1: 添加 `uat_fail` 状态转换 (AC: #1)
+  - [x] 1.1 在 `state_machine.py` 添加 `uat_fail = uat.to(fixing)` 转换
+  - [x] 1.2 更新 `CANONICAL_PHASE_MAP` 中 uat 的 fail 分支映射: `"uat": ("merging", "fixing")`
+  - [x] 1.3 更新 `_PHASE_SUCCESS_EVENT` 在 recovery.py 中确认 uat 映射正确
+  - [x] 1.4 编写 `uat_fail` 转换单元测试（正向 + 非法状态拒绝）
 
-- [ ] Task 2: 实现 `ato uat` CLI 命令 (AC: #1)
-  - [ ] 2.1 在 `cli.py` 添加 `@app.command("uat")` 命令，参数: `story_id`, `--result pass|fail`, `--reason`
-  - [ ] 2.2 实现 `_uat_async()` 异步逻辑：验证 story 在 uat 阶段、存储结果、触发事件
-  - [ ] 2.3 pass 路径: 创建 TransitionEvent(event_name="uat_pass")，通过 nudge 通知 Orchestrator
-  - [ ] 2.4 fail 路径: 创建 TransitionEvent(event_name="uat_fail")，携带 reason，通过 nudge 通知
-  - [ ] 2.5 UAT 结果持久化：写入 tasks 表的 context_briefing（复用 ContextBriefing 结构）或 approval payload
+- [x] Task 2: 实现 `ato uat` CLI 命令 (AC: #1)
+  - [x] 2.1 在 `cli.py` 添加 `@app.command("uat")` 命令，参数: `story_id`, `--result pass|fail`, `--reason`
+  - [x] 2.2 实现 `_uat_async()` 异步逻辑：验证 story 在 uat 阶段、存储结果、触发事件
+  - [x] 2.3 pass 路径: 创建 TransitionEvent(event_name="uat_pass")，通过 nudge 通知 Orchestrator
+  - [x] 2.4 fail 路径: 创建 TransitionEvent(event_name="uat_fail")，携带 reason，通过 nudge 通知
+  - [x] 2.5 UAT 结果持久化：写入 tasks 表的 context_briefing（复用 ContextBriefing 结构）或 approval payload
 
-- [ ] Task 3: Orchestrator 消费 `uat_fail` 事件 (AC: #1)
-  - [ ] 3.1 在 `core.py` 的 `_detect_completed_interactive_tasks` 或 approval 消费路径中处理 uat_fail
-  - [ ] 3.2 uat_fail → 转回 fixing 阶段，使 story 重新进入 Convergent Loop
-  - [ ] 3.3 验证重入 CL 后 review → fix → re-review 流程正常运行
+- [x] Task 3: Orchestrator 消费 `uat_fail` 事件 (AC: #1)
+  - [x] 3.1 在 `core.py` 的 `_detect_completed_interactive_tasks` 或 approval 消费路径中处理 uat_fail
+  - [x] 3.2 uat_fail → 转回 fixing 阶段，使 story 重新进入 Convergent Loop
+  - [x] 3.3 验证重入 CL 后 review → fix → re-review 流程正常运行
 
-- [ ] Task 4: 验证 `ato submit` + `ato uat` 端到端集成 (AC: #1, #2, #3)
-  - [ ] 4.1 `ato submit` 在 developing 阶段的完整流程测试（已有代码，验证与 4.1 approval 基础设施集成）
-  - [ ] 4.2 `ato uat --result pass` 端到端：uat → merging 状态转换验证
-  - [ ] 4.3 `ato uat --result fail` 端到端：uat → fixing 状态转换 + CL 重入验证
-  - [ ] 4.4 崩溃恢复场景：uat 阶段 crash → needs_human approval → restart/resume/abandon 三选项验证
+- [x] Task 4: 验证 `ato submit` + `ato uat` 端到端集成 (AC: #1, #2, #3)
+  - [x] 4.1 `ato submit` 在 developing 阶段的完整流程测试（已有代码，验证与 4.1 approval 基础设施集成）
+  - [x] 4.2 `ato uat --result pass` 端到端：uat → merging 状态转换验证
+  - [x] 4.3 `ato uat --result fail` 端到端：uat → fixing 状态转换 + CL 重入验证
+  - [x] 4.4 崩溃恢复场景：uat 阶段 crash → needs_human approval → restart/resume/abandon 三选项验证
 
-- [ ] Task 5: 测试覆盖 (AC: #1, #2, #3)
-  - [ ] 5.1 `ato uat` 命令单元测试：pass/fail 两路径、参数验证、错误处理
-  - [ ] 5.2 `uat_fail` 状态机转换测试：合法/非法转换
-  - [ ] 5.3 Orchestrator uat_fail 消费测试
-  - [ ] 5.4 集成测试：uat fail → fixing → reviewing 完整 Convergent Loop 回退路径
+- [x] Task 5: 测试覆盖 (AC: #1, #2, #3)
+  - [x] 5.1 `ato uat` 命令单元测试：pass/fail 两路径、参数验证、错误处理
+  - [x] 5.2 `uat_fail` 状态机转换测试：合法/非法转换
+  - [x] 5.3 Orchestrator uat_fail 消费测试
+  - [x] 5.4 集成测试：uat fail → fixing → reviewing 完整 Convergent Loop 回退路径
 
 ## Dev Notes
 
@@ -225,9 +225,33 @@ uat_fail = uat.to(fixing)  # FR48: UAT 失败退回 fix 阶段
 ## Dev Agent Record
 
 ### Agent Model Used
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
+- from_config() 测试失败：ato.yaml.example 缺少 uat.next_on_failure，已同步更新配置
+- 集成测试 TQ 时序：需要 `await tq._queue.join()` 确保异步 consumer 处理完毕再断言
+- Code review fix: CLI fail 路径创建独立 TQ 导致 Orchestrator 状态机缓存分叉，重写为 DB marker 模式
+- Code review fix: fail 路径缺少 running task 校验，添加与 pass 路径一致的 guard
 
 ### Completion Notes List
+- ✅ Task 1: 状态机新增 `uat_fail = uat.to(fixing)` 转换，CANONICAL_TRANSITIONS 和 _PHASE_FAIL_EVENT 同步更新
+- ✅ Task 2: 实现 `ato uat` CLI 命令，pass 路径标记 task completed + nudge，fail 路径使用 DB marker（uat_fail_requested）+ nudge
+- ✅ Task 3: core.py 新增 `_detect_failed_uat_tasks()` 检测 CLI uat_fail 标记，在 _poll_cycle 中消费并通过 Orchestrator 自己的 TQ 执行转换
+- ✅ Task 4: 端到端集成测试覆盖 uat_pass/uat_fail/CL 重入/submit 检测/crash recovery/TQ 缓存一致性
+- ✅ Task 5: 全部 1098 测试通过，ruff check + mypy 零错误
+- ✅ Review Fix 1 (HIGH): 移除 CLI 进程内 TransitionQueue，改用 expected_artifact="uat_fail_requested" DB 标记模式
+- ✅ Review Fix 2 (MED): fail 路径添加 running_task is None 校验，与 pass 路径一致
+
+### Change Log
+- 2026-03-26: Story 4.3 完整实现 — UAT 结果提交 + uat_fail 状态转换 + 端到端集成测试
+- 2026-03-26: Code review fixes — 修复 TQ 缓存分叉 + fail 路径 running task 校验
 
 ### File List
+- `src/ato/state_machine.py` — 新增 uat_fail 转换，更新 CANONICAL_TRANSITIONS
+- `src/ato/cli.py` — 新增 ato uat 命令（uat_cmd + _uat_async），fail 路径使用 DB marker 模式
+- `src/ato/core.py` — 新增 `_detect_failed_uat_tasks()`，`_poll_cycle` 消费 uat_fail 标记
+- `src/ato/recovery.py` — _PHASE_FAIL_EVENT 新增 uat 映射
+- `ato.yaml.example` — uat phase 新增 next_on_failure: fixing
+- `tests/unit/test_cli_uat.py` — 15 个 ato uat 单元测试
+- `tests/unit/test_state_machine.py` — 4 个 uat_fail 转换测试
+- `tests/integration/test_uat_flow.py` — 7 个端到端集成测试（含 TQ 缓存一致性回归）

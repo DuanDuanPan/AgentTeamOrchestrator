@@ -187,6 +187,46 @@ async def _detect_completed_interactive_tasks(
     return results
 
 
+async def _detect_failed_uat_tasks(
+    db: aiosqlite.Connection,
+) -> list[tuple[str, TransitionEvent]]:
+    """检测由 ``ato uat --result fail`` 标记的 UAT 失败 task。
+
+    CLI fail 路径将 task 标记为 ``status='failed'``、
+    ``expected_artifact='uat_fail_requested'``，由 Orchestrator 在 _poll_cycle
+    中调用此函数检测，通过 **自己的 TQ** 提交 ``uat_fail`` 事件。
+
+    这避免了 CLI 进程创建独立 TransitionQueue 导致的状态机缓存分叉问题。
+
+    Returns:
+        (task_id, TransitionEvent) 对列表。
+    """
+    from ato.models.db import get_story
+
+    tasks = await get_tasks_by_status(db, "failed")
+    now = datetime.now(tz=UTC)
+    results: list[tuple[str, TransitionEvent]] = []
+    for task in tasks:
+        if task.expected_artifact != "uat_fail_requested":
+            continue
+        # 校验 story.current_phase 仍在 uat
+        story = await get_story(db, task.story_id)
+        if story is None or story.current_phase != "uat":
+            continue
+        results.append(
+            (
+                task.task_id,
+                TransitionEvent(
+                    story_id=task.story_id,
+                    event_name="uat_fail",
+                    source="cli",
+                    submitted_at=now,
+                ),
+            )
+        )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -377,6 +417,20 @@ class Orchestrator:
                             db,
                             task_id,
                             "completed",
+                            expected_artifact="transition_submitted",
+                        )
+
+                # 检测 CLI uat_fail 标记（DB marker 模式，避免缓存分叉）
+                uat_fail_events = await _detect_failed_uat_tasks(db)
+                if uat_fail_events and self._tq is not None:
+                    from ato.models.db import update_task_status as _uts
+
+                    for task_id, event in uat_fail_events:
+                        await self._tq.submit(event)
+                        await _uts(
+                            db,
+                            task_id,
+                            "failed",
                             expected_artifact="transition_submitted",
                         )
             finally:
