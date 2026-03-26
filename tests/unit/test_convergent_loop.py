@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ato.config import ConvergentLoopConfig
-from ato.convergent_loop import ConvergentLoop, MatchResult
+from ato.convergent_loop import ConvergentLoop, MatchResult, logger
 from ato.models.db import (
     get_connection,
     get_findings_by_story,
@@ -1497,9 +1497,7 @@ def _make_finding_record_for_rereview(
         status=status,
         file_path=file_path,
         rule_id=rule_id,
-        dedup_hash=compute_dedup_hash(
-            file_path, rule_id, severity, description
-        ),
+        dedup_hash=compute_dedup_hash(file_path, rule_id, severity, description),
         line_number=line_number,
         created_at=_NOW,
     )
@@ -1509,9 +1507,7 @@ class TestRereviewScopeNarrowedPrompt:
     """re-review prompt 仅包含上轮 open findings。"""
 
     @pytest.mark.asyncio
-    async def test_rereview_scope_narrowed_prompt(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_rereview_scope_narrowed_prompt(self, initialized_db_path: Any) -> None:
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -1540,12 +1536,8 @@ class TestRereviewScopeNarrowedPrompt:
             await db.close()
 
         # Mock re-review returns nothing (all fixed)
-        parse_result = _make_parse_result(
-            verdict="approved", findings=[]
-        )
-        loop, mock_sub, _bmad, _tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, mock_sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
         await loop.run_rereview(
             story_id=story.story_id,
@@ -1568,9 +1560,7 @@ class TestRereviewScopeUsesAllCurrentUnresolvedFindings:
     """round 3+ 时仍包含更早轮次遗留的 still_open findings。"""
 
     @pytest.mark.asyncio
-    async def test_includes_earlier_round_still_open(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_includes_earlier_round_still_open(self, initialized_db_path: Any) -> None:
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -1597,18 +1587,12 @@ class TestRereviewScopeUsesAllCurrentUnresolvedFindings:
                 status="open",
                 round_num=2,
             )
-            await insert_findings_batch(
-                db, [round1_finding, round2_finding]
-            )
+            await insert_findings_batch(db, [round1_finding, round2_finding])
         finally:
             await db.close()
 
-        parse_result = _make_parse_result(
-            verdict="approved", findings=[]
-        )
-        loop, mock_sub, _bmad, _tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, mock_sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
         await loop.run_rereview(
             story_id=story.story_id,
@@ -1652,16 +1636,10 @@ class TestRereviewMatchStillOpen:
             file_path="src/x.py",
             rule_id="SO01",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[rr_finding]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[rr_finding])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         # Verify the finding is now still_open in DB
         from ato.models.db import get_findings_by_story
@@ -1702,16 +1680,10 @@ class TestRereviewMatchClosed:
             await db.close()
 
         # Re-review returns no findings (all fixed)
-        parse_result = _make_parse_result(
-            verdict="approved", findings=[]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         from ato.models.db import get_findings_by_story
 
@@ -1745,16 +1717,10 @@ class TestRereviewMatchNewFinding:
             file_path="src/z.py",
             rule_id="NW01",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[new_f]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[new_f])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.new_count == 1
 
@@ -1762,9 +1728,7 @@ class TestRereviewMatchNewFinding:
 
         db = await get_connection(initialized_db_path)
         try:
-            findings = await get_findings_by_story(
-                db, story.story_id, round_num=2
-            )
+            findings = await get_findings_by_story(db, story.story_id, round_num=2)
         finally:
             await db.close()
 
@@ -1818,16 +1782,10 @@ class TestRereviewMixedScenario:
             file_path="src/c.py",
             rule_id="MX03",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[rr_f2, rr_new]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[rr_f2, rr_new])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.closed_count == 1  # f1 closed
         assert result.new_count == 1  # rr_new
@@ -1860,16 +1818,10 @@ class TestRereviewAllBlockingClosedConverges:
             await db.close()
 
         # All fixed
-        parse_result = _make_parse_result(
-            verdict="approved", findings=[]
-        )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.converged is True
         event: TransitionEvent = mock_tq.submit.call_args[0][0]
@@ -1906,16 +1858,10 @@ class TestRereviewBlockingStillOpenNotConverged:
             file_path="src/a.py",
             rule_id="NC01",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[rr]
-        )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[rr])
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.converged is False
         event: TransitionEvent = mock_tq.submit.call_args[0][0]
@@ -1940,16 +1886,10 @@ class TestRereviewNewBlockingNotConverged:
             file_path="src/new.py",
             rule_id="NB01",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[new_blocking]
-        )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[new_blocking])
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.converged is False
         event: TransitionEvent = mock_tq.submit.call_args[0][0]
@@ -1960,9 +1900,7 @@ class TestRereviewSuggestionsOnlyConverges:
     """仅剩 suggestion（无 blocking）→ converged=True。"""
 
     @pytest.mark.asyncio
-    async def test_suggestions_only(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_suggestions_only(self, initialized_db_path: Any) -> None:
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -1989,16 +1927,10 @@ class TestRereviewSuggestionsOnlyConverges:
             file_path="src/a.py",
             rule_id="SG02",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[sug]
-        )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[sug])
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.converged is True
         event: TransitionEvent = mock_tq.submit.call_args[0][0]
@@ -2038,13 +1970,9 @@ class TestRereviewParseFailureReturnsNonConverged:
             parse_error="Could not parse",
             parsed_at=_NOW,
         )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.converged is False
         assert result.findings_total == 0
@@ -2098,16 +2026,10 @@ class TestRereviewTransitionEventReviewPass:
             await db.close()
 
         # No previous findings, no new findings → converged
-        parse_result = _make_parse_result(
-            verdict="approved", findings=[]
-        )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.converged is True
         mock_tq.submit.assert_called_once()
@@ -2146,16 +2068,10 @@ class TestRereviewTransitionEventReviewFail:
             file_path="src/a.py",
             rule_id="RF01",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[rr]
-        )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[rr])
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.converged is False
         mock_tq.submit.assert_called_once()
@@ -2168,9 +2084,7 @@ class TestRereviewStructlogFields:
     """验证 round_complete 日志含 closed_count、new_count。"""
 
     @pytest.mark.asyncio
-    async def test_structlog_fields(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_structlog_fields(self, initialized_db_path: Any) -> None:
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -2196,12 +2110,8 @@ class TestRereviewStructlogFields:
             file_path="src/b.py",
             rule_id="LG02",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[new_sug]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[new_sug])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
         captured: list[dict[str, Any]] = []
 
@@ -2226,9 +2136,7 @@ class TestRereviewStructlogFields:
         old_logger = cl_module.logger
         cl_module.logger = CapturingLogger()  # type: ignore[assignment]
         try:
-            await loop.run_rereview(
-                story.story_id, 2, worktree_path="/tmp/wt"
-            )
+            await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
         finally:
             cl_module.logger = old_logger
 
@@ -2295,16 +2203,10 @@ class TestRereviewResultCounts:
             file_path="src/c.py",
             rule_id="RC03",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[rr_f2, rr_new]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[rr_f2, rr_new])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         assert result.round_num == 2
         assert result.findings_total == 2  # parse 出的总数
@@ -2338,9 +2240,7 @@ class TestMatchAllClosed:
                 rule_id="A02",
             ),
         ]
-        result = loop._match_findings_across_rounds(
-            prev, [], "s1", 2
-        )
+        result = loop._match_findings_across_rounds(prev, [], "s1", 2)
         assert len(result.closed_ids) == 2
         assert len(result.still_open_ids) == 0
         assert len(result.new_findings) == 0
@@ -2368,9 +2268,7 @@ class TestMatchAllStillOpen:
                 severity="blocking",
             ),
         ]
-        result = loop._match_findings_across_rounds(
-            prev, current, "s1", 2
-        )
+        result = loop._match_findings_across_rounds(prev, current, "s1", 2)
         assert result.still_open_ids == ["f1"]
         assert len(result.closed_ids) == 0
         assert len(result.new_findings) == 0
@@ -2393,9 +2291,7 @@ class TestMatchNoPreviousAllNew:
                 rule_id="C02",
             ),
         ]
-        result = loop._match_findings_across_rounds(
-            [], current, "s1", 2
-        )
+        result = loop._match_findings_across_rounds([], current, "s1", 2)
         assert len(result.new_findings) == 2
         assert len(result.still_open_ids) == 0
         assert len(result.closed_ids) == 0
@@ -2463,16 +2359,10 @@ class TestRereviewBlockingAbnormalIncludesStillOpen:
             )
             for i in range(11)
         ]
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=rr_findings
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=rr_findings)
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         # 阈值 = 10（默认），11 blocking still_open → 应创建 approval
         db = await get_connection(initialized_db_path)
@@ -2481,11 +2371,7 @@ class TestRereviewBlockingAbnormalIncludesStillOpen:
         finally:
             await db.close()
 
-        blocking_approvals = [
-            a
-            for a in approvals
-            if a.approval_type == "blocking_abnormal"
-        ]
+        blocking_approvals = [a for a in approvals if a.approval_type == "blocking_abnormal"]
         assert len(blocking_approvals) == 1
 
     @pytest.mark.asyncio
@@ -2525,16 +2411,10 @@ class TestRereviewBlockingAbnormalIncludesStillOpen:
             )
             for i in range(3)
         ]
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=rr_findings
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=rr_findings)
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         db = await get_connection(initialized_db_path)
         try:
@@ -2542,11 +2422,7 @@ class TestRereviewBlockingAbnormalIncludesStillOpen:
         finally:
             await db.close()
 
-        blocking_approvals = [
-            a
-            for a in approvals
-            if a.approval_type == "blocking_abnormal"
-        ]
+        blocking_approvals = [a for a in approvals if a.approval_type == "blocking_abnormal"]
         assert len(blocking_approvals) == 0
 
 
@@ -2559,9 +2435,7 @@ class TestMatchDuplicateHashAllClosed:
     """两条同 hash 的旧 blocking，re-review 返回空 → 两条都应 closed。"""
 
     @pytest.mark.asyncio
-    async def test_duplicate_hash_both_closed(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_duplicate_hash_both_closed(self, initialized_db_path: Any) -> None:
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -2591,16 +2465,10 @@ class TestMatchDuplicateHashAllClosed:
             await db.close()
 
         # Re-review returns empty → all fixed
-        parse_result = _make_parse_result(
-            verdict="approved", findings=[]
-        )
-        loop, _, _, mock_tq = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, _, _, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         # 两条都应标记为 closed
         assert result.closed_count == 2
@@ -2626,9 +2494,7 @@ class TestMatchDuplicateHashStillOpen:
     """两条同 hash 的旧 blocking，re-review 仍报告 → 两条都 still_open。"""
 
     @pytest.mark.asyncio
-    async def test_duplicate_hash_both_still_open(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_duplicate_hash_both_still_open(self, initialized_db_path: Any) -> None:
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -2662,16 +2528,10 @@ class TestMatchDuplicateHashStillOpen:
             file_path="src/dup.py",
             rule_id="DSO01",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[rr]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[rr])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         # 两条都应标记为 still_open
         from ato.models.db import get_findings_by_story
@@ -2706,9 +2566,7 @@ class TestMatchDuplicateHashUnit:
             file_path="src/d.py",
             rule_id="D01",
         )
-        result = loop._match_findings_across_rounds(
-            [dup1, dup2], [], "s1", 2
-        )
+        result = loop._match_findings_across_rounds([dup1, dup2], [], "s1", 2)
         assert sorted(result.closed_ids) == ["d1", "d2"]
         assert len(result.still_open_ids) == 0
 
@@ -2737,9 +2595,7 @@ class TestMatchDuplicateHashUnit:
                 severity="blocking",
             ),
         ]
-        result = loop._match_findings_across_rounds(
-            [dup1, dup2], current, "s1", 2
-        )
+        result = loop._match_findings_across_rounds([dup1, dup2], current, "s1", 2)
         assert sorted(result.still_open_ids) == ["d1", "d2"]
         assert len(result.closed_ids) == 0
 
@@ -2768,9 +2624,7 @@ class TestMatchNewFindingDedup:
         )
         assert dup_a.dedup_hash == dup_b.dedup_hash
 
-        result = loop._match_findings_across_rounds(
-            [], [dup_a, dup_b], "s1", 2
-        )
+        result = loop._match_findings_across_rounds([], [dup_a, dup_b], "s1", 2)
         assert len(result.new_findings) == 1
         assert result.new_findings[0].dedup_hash == dup_a.dedup_hash
 
@@ -2789,9 +2643,7 @@ class TestMatchNewFindingDedup:
             file_path="src/b.py",
             rule_id="B01",
         )
-        result = loop._match_findings_across_rounds(
-            [], [f1, f2], "s1", 2
-        )
+        result = loop._match_findings_across_rounds([], [f1, f2], "s1", 2)
         assert len(result.new_findings) == 2
 
 
@@ -2799,9 +2651,7 @@ class TestRereviewDuplicateNewFindingIntegration:
     """端到端：重复新 finding 不应放大 count 或误触 escalation。"""
 
     @pytest.mark.asyncio
-    async def test_duplicate_new_finding_deduped_in_db(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_duplicate_new_finding_deduped_in_db(self, initialized_db_path: Any) -> None:
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -2816,16 +2666,10 @@ class TestRereviewDuplicateNewFindingIntegration:
             file_path="src/dup.py",
             rule_id="DNEW01",
         )
-        parse_result = _make_parse_result(
-            verdict="changes_requested", findings=[dup, dup]
-        )
-        loop, _, _, _ = _make_loop(
-            initialized_db_path, parse_result=parse_result
-        )
+        parse_result = _make_parse_result(verdict="changes_requested", findings=[dup, dup])
+        loop, _, _, _ = _make_loop(initialized_db_path, parse_result=parse_result)
 
-        result = await loop.run_rereview(
-            story.story_id, 2, worktree_path="/tmp/wt"
-        )
+        result = await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
 
         # parse 统计反映原始 parser 输出（2 条重复）
         assert result.findings_total == 2
@@ -2839,10 +2683,629 @@ class TestRereviewDuplicateNewFindingIntegration:
 
         db = await get_connection(initialized_db_path)
         try:
-            findings = await get_findings_by_story(
-                db, story.story_id, round_num=2
-            )
+            findings = await get_findings_by_story(db, story.story_id, round_num=2)
         finally:
             await db.close()
 
         assert len(findings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Story 3.2d — run_loop / escalation / termination tests
+# ---------------------------------------------------------------------------
+
+
+def _make_converged_result(
+    story_id: str = "story-cl-test",
+    round_num: int = 1,
+) -> ConvergentLoopResult:
+    """创建一个 converged=True 的结果。"""
+    return ConvergentLoopResult(
+        story_id=story_id,
+        round_num=round_num,
+        converged=True,
+        findings_total=0,
+        blocking_count=0,
+        suggestion_count=0,
+        open_count=0,
+    )
+
+
+def _make_not_converged_result(
+    story_id: str = "story-cl-test",
+    round_num: int = 1,
+    blocking_count: int = 2,
+) -> ConvergentLoopResult:
+    """创建一个 converged=False 的结果。"""
+    return ConvergentLoopResult(
+        story_id=story_id,
+        round_num=round_num,
+        converged=False,
+        findings_total=blocking_count,
+        blocking_count=blocking_count,
+        suggestion_count=0,
+        open_count=blocking_count,
+    )
+
+
+class TestRunLoopConvergesFirstRound:
+    """首轮 0 blocking → run_first_review returns converged=True → 直接返回。"""
+
+    @pytest.mark.asyncio
+    async def test_converges_first_round(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        # Mock run_first_review to return converged
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
+        loop.run_fix_dispatch = AsyncMock()
+        loop.run_rereview = AsyncMock()
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is True
+        loop.run_first_review.assert_called_once_with(
+            story.story_id, "/tmp/wt", artifact_payload=None
+        )
+        loop.run_fix_dispatch.assert_not_called()
+        loop.run_rereview.assert_not_called()
+
+
+class TestRunLoopConvergesAfterFix:
+    """首轮有 blocking → fix → rereview converged → 返回。"""
+
+    @pytest.mark.asyncio
+    async def test_converges_after_one_fix(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_rereview = AsyncMock(
+            return_value=_make_converged_result(story.story_id, round_num=2)
+        )
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is True
+        assert result.round_num == 2
+        loop.run_first_review.assert_called_once()
+        loop.run_fix_dispatch.assert_called_once_with(story.story_id, 1, "/tmp/wt")
+        loop.run_rereview.assert_called_once_with(story.story_id, 2, "/tmp/wt")
+
+
+class TestRunLoopMultipleRounds:
+    """多轮 fix-rereview 后第 N 轮收敛。"""
+
+    @pytest.mark.asyncio
+    async def test_converges_round_3(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
+        # rereview: round 2 not converged, round 3 converged
+        loop.run_rereview = AsyncMock(
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_converged_result(story.story_id, round_num=3),
+            ]
+        )
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is True
+        assert result.round_num == 3
+        assert loop.run_fix_dispatch.call_count == 2
+        assert loop.run_rereview.call_count == 2
+        # fix_round = rereview_round - 1
+        loop.run_fix_dispatch.assert_any_call(story.story_id, 1, "/tmp/wt")
+        loop.run_fix_dispatch.assert_any_call(story.story_id, 2, "/tmp/wt")
+        loop.run_rereview.assert_any_call(story.story_id, 2, "/tmp/wt")
+        loop.run_rereview.assert_any_call(story.story_id, 3, "/tmp/wt")
+
+
+class TestRunLoopMaxRoundsEscalation:
+    """达到 max_rounds → 强制终止 + escalation approval 创建。"""
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_escalation(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
+        # All rereview rounds not converged (default max_rounds=3)
+        loop.run_rereview = AsyncMock(
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+            ]
+        )
+        # Mock DB query for accurate remaining blocking count
+        loop._get_remaining_blocking_count = AsyncMock(return_value=2)
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is False
+
+        # Verify escalation approval was created in DB
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 1
+        assert escalations[0].story_id == story.story_id
+
+        import json
+
+        payload = json.loads(escalations[0].payload or "{}")
+        assert payload["rounds_completed"] == 3
+        assert payload["open_blocking_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_no_escalation_when_converged(self, initialized_db_path: Any) -> None:
+        """收敛场景中 approval 表无 escalation 记录。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
+
+        await loop.run_loop(story.story_id, "/tmp/wt")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 0
+
+
+class TestRunLoopMaxRoundsOneEdge:
+    """max_rounds=1 → 首轮 review 后若不收敛直接 escalation。"""
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_one_escalation(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        # Override config to max_rounds=1
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop._config = ConvergentLoopConfig(max_rounds=1)
+        loop.run_first_review = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock()
+        loop.run_rereview = AsyncMock()
+        loop._get_remaining_blocking_count = AsyncMock(return_value=2)
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is False
+        # No fix or rereview should be called
+        loop.run_fix_dispatch.assert_not_called()
+        loop.run_rereview.assert_not_called()
+
+        # Verify escalation created
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 1
+
+        import json
+
+        payload = json.loads(escalations[0].payload or "{}")
+        assert payload["rounds_completed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_one_converged(self, initialized_db_path: Any) -> None:
+        """max_rounds=1 但首轮收敛 → 无 escalation。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop._config = ConvergentLoopConfig(max_rounds=1)
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is True
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 0
+
+
+class TestRunLoopStructlogOutput:
+    """验证 run_loop 只补终止日志；每轮 round_complete 已由 3.2a-c 覆盖。"""
+
+    @pytest.mark.asyncio
+    async def test_converged_log(self, initialized_db_path: Any) -> None:
+        captured: list[dict[str, Any]] = []
+        original_info = logger.info
+        original_warning = logger.warning
+
+        def capture_info(event: str, **kw: Any) -> Any:
+            captured.append({"event": event, "level": "info", **kw})
+            return original_info(event, **kw)
+
+        def capture_warning(event: str, **kw: Any) -> Any:
+            captured.append({"event": event, "level": "warning", **kw})
+            return original_warning(event, **kw)
+
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
+
+        import unittest.mock
+
+        with (
+            unittest.mock.patch.object(logger, "info", side_effect=capture_info),
+            unittest.mock.patch.object(logger, "warning", side_effect=capture_warning),
+        ):
+            await loop.run_loop(story.story_id, "/tmp/wt")
+
+        converged_events = [e for e in captured if e["event"] == "convergent_loop_converged"]
+        assert len(converged_events) == 1
+        assert converged_events[0]["total_rounds"] == 1
+        assert converged_events[0]["max_rounds"] == 3
+
+        # No round_complete from run_loop itself (that's sub-method responsibility)
+        loop_round_complete = [
+            e for e in captured if e["event"] == "convergent_loop_round_complete"
+        ]
+        assert len(loop_round_complete) == 0
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_log(self, initialized_db_path: Any) -> None:
+        captured: list[dict[str, Any]] = []
+        original_info = logger.info
+        original_warning = logger.warning
+
+        def capture_info(event: str, **kw: Any) -> Any:
+            captured.append({"event": event, "level": "info", **kw})
+            return original_info(event, **kw)
+
+        def capture_warning(event: str, **kw: Any) -> Any:
+            captured.append({"event": event, "level": "warning", **kw})
+            return original_warning(event, **kw)
+
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
+        loop.run_rereview = AsyncMock(
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+            ]
+        )
+        loop._get_remaining_blocking_count = AsyncMock(return_value=7)
+
+        import unittest.mock
+
+        with (
+            unittest.mock.patch.object(logger, "info", side_effect=capture_info),
+            unittest.mock.patch.object(logger, "warning", side_effect=capture_warning),
+        ):
+            await loop.run_loop(story.story_id, "/tmp/wt")
+
+        max_round_events = [
+            e for e in captured if e["event"] == "convergent_loop_max_rounds_reached"
+        ]
+        assert len(max_round_events) == 1
+        assert max_round_events[0]["total_rounds"] == 3
+        assert max_round_events[0]["max_rounds"] == 3
+        # remaining_blocking 来自 DB 查询（mock 返回 7），而非 result.blocking_count
+        assert max_round_events[0]["remaining_blocking"] == 7
+        assert max_round_events[0]["level"] == "warning"
+
+
+class TestEscalationApprovalFields:
+    """验证 escalation approval 记录的字段完整性。"""
+
+    @pytest.mark.asyncio
+    async def test_approval_fields(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        # 新签名：remaining_blocking 是 int，不是 ConvergentLoopResult
+        await loop._create_escalation_approval(story.story_id, 3, 5)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        assert len(approvals) == 1
+        approval = approvals[0]
+        assert approval.approval_type == "convergent_loop_escalation"
+        assert approval.story_id == story.story_id
+        assert approval.status == "pending"
+        assert approval.approval_id  # non-empty
+
+        import json
+
+        payload = json.loads(approval.payload or "{}")
+        assert payload["rounds_completed"] == 3
+        assert payload["open_blocking_count"] == 5
+
+    @pytest.mark.asyncio
+    async def test_nudge_called(self, initialized_db_path: Any) -> None:
+        """Escalation 创建后 nudge.notify() 被调用。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        import unittest.mock
+
+        mock_nudge = unittest.mock.Mock()
+        mock_nudge.notify = unittest.mock.Mock()
+        loop, _, _, _ = _make_loop(initialized_db_path, nudge=mock_nudge)
+        await loop._create_escalation_approval(story.story_id, 3, 2)
+
+        mock_nudge.notify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_idempotent_no_duplicate(self, initialized_db_path: Any) -> None:
+        """Finding 3: 重复调用不会创建多条 pending escalation。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        # 第一次创建
+        await loop._create_escalation_approval(story.story_id, 3, 2)
+        # 第二次调用应跳过
+        await loop._create_escalation_approval(story.story_id, 3, 2)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 1  # 只有一条，不是两条
+
+
+class TestRunLoopParseFailureShortCircuit:
+    """Finding 1: parse failure 时 run_loop 不应继续进入 fix/rereview。"""
+
+    @pytest.mark.asyncio
+    async def test_first_review_parse_failure_aborts(self, initialized_db_path: Any) -> None:
+        """首轮 parse failure → 立即返回，不进入 fix。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        # parse failure 结果：converged=False, findings_total=0
+        parse_fail_result = ConvergentLoopResult(
+            story_id=story.story_id,
+            round_num=1,
+            converged=False,
+            findings_total=0,
+            blocking_count=0,
+            suggestion_count=0,
+            open_count=0,
+        )
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(return_value=parse_fail_result)
+        loop.run_fix_dispatch = AsyncMock()
+        loop.run_rereview = AsyncMock()
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is False
+        assert result.findings_total == 0
+        # 关键断言：不应进入 fix 或 rereview
+        loop.run_fix_dispatch.assert_not_called()
+        loop.run_rereview.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rereview_parse_failure_aborts(self, initialized_db_path: Any) -> None:
+        """rereview parse failure → 立即返回，不继续循环。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        # rereview parse failure 结果
+        rereview_parse_fail = ConvergentLoopResult(
+            story_id=story.story_id,
+            round_num=2,
+            converged=False,
+            findings_total=0,
+            blocking_count=0,
+            suggestion_count=0,
+            open_count=3,
+        )
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
+        loop.run_rereview = AsyncMock(return_value=rereview_parse_fail)
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is False
+        assert result.findings_total == 0
+        # 只调用了一次 fix + 一次 rereview，之后中断
+        loop.run_fix_dispatch.assert_called_once()
+        loop.run_rereview.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_parse_failure_logs_abort_warning(self, initialized_db_path: Any) -> None:
+        """parse failure 短路时输出 convergent_loop_aborted 警告。"""
+        captured: list[dict[str, Any]] = []
+        original_warning = logger.warning
+
+        def capture_warning(event: str, **kw: Any) -> Any:
+            captured.append({"event": event, **kw})
+            return original_warning(event, **kw)
+
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        parse_fail_result = ConvergentLoopResult(
+            story_id=story.story_id,
+            round_num=1,
+            converged=False,
+            findings_total=0,
+            blocking_count=0,
+            suggestion_count=0,
+            open_count=0,
+        )
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(return_value=parse_fail_result)
+
+        import unittest.mock
+
+        with unittest.mock.patch.object(logger, "warning", side_effect=capture_warning):
+            await loop.run_loop(story.story_id, "/tmp/wt")
+
+        abort_events = [e for e in captured if e["event"] == "convergent_loop_aborted"]
+        assert len(abort_events) == 1
+        assert abort_events[0]["round_num"] == 1
+
+
+class TestRemainingBlockingFromDB:
+    """Finding 2: escalation 和终止日志使用 DB 查询的准确 open blocking count。"""
+
+    @pytest.mark.asyncio
+    async def test_escalation_uses_db_count_not_parser_count(
+        self, initialized_db_path: Any
+    ) -> None:
+        """模拟 dedup 场景：parser 报 1 blocking，实际 DB 有 3 个 open blocking。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        # rereview 结果：parser 只报了 1 个 blocking（raw count）
+        loop.run_first_review = AsyncMock(
+            return_value=_make_not_converged_result(story.story_id, round_num=1, blocking_count=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
+        loop.run_rereview = AsyncMock(
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2, blocking_count=1),
+                _make_not_converged_result(story.story_id, round_num=3, blocking_count=1),
+            ]
+        )
+        # DB 实际有 3 个 open blocking（dedup 后）
+        loop._get_remaining_blocking_count = AsyncMock(return_value=3)
+
+        await loop.run_loop(story.story_id, "/tmp/wt")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 1
+
+        import json
+
+        payload = json.loads(escalations[0].payload or "{}")
+        # 应该是 DB 的 3，不是 parser 的 1
+        assert payload["open_blocking_count"] == 3

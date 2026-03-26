@@ -3,7 +3,7 @@
 Story 3.2a: 首轮全量 review 实现。
 Story 3.2b: fix dispatch 与 artifact 验证。
 Story 3.2c: re-review scope narrowing 与跨轮次 finding 匹配。
-后续 story 逐步扩展终止条件 (3.2d)。
+Story 3.2d: 收敛判定与终止条件（run_loop 编排 + escalation）。
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import structlog
 from ato.adapters.bmad_adapter import record_parse_failure
 from ato.config import ConvergentLoopConfig
 from ato.models.schemas import (
+    ApprovalRecord,
     BmadFinding,
     BmadSkillType,
     ConvergentLoopResult,
@@ -74,6 +75,228 @@ class ConvergentLoop:
         self._config = config
         self._blocking_threshold = blocking_threshold
         self._nudge = nudge
+
+    # ------------------------------------------------------------------
+    # Story 3.2d — Convergent Loop Orchestration
+    # ------------------------------------------------------------------
+
+    async def run_loop(
+        self,
+        story_id: str,
+        worktree_path: str | None = None,
+        *,
+        artifact_payload: dict[str, Any] | None = None,
+    ) -> ConvergentLoopResult:
+        """编排完整的 review→fix→rereview 多轮循环。
+
+        统一管理轮次计数和终止逻辑。子方法 (run_first_review /
+        run_fix_dispatch / run_rereview) 各自负责 transition event
+        提交和每轮 round_complete 日志，run_loop 仅负责：
+        - 轮次计数与循环控制
+        - 终止判断（收敛 / max_rounds / 异常中断）
+        - Escalation approval 创建
+        - 终止摘要日志
+
+        Args:
+            story_id: Story 唯一标识。
+            worktree_path: 显式传入的 worktree 路径。
+            artifact_payload: 可选的结构化 artifact JSON（传给首轮 review）。
+
+        Returns:
+            最后一轮的 ConvergentLoopResult。
+        """
+        max_rounds = self._config.max_rounds
+
+        # 第 1 轮：全量 review
+        result = await self.run_first_review(
+            story_id, worktree_path, artifact_payload=artifact_payload
+        )
+        if result.converged:
+            self._log_termination_summary(
+                story_id=story_id,
+                total_rounds=1,
+                max_rounds=max_rounds,
+                converged=True,
+            )
+            return result
+
+        # --- Finding 1 fix: parse/validation failure 短路 ---
+        # parse_failed 或 validate_fail 时子方法返回 converged=False
+        # 但 findings_total=0 且不提交 review_fail transition，
+        # 继续循环会导致非法 transition。
+        if self._is_abnormal_result(result):
+            logger.warning(
+                "convergent_loop_aborted",
+                story_id=story_id,
+                round_num=result.round_num,
+                reason="review returned no findings without convergence "
+                "(parse failure or validation failure)",
+            )
+            return result
+
+        # max_rounds=1：首轮 review 未收敛时直接 escalation（不再进入 fix / rereview）
+        if max_rounds == 1:
+            remaining = await self._get_remaining_blocking_count(story_id)
+            await self._create_escalation_approval(story_id, 1, remaining)
+            self._log_termination_summary(
+                story_id=story_id,
+                total_rounds=1,
+                max_rounds=max_rounds,
+                converged=False,
+                remaining_blocking=remaining,
+            )
+            return result
+
+        # 第 2+ 轮：上一轮 fix → 本轮 rereview
+        for rereview_round in range(2, max_rounds + 1):
+            fix_round = rereview_round - 1
+            await self.run_fix_dispatch(story_id, fix_round, worktree_path)
+            result = await self.run_rereview(story_id, rereview_round, worktree_path)
+            if result.converged:
+                self._log_termination_summary(
+                    story_id=story_id,
+                    total_rounds=rereview_round,
+                    max_rounds=max_rounds,
+                    converged=True,
+                )
+                return result
+
+            # --- Finding 1 fix: rereview parse failure 短路 ---
+            if self._is_abnormal_result(result):
+                logger.warning(
+                    "convergent_loop_aborted",
+                    story_id=story_id,
+                    round_num=result.round_num,
+                    reason="rereview returned no findings without convergence (parse failure)",
+                )
+                return result
+
+        # 达到 max_rounds 仍未收敛 → 强制终止 + escalation
+        # --- Finding 2 fix: 从 DB 获取准确的 open blocking count ---
+        remaining = await self._get_remaining_blocking_count(story_id)
+        await self._create_escalation_approval(story_id, max_rounds, remaining)
+        self._log_termination_summary(
+            story_id=story_id,
+            total_rounds=max_rounds,
+            max_rounds=max_rounds,
+            converged=False,
+            remaining_blocking=remaining,
+        )
+        return result
+
+    @staticmethod
+    def _is_abnormal_result(result: ConvergentLoopResult) -> bool:
+        """检测异常结果：converged=False 但 findings_total=0。
+
+        此模式表示 parse 失败或 validation 失败——子方法未提交
+        review_fail transition，继续循环会破坏状态机合同。
+        """
+        return not result.converged and result.findings_total == 0
+
+    async def _get_remaining_blocking_count(self, story_id: str) -> int:
+        """从 DB 查询当前实际 open blocking findings 数量。
+
+        比 ConvergentLoopResult.blocking_count（raw parser count）更准确，
+        因为后者不反映 dedup 和 cross-round matching 的影响。
+        """
+        from ato.models.db import get_connection, get_open_findings
+
+        db = await get_connection(self._db_path)
+        try:
+            open_findings = await get_open_findings(db, story_id)
+            return sum(1 for f in open_findings if f.severity == "blocking")
+        finally:
+            await db.close()
+
+    async def _create_escalation_approval(
+        self,
+        story_id: str,
+        rounds_completed: int,
+        remaining_blocking: int,
+    ) -> None:
+        """创建 convergent_loop_escalation approval 并通知操作者。
+
+        内部通过 get_connection(self._db_path) 获取 db 连接，
+        与其他方法一致。幂等：同一 story 若已有 pending escalation 则跳过。
+        """
+        from ato.models.db import get_connection, insert_approval
+
+        db = await get_connection(self._db_path)
+        try:
+            # --- Finding 3 fix: 幂等检查 ---
+            cursor = await db.execute(
+                "SELECT 1 FROM approvals WHERE story_id = ? AND approval_type = ? AND status = ?",
+                (story_id, "convergent_loop_escalation", "pending"),
+            )
+            if await cursor.fetchone():
+                logger.info(
+                    "convergent_loop_escalation_exists",
+                    story_id=story_id,
+                    rounds_completed=rounds_completed,
+                )
+                return
+
+            approval = ApprovalRecord(
+                approval_id=str(uuid.uuid4()),
+                story_id=story_id,
+                approval_type="convergent_loop_escalation",
+                status="pending",
+                payload=json.dumps(
+                    {
+                        "rounds_completed": rounds_completed,
+                        "open_blocking_count": remaining_blocking,
+                    }
+                ),
+                created_at=datetime.now(tz=UTC),
+            )
+            await insert_approval(db, approval)
+        finally:
+            await db.close()
+
+        logger.warning(
+            "convergent_loop_escalation_created",
+            story_id=story_id,
+            rounds_completed=rounds_completed,
+            open_blocking_count=remaining_blocking,
+            approval_id=approval.approval_id,
+        )
+
+        if self._nudge is not None:
+            self._nudge.notify()
+
+    def _log_termination_summary(
+        self,
+        *,
+        story_id: str,
+        total_rounds: int,
+        max_rounds: int,
+        converged: bool,
+        remaining_blocking: int = 0,
+    ) -> None:
+        """记录 loop 终止摘要日志。
+
+        每轮 diff 日志已由 run_first_review / run_rereview 输出的
+        convergent_loop_round_complete 覆盖，此方法只补充终止摘要。
+        """
+        if converged:
+            logger.info(
+                "convergent_loop_converged",
+                story_id=story_id,
+                total_rounds=total_rounds,
+                max_rounds=max_rounds,
+            )
+        else:
+            logger.warning(
+                "convergent_loop_max_rounds_reached",
+                story_id=story_id,
+                total_rounds=total_rounds,
+                max_rounds=max_rounds,
+                remaining_blocking=remaining_blocking,
+            )
+
+    # ------------------------------------------------------------------
+    # Story 3.2a — First Review
+    # ------------------------------------------------------------------
 
     async def run_first_review(
         self,
