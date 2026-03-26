@@ -436,3 +436,151 @@ async def test_story_count_preserved_with_grouped_query(tui_db_path: Path) -> No
         assert app.story_count == 4
         assert app.running_count == 1
         assert app.error_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Story 6.2b: DashboardScreen Story 列表集成测试
+# ---------------------------------------------------------------------------
+
+
+async def _insert_stories(tui_db_path: Path, stories: list[tuple[str, str, str, str]]) -> None:
+    """辅助：插入 stories 列表。元组格式 (story_id, title, status, current_phase)。"""
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        for sid, title, status, phase in stories:
+            await db.execute(
+                "INSERT INTO stories (story_id, title, status, current_phase, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, title, status, phase, now, now),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def test_story_list_shows_stories(tui_db_path: Path) -> None:
+    """AC1: DashboardScreen 挂载后 story 列表正确显示。"""
+    from textual.containers import VerticalScroll
+
+    await _insert_stories(tui_db_path, [
+        ("s1", "Story 1", "in_progress", "developing"),
+        ("s2", "Story 2", "ready", "queued"),
+        ("s3", "Story 3", "done", "done"),
+    ])
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        dashboard = app.query_one(DashboardScreen)
+        container = dashboard.query_one("#story-list-container", VerticalScroll)
+        # 3 stories should be rendered as widgets
+        assert len(container.children) == 3
+
+
+async def test_empty_state_shows_guidance(tui_db_path: Path) -> None:
+    """AC4: 空数据库显示引导提示。"""
+    from textual.widgets import Static
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        dashboard = app.query_one(DashboardScreen)
+        empty = dashboard.query_one("#empty-state", Static)
+        text = str(empty.render())
+        assert "ato batch select" in text
+
+
+async def test_story_list_refresh_updates(tui_db_path: Path) -> None:
+    """AC6: mock SQLite 数据变化后 story 列表刷新。"""
+    from textual.containers import VerticalScroll
+
+    from ato.tui.widgets.story_status_line import StoryStatusLine
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        # 初始为空
+        dashboard = app.query_one(DashboardScreen)
+        container = dashboard.query_one("#story-list-container", VerticalScroll)
+        empty_widgets = list(container.query(".empty-state"))
+        assert len(empty_widgets) > 0
+
+        # 插入数据后刷新
+        await _insert_stories(tui_db_path, [
+            ("s1", "Story 1", "in_progress", "developing"),
+        ])
+        await app.refresh_data()
+        # 允许 Textual 事件循环处理 DOM 变更
+        await pilot.pause()
+
+        # 应该有 story widget（DOM 变更后检查）
+        story_widgets = list(container.query(StoryStatusLine)) + list(
+            container.query("HeartbeatIndicator")
+        )
+        assert len(story_widgets) >= 1
+
+
+async def test_story_list_selection_preserves_on_refresh(tui_db_path: Path) -> None:
+    """AC6: 刷新后保持当前选中 story。"""
+    await _insert_stories(tui_db_path, [
+        ("s1", "Story 1", "ready", "queued"),
+        ("s2", "Story 2", "in_progress", "developing"),
+    ])
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        dashboard = app.query_one(DashboardScreen)
+        # 排序后 ready(awaiting) 排第一，in_progress(running) 排第二
+        # 默认选中第一个
+        assert dashboard._selected_story_id == "s1"
+
+        # 选中第二个
+        dashboard._selected_index = 1
+        dashboard._selected_story_id = "s2"
+
+        # 刷新后选中应保持
+        await app.refresh_data()
+        assert dashboard._selected_story_id == "s2"
+
+
+async def test_highlight_does_not_match_prefix_stories(tui_db_path: Path) -> None:
+    """Bug 2 回归：选中 s1 不应高亮 ssl-s10（前缀匹配误伤）。"""
+    from textual.containers import VerticalScroll
+
+    await _insert_stories(tui_db_path, [
+        ("s1", "Story 1", "ready", "queued"),
+        ("s10", "Story 10", "ready", "queued"),
+    ])
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        dashboard = app.query_one(DashboardScreen)
+        # 默认选中 s1（按 updated_at 排序，都是同时间，按原始顺序）
+        dashboard._selected_story_id = "s1"
+        dashboard._selected_index = 0
+        dashboard._highlight_selected()
+        await pilot.pause()
+
+        container = dashboard.query_one("#story-list-container", VerticalScroll)
+        for child in container.children:
+            if child.id and child.id.endswith("-s1"):
+                assert "selected-story" in child.classes
+            elif child.id and child.id.endswith("-s10"):
+                assert "selected-story" not in child.classes, (
+                    "ssl-s10 should NOT be highlighted when s1 is selected"
+                )
+
+
+async def test_right_panel_shows_detail(tui_db_path: Path) -> None:
+    """AC5: 右上面板显示选中 story 的概览。"""
+    from textual.widgets import Static
+
+    await _insert_stories(tui_db_path, [
+        ("s1", "Test Story Alpha", "in_progress", "developing"),
+    ])
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test():
+        dashboard = app.query_one(DashboardScreen)
+        right_top = dashboard.query_one("#right-top-content", Static)
+        rendered = str(right_top.render())
+        # 选中的 story 详情应包含 story_id
+        assert "s1" in rendered

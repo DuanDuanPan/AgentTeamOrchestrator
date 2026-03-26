@@ -805,9 +805,37 @@ async def _plan_async(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_tui_config(
+    explicit: Path | None,
+    db_path: Path,
+) -> Path | None:
+    """自动发现 TUI 使用的 ato.yaml。
+
+    搜索链（首个存在的胜出）：
+    1. 显式 ``--config`` 路径（直接返回，不检查存在性——由调用方校验）
+    2. db_path 同级目录（支持 ``./custom.db`` + 同级 ``ato.yaml``）
+    3. db_path 祖父目录（标准 ``.ato/state.db`` 布局）
+    4. CWD 下 ``ato.yaml``
+
+    全部找不到时返回 ``None``，由调用方使用默认值。
+    """
+    if explicit is not None:
+        return explicit
+    candidates = [
+        db_path.parent / "ato.yaml",
+        db_path.parent.parent / "ato.yaml",
+        Path("ato.yaml"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 @app.command("tui")
 def tui_cmd(
     db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    config_path: Path | None = typer.Option(None, "--config", help="ato.yaml 配置文件路径"),
 ) -> None:
     """启动 TUI 指挥台，连接运行中的 Orchestrator。"""
     resolved_db = db_path or _DEFAULT_DB_PATH
@@ -834,9 +862,35 @@ def tui_cmd(
         except PermissionError:
             orchestrator_pid = pid  # 进程存在但无权发信号
 
+    # 加载配置以获取 convergent_loop.max_rounds（不 hardcode）
+    # 显式 --config 失败 → 报错退出（与 start 一致）
+    # 自动发现失败 → 降级使用默认值（TUI 只需 max_rounds，仍可启动）
+    cl_max_rounds = 3  # 默认值
+    if config_path is not None:
+        # 用户显式指定：失败即退出
+        try:
+            settings = load_config(config_path)
+            cl_max_rounds = settings.convergent_loop.max_rounds
+        except Exception as exc:
+            typer.echo(f"错误：配置加载失败: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+    else:
+        # 自动发现：失败可降级
+        resolved_config = _resolve_tui_config(None, resolved_db)
+        if resolved_config is not None:
+            try:
+                settings = load_config(resolved_config)
+                cl_max_rounds = settings.convergent_loop.max_rounds
+            except Exception:
+                logger.warning("tui_config_load_failed", exc_info=True)
+
     from ato.tui.app import ATOApp
 
-    ATOApp(db_path=resolved_db, orchestrator_pid=orchestrator_pid).run()
+    ATOApp(
+        db_path=resolved_db,
+        orchestrator_pid=orchestrator_pid,
+        convergent_loop_max_rounds=cl_max_rounds,
+    ).run()
 
 
 # ---------------------------------------------------------------------------

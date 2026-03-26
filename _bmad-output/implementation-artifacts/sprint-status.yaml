@@ -36,6 +36,7 @@
 
 generated: 2026-03-24
 last_updated: 2026-03-27
+# Story 6-2b completed: 2026-03-26
 project: AgentTeamOrchestrator
 project_key: NOKEY
 tracking_system: file-system
@@ -100,7 +101,7 @@ development_status:
   6-1a-tui-launch-sqlite-connection: done
   6-1b-dark-theme-responsive-layout: done
   6-2a-three-question-header: done
-  6-2b-dashboard-story-list: ready-for-dev
+  6-2b-dashboard-story-list: done
   6-3a-standard-approval-interaction: backlog
   6-3b-exception-approval-multi-select: backlog
   6-4-story-detail-drill-navigation: backlog

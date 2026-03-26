@@ -98,3 +98,51 @@ RICH_COLORS: dict[str, str] = {
     "$muted": "#8390b7",
     "$text": "#f8f8f2",
 }
+
+
+# ---------------------------------------------------------------------------
+# Story 列表排序 (Story 6.2b)
+# ---------------------------------------------------------------------------
+
+VISUAL_STATUS_SORT_ORDER: dict[str, int] = {
+    "awaiting": 0,
+    "active": 1,
+    "running": 2,
+    "frozen": 3,
+    "done": 4,
+    "info": 5,
+}
+"""展示语义排序优先级：awaiting 最高 → info 最低。running 紧邻 active。"""
+
+
+def sort_stories_by_status(
+    stories: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """按展示语义排序 story 列表。
+
+    排序规则：
+    1. 按 visual status 优先级升序（awaiting → active → running → frozen → done → info）
+    2. 同一 visual status 内按 updated_at 降序（最近更新的在前）
+
+    Args:
+        stories: story 字典列表，至少包含 ``status`` 和 ``updated_at`` 键。
+
+    Returns:
+        排序后的新列表。
+    """
+
+    def _sort_key(story: dict[str, object]) -> tuple[int, str]:
+        status = str(story.get("status", ""))
+        visual = map_story_to_visual_status(status)
+        priority = VISUAL_STATUS_SORT_ORDER.get(visual, 99)
+        # updated_at 降序：反转字符串排序
+        updated_at = str(story.get("updated_at", ""))
+        return (priority, _invert_str(updated_at))
+
+    return sorted(stories, key=_sort_key)
+
+
+def _invert_str(s: str) -> str:
+    """反转字符串用于降序排列——对 ISO 时间戳有效。"""
+    # 用 chr 补码实现字符串反转排序
+    return "".join(chr(0xFFFF - ord(c)) for c in s)
