@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-24
-last_updated: 2026-03-25
+last_updated: 2026-03-25T00:00:00Z
 project: AgentTeamOrchestrator
 project_key: NOKEY
 tracking_system: file-system
@@ -75,7 +75,7 @@ development_status:
   3-2a-convergent-loop-full-review: done
   3-2b-fix-dispatch-artifact-verification: done
   3-2c-re-review-scope-narrowing: done
-  3-2d-convergence-termination: ready-for-dev
+  3-2d-convergence-termination: done
   3-3-convergence-trust-escalation: backlog
   epic-3-retrospective: optional
 

@@ -1,6 +1,6 @@
 # Story 3.2d: 收敛判定与终止条件
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,27 +20,27 @@ So that Convergent Loop 有确定性的结束条件，不会无限循环。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 `run_loop()` 编排方法 (AC: #5, #1, #2, #3)
-  - [ ] 1.1 首轮调用 `run_first_review()` 并评估结果
-  - [ ] 1.2 循环体：`run_fix_dispatch(fix_round)` → `run_rereview(rereview_round)` → 评估收敛
-  - [ ] 1.3 收敛成功路径：`converged=True` → 直接返回结果（`review_pass` 已由子方法提交）
-  - [ ] 1.4 继续循环路径：`converged=False` 且 `rereview_round < max_rounds` → 继续下一轮 fix+rereview
-  - [ ] 1.5 强制终止路径：最后一轮 review / re-review 仍未收敛 → 创建 escalation approval → 返回结果
-- [ ] Task 2: 实现 `_create_escalation_approval()` (AC: #3)
-  - [ ] 2.1 创建 approval 记录 `approval_type="convergent_loop_escalation"`
-  - [ ] 2.2 `approval.payload` 使用 JSON，包含 `rounds_completed`、`open_blocking_count`
-  - [ ] 2.3 注册 nudge 通知（复用现有 nudge 机制）
-- [ ] Task 3: 实现 `_log_termination_summary()` 终止摘要日志 (AC: #4)
-  - [ ] 3.1 **不要**重复记录子方法已输出的 `convergent_loop_round_complete`；每轮 diff 继续由 `run_first_review()` / `run_rereview()` 负责
-  - [ ] 3.2 loop 终止时记录 `total_rounds`、`max_rounds`、`remaining_blocking` 等摘要字段
-- [ ] Task 4: 编写单元测试 (AC: #1-#5)
-  - [ ] 4.1 首轮 0 findings → 立即收敛
-  - [ ] 4.2 首轮有 blocking → fix → rereview → 收敛
-  - [ ] 4.3 多轮循环 → 第 N 轮收敛
-  - [ ] 4.4 达到 max_rounds → 强制终止 + escalation approval
-  - [ ] 4.5 max_rounds=1 边界情况
-  - [ ] 4.6 loop 终止 structlog 输出验证（不重复断言 3.2a-c 已覆盖的 round_complete）
-  - [ ] 4.7 escalation approval 字段验证
+- [x] Task 1: 实现 `run_loop()` 编排方法 (AC: #5, #1, #2, #3)
+  - [x] 1.1 首轮调用 `run_first_review()` 并评估结果
+  - [x] 1.2 循环体：`run_fix_dispatch(fix_round)` → `run_rereview(rereview_round)` → 评估收敛
+  - [x] 1.3 收敛成功路径：`converged=True` → 直接返回结果（`review_pass` 已由子方法提交）
+  - [x] 1.4 继续循环路径：`converged=False` 且 `rereview_round < max_rounds` → 继续下一轮 fix+rereview
+  - [x] 1.5 强制终止路径：最后一轮 review / re-review 仍未收敛 → 创建 escalation approval → 返回结果
+- [x] Task 2: 实现 `_create_escalation_approval()` (AC: #3)
+  - [x] 2.1 创建 approval 记录 `approval_type="convergent_loop_escalation"`
+  - [x] 2.2 `approval.payload` 使用 JSON，包含 `rounds_completed`、`open_blocking_count`
+  - [x] 2.3 注册 nudge 通知（复用现有 nudge 机制）
+- [x] Task 3: 实现 `_log_termination_summary()` 终止摘要日志 (AC: #4)
+  - [x] 3.1 **不要**重复记录子方法已输出的 `convergent_loop_round_complete`；每轮 diff 继续由 `run_first_review()` / `run_rereview()` 负责
+  - [x] 3.2 loop 终止时记录 `total_rounds`、`max_rounds`、`remaining_blocking` 等摘要字段
+- [x] Task 4: 编写单元测试 (AC: #1-#5)
+  - [x] 4.1 首轮 0 findings → 立即收敛
+  - [x] 4.2 首轮有 blocking → fix → rereview → 收敛
+  - [x] 4.3 多轮循环 → 第 N 轮收敛
+  - [x] 4.4 达到 max_rounds → 强制终止 + escalation approval
+  - [x] 4.5 max_rounds=1 边界情况
+  - [x] 4.6 loop 终止 structlog 输出验证（不重复断言 3.2a-c 已覆盖的 round_complete）
+  - [x] 4.7 escalation approval 字段验证
 
 ## Dev Notes
 
@@ -282,16 +282,33 @@ class TestEscalationApprovalFields:
 
 ### Change Log
 
+- 2026-03-26: Code review 修复 3 个 findings — (1) parse failure 短路保护：`_is_abnormal_result()` + `convergent_loop_aborted` 日志 (2) remaining_blocking 从 DB 查询：`_get_remaining_blocking_count()` 替代 raw parser count (3) escalation 幂等保护：插入前检查 pending 记录；新增 5 个测试（全部 973 测试通过）
+- 2026-03-25: 完成实现 — run_loop() 编排方法 + _create_escalation_approval() + _log_termination_summary() + 11 个单元测试（全部 968 测试通过）
 - 2026-03-25: validate-create-story 修订 —— 对齐 `round_num` 编排合同（`round N review → round N fix → round N+1 rereview`）；将 approval `metadata` 改为真实的 `payload` JSON；移除无效的 `async with get_connection(...)` 指导；改为复用 3.2a-c 的每轮日志并仅在 loop 终止时补摘要；修正 `max_rounds` 终止相位说明与 `remaining_blocking` 统计口径
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- 全部 973 个测试通过（含 16 个 Story 3.2d 测试），零回归
+- ruff check + ruff format + mypy strict 均通过
+
 ### Completion Notes List
 
+- ✅ Task 1: 实现 `run_loop()` 编排方法 — 在 `ConvergentLoop` 类中新增 `run_loop()` 方法，编排完整的 review→fix→rereview 多轮循环。首轮调用 `run_first_review()`，后续轮次循环 `run_fix_dispatch()` + `run_rereview()`，支持收敛成功/继续循环/强制终止三条路径。不重复提交 transition event（由子方法负责）。
+- ✅ Task 2: 实现 `_create_escalation_approval()` — 创建 `convergent_loop_escalation` 类型的 approval 记录，payload JSON 包含 `rounds_completed` 和 `open_blocking_count`，通过 `self._nudge.notify()` 注册通知。复用现有 `insert_approval()` 和 `get_connection()` 基础设施。
+- ✅ Task 3: 实现 `_log_termination_summary()` — 收敛时记录 `convergent_loop_converged`（info），强制终止时记录 `convergent_loop_max_rounds_reached`（warning，含 `remaining_blocking`）。不重复记录子方法已输出的 `convergent_loop_round_complete`。
+- ✅ Task 4: 编写 7 个测试类共 11 个测试方法 — 覆盖首轮收敛、单轮 fix 后收敛、多轮收敛、max_rounds escalation、max_rounds=1 边界、structlog 输出验证、escalation approval 字段完整性与 nudge 通知。
+- ✅ Code review fix: Finding 1 (High) parse failure 短路 — `run_loop()` 检测 `converged=False and findings_total==0` 异常结果，输出 `convergent_loop_aborted` 警告并立即返回，避免非法 transition。
+- ✅ Code review fix: Finding 2 (Medium) remaining_blocking 准确性 — 新增 `_get_remaining_blocking_count()` 从 DB 查询实际 open blocking count，替代 `last_result.blocking_count`（raw parser count）。
+- ✅ Code review fix: Finding 3 (Medium) 幂等保护 — `_create_escalation_approval()` 插入前检查是否已有 pending 的 `convergent_loop_escalation`，避免重复审批。
+
 ### File List
+
+- `src/ato/convergent_loop.py` — 新增 `run_loop()`、`_create_escalation_approval()`、`_log_termination_summary()`、`_is_abnormal_result()`、`_get_remaining_blocking_count()` 五个方法，新增 `ApprovalRecord` 导入
+- `tests/unit/test_convergent_loop.py` — 新增 10 个测试类（16 个测试方法）和 2 个辅助函数
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — 状态更新为 review
