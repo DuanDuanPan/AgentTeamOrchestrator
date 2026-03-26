@@ -588,3 +588,50 @@ class TestSaveStoryState:
             "blocked": "blocked",
         }
         assert expected == PHASE_TO_STATUS
+
+
+# ---------------------------------------------------------------------------
+# uat_fail Transition (Story 4.3)
+# ---------------------------------------------------------------------------
+
+
+class TestUatFailTransition:
+    """uat_fail: uat → fixing (FR48)。"""
+
+    async def test_uat_fail_transitions_to_fixing(self) -> None:
+        """uat_fail 应将 story 从 uat 推进到 fixing。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "uat")
+        await sm.send("uat_fail")
+        assert sm.current_state_value == "fixing"
+
+    async def test_uat_fail_from_non_uat_rejected(self) -> None:
+        """uat_fail 在非 uat 状态下应被拒绝。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "reviewing")
+        with pytest.raises(TransitionNotAllowed):
+            await sm.send("uat_fail")
+        assert sm.current_state_value == "reviewing"
+
+    async def test_uat_fail_then_convergent_loop(self) -> None:
+        """uat → fixing → reviewing → ... 完整 CL 回退路径。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "uat")
+
+        # uat_fail → fixing
+        await sm.send("uat_fail")
+        assert sm.current_state_value == "fixing"
+
+        # fixing → reviewing (re-review)
+        await sm.send("fix_done")
+        assert sm.current_state_value == "reviewing"
+
+        # reviewing → qa_testing
+        await sm.send("review_pass")
+        assert sm.current_state_value == "qa_testing"
+
+    async def test_canonical_transitions_includes_uat_fail(self) -> None:
+        """CANONICAL_TRANSITIONS 中 uat 应有 fail 分支指向 fixing。"""
+        success, failure = CANONICAL_TRANSITIONS["uat"]
+        assert success == "merging"
+        assert failure == "fixing"

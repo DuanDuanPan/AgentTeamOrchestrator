@@ -85,7 +85,7 @@ CANONICAL_TRANSITIONS: dict[str, tuple[str, str | None]] = {
     "reviewing": ("qa_testing", "fixing"),
     "fixing": ("reviewing", None),
     "qa_testing": ("uat", "fixing"),
-    "uat": ("merging", None),
+    "uat": ("merging", "fixing"),
     "merging": ("regression", None),
     "regression": ("done", None),
 }
@@ -117,6 +117,7 @@ class StoryLifecycle(StateMachine):
         qa_testing ──qa_pass──→ uat
         qa_testing ──qa_fail──→ fixing              ← QA Convergent Loop
         uat ──uat_pass──→ merging
+        uat ──uat_fail──→ fixing                 ← UAT 失败退回 CL (FR48)
         merging ──merge_done──→ regression
         regression ──regression_pass──→ done
         * ──escalate──→ blocked                     ← 多状态可 escalate（MVP sink）
@@ -150,6 +151,7 @@ class StoryLifecycle(StateMachine):
     qa_pass = qa_testing.to(uat)
     qa_fail = qa_testing.to(fixing)
     uat_pass = uat.to(merging)
+    uat_fail = uat.to(fixing)  # FR48: UAT 失败退回 fix 阶段
     merge_done = merging.to(regression)
     regression_pass = regression.to(done)
 
