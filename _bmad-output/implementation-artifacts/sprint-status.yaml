@@ -82,8 +82,8 @@ development_status:
   # ===== Epic 4: 人机协作与审批队列 =====
   epic-4: in-progress
   4-1-approval-queue-nudge: done
-  4-2-merge-queue-regression-safety: backlog
-  4-3-uat-interactive-session-completion: backlog
+  4-2-merge-queue-regression-safety: ready-for-dev
+  4-3-uat-interactive-session-completion: ready-for-dev
   4-4-notification-cli-quality: backlog
   4-5-regression-test-merge-integration: backlog
   epic-4-retrospective: optional
@@ -91,7 +91,7 @@ development_status:
   # ===== Epic 5: 崩溃恢复与可观测性 =====
   epic-5: in-progress
   5-1a-crash-recovery-auto-resume: done
-  5-1b-crash-recovery-performance-testing: review
+  5-1b-crash-recovery-performance-testing: done
   5-2-recovery-summary-execution-history: backlog
   epic-5-retrospective: optional
 
@@ -100,7 +100,7 @@ development_status:
   6-1a-tui-launch-sqlite-connection: done
   6-1b-dark-theme-responsive-layout: done
   6-2a-three-question-header: done
-  6-2b-dashboard-story-list: backlog
+  6-2b-dashboard-story-list: ready-for-dev
   6-3a-standard-approval-interaction: backlog
   6-3b-exception-approval-multi-select: backlog
   6-4-story-detail-drill-navigation: backlog
