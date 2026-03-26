@@ -271,7 +271,164 @@ class WorktreeManager:
             return False
         return path.exists()
 
-    async def _run_git(self, *args: str) -> tuple[int, str, str]:
+    @property
+    def project_root(self) -> Path:
+        """目标项目 git 仓库根路径（只读）。"""
+        return self._project_root
+
+    async def rebase_onto_main(
+        self,
+        story_id: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> tuple[bool, str]:
+        """在 worktree 中 rebase 到 main 分支。
+
+        Args:
+            story_id: Story 唯一标识。
+            timeout_seconds: 超时秒数，None 则使用默认值。
+
+        Returns:
+            (success, stderr) 元组。
+        """
+        worktree_path = await self.get_path(story_id)
+        if worktree_path is None:
+            return False, f"No worktree found for story '{story_id}'"
+
+        timeout = timeout_seconds or _GIT_TIMEOUT_SECONDS
+
+        # fetch latest main (if remote exists)
+        fetch_rc, _fetch_out, fetch_err = await self._run_git(
+            "-C",
+            str(worktree_path),
+            "fetch",
+            "origin",
+            "main",
+            timeout_seconds=timeout,
+        )
+        # fetch 成功 → rebase origin/main（最新远端）
+        # fetch 失败 → 回退到本地 main（本地仓库或网络问题）
+        if fetch_rc != 0:
+            logger.warning(
+                "merge_fetch_main_failed",
+                story_id=story_id,
+                stderr=fetch_err,
+                note="Falling back to local main branch",
+            )
+            rebase_target = "main"
+        else:
+            rebase_target = "origin/main"
+
+        # rebase onto target
+        returncode, _stdout, stderr = await self._run_git(
+            "-C",
+            str(worktree_path),
+            "rebase",
+            rebase_target,
+            timeout_seconds=timeout,
+        )
+        if returncode != 0:
+            return False, stderr
+
+        return True, ""
+
+    async def continue_rebase(self, story_id: str) -> tuple[bool, str]:
+        """在 worktree 中执行 git rebase --continue。"""
+        worktree_path = await self.get_path(story_id)
+        if worktree_path is None:
+            return False, f"No worktree found for story '{story_id}'"
+
+        returncode, _stdout, stderr = await self._run_git(
+            "-C",
+            str(worktree_path),
+            "rebase",
+            "--continue",
+        )
+        return returncode == 0, stderr
+
+    async def abort_rebase(self, story_id: str) -> None:
+        """在 worktree 中执行 git rebase --abort。"""
+        worktree_path = await self.get_path(story_id)
+        if worktree_path is None:
+            return
+
+        await self._run_git("-C", str(worktree_path), "rebase", "--abort")
+
+    async def merge_to_main(self, story_id: str) -> tuple[bool, str]:
+        """将 story 分支 fast-forward merge 到 main。
+
+        在主仓库（非 worktree）中执行。
+        成功后不立刻 cleanup worktree——regression 闭环完成后才清理。
+
+        Returns:
+            (success, stderr) 元组。
+        """
+        branch_name = self._load_branch_meta(story_id)
+
+        # checkout main
+        returncode, _stdout, stderr = await self._run_git("checkout", "main")
+        if returncode != 0:
+            return False, f"Failed to checkout main: {stderr}"
+
+        # fast-forward merge
+        returncode, _stdout, stderr = await self._run_git(
+            "merge",
+            "--ff-only",
+            branch_name,
+        )
+        if returncode != 0:
+            return False, f"Fast-forward merge failed: {stderr}"
+
+        return True, ""
+
+    async def get_main_head(self) -> str | None:
+        """获取主仓库 main 分支当前 HEAD commit hash。"""
+        returncode, stdout, _stderr = await self._run_git("rev-parse", "main")
+        if returncode != 0:
+            return None
+        return stdout.strip() or None
+
+    async def revert_merge_range(self, pre_merge_head: str) -> tuple[bool, str]:
+        """安全 revert ff merge 带入的所有 commit。
+
+        使用 ``git revert --no-edit <pre_merge_head>..HEAD`` 创建新的 revert
+        commit，保留完整历史（不丢弃任何 commit）。
+
+        Args:
+            pre_merge_head: merge 前 main 的 HEAD commit hash。
+
+        Returns:
+            (success, stderr) 元组。
+        """
+        returncode, _stdout, stderr = await self._run_git(
+            "revert",
+            "--no-edit",
+            f"{pre_merge_head}..HEAD",
+        )
+        return returncode == 0, stderr
+
+    async def get_conflict_files(self, story_id: str) -> list[str]:
+        """获取 worktree 中的冲突文件列表。"""
+        worktree_path = await self.get_path(story_id)
+        if worktree_path is None:
+            return []
+
+        returncode, stdout, _stderr = await self._run_git(
+            "-C",
+            str(worktree_path),
+            "diff",
+            "--name-only",
+            "--diff-filter=U",
+        )
+        if returncode != 0:
+            return []
+        return [f for f in stdout.strip().splitlines() if f]
+
+    async def _run_git(
+        self,
+        *args: str,
+        timeout_seconds: int | None = None,
+    ) -> tuple[int, str, str]:
         """执行 git 命令。
 
         通过 ``asyncio.create_subprocess_exec`` 异步执行，
@@ -279,6 +436,7 @@ class WorktreeManager:
 
         Args:
             *args: git 子命令及参数。
+            timeout_seconds: 超时秒数，None 则使用默认值。
 
         Returns:
             (returncode, stdout, stderr) 元组。
@@ -286,6 +444,7 @@ class WorktreeManager:
         Raises:
             WorktreeError: 命令超时。
         """
+        timeout = timeout_seconds if timeout_seconds is not None else _GIT_TIMEOUT_SECONDS
         proc = await asyncio.create_subprocess_exec(
             "git",
             *args,
@@ -296,12 +455,12 @@ class WorktreeManager:
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),
-                timeout=_GIT_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except TimeoutError:
             await cleanup_process(proc)
             raise WorktreeError(
-                f"Git command timed out after {_GIT_TIMEOUT_SECONDS}s: git {' '.join(args)}",
+                f"Git command timed out after {timeout}s: git {' '.join(args)}",
             ) from None
         finally:
             await cleanup_process(proc)

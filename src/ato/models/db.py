@@ -23,6 +23,8 @@ from ato.models.schemas import (
     CostLogRecord,
     FindingRecord,
     FindingStatus,
+    MergeQueueEntry,
+    MergeQueueState,
     StoryRecord,
     StoryStatus,
     TaskRecord,
@@ -129,6 +131,27 @@ ON findings(story_id, round_num)"""
 _FINDINGS_DEDUP_IDX = """\
 CREATE INDEX IF NOT EXISTS idx_findings_dedup
 ON findings(dedup_hash)"""
+
+_MERGE_QUEUE_DDL = """\
+CREATE TABLE IF NOT EXISTS merge_queue (
+    id          INTEGER PRIMARY KEY,
+    story_id    TEXT NOT NULL UNIQUE,
+    approval_id TEXT NOT NULL,
+    approved_at TEXT NOT NULL,
+    enqueued_at TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'waiting',
+    regression_task_id TEXT,
+    pre_merge_head TEXT
+)"""
+
+_MERGE_QUEUE_STATE_DDL = """\
+CREATE TABLE IF NOT EXISTS merge_queue_state (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    frozen                  INTEGER NOT NULL DEFAULT 0,
+    frozen_reason           TEXT,
+    frozen_at               TEXT,
+    current_merge_story_id  TEXT
+)"""
 
 
 # ---------------------------------------------------------------------------
@@ -1062,3 +1085,179 @@ async def insert_preflight_results(
         [(run_id, r.layer, r.check_item, r.status, r.message) for r in results],
     )
     await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# CRUD — Merge Queue (Story 4.2)
+# ---------------------------------------------------------------------------
+
+
+async def enqueue_merge(
+    db: aiosqlite.Connection,
+    story_id: str,
+    approval_id: str,
+    approved_at: datetime,
+    enqueued_at: datetime,
+) -> None:
+    """将 story 加入 merge queue。"""
+    await db.execute(
+        "INSERT INTO merge_queue (story_id, approval_id, approved_at, enqueued_at, status) "
+        "VALUES (?, ?, ?, ?, 'waiting')",
+        (story_id, approval_id, _dt_to_iso(approved_at), _dt_to_iso(enqueued_at)),
+    )
+    await db.commit()
+
+
+async def dequeue_next_merge(db: aiosqlite.Connection) -> MergeQueueEntry | None:
+    """取出下一个待 merge 的条目（按 approved_at ASC, id ASC），并将其 status 更新为 'merging'。"""
+    cursor = await db.execute(
+        "SELECT * FROM merge_queue WHERE status = 'waiting' "
+        "ORDER BY approved_at ASC, id ASC LIMIT 1"
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+
+    entry = _row_to_merge_queue_entry(row)
+    await db.execute(
+        "UPDATE merge_queue SET status = 'merging' WHERE id = ?",
+        (entry.id,),
+    )
+    await db.commit()
+    return MergeQueueEntry.model_validate(
+        {**entry.model_dump(), "status": "merging"},
+    )
+
+
+async def mark_regression_dispatched(
+    db: aiosqlite.Connection,
+    story_id: str,
+    task_id: str,
+) -> None:
+    """记录 regression task_id 并将 status 更新为 'regression_pending'。"""
+    cursor = await db.execute(
+        "UPDATE merge_queue SET status = 'regression_pending', regression_task_id = ? "
+        "WHERE story_id = ?",
+        (task_id, story_id),
+    )
+    if cursor.rowcount == 0:
+        msg = f"Merge queue entry for story '{story_id}' not found"
+        raise ValueError(msg)
+    await db.commit()
+
+
+async def complete_merge(
+    db: aiosqlite.Connection,
+    story_id: str,
+    *,
+    success: bool,
+) -> None:
+    """更新 merge queue entry status 为 'merged' 或 'failed'。"""
+    new_status = "merged" if success else "failed"
+    cursor = await db.execute(
+        "UPDATE merge_queue SET status = ? WHERE story_id = ?",
+        (new_status, story_id),
+    )
+    if cursor.rowcount == 0:
+        msg = f"Merge queue entry for story '{story_id}' not found"
+        raise ValueError(msg)
+    await db.commit()
+
+
+async def get_merge_queue_state(db: aiosqlite.Connection) -> MergeQueueState:
+    """读取 merge queue 全局状态（单例行）。"""
+    cursor = await db.execute("SELECT * FROM merge_queue_state WHERE id = 1")
+    row = await cursor.fetchone()
+    if row is None:
+        return MergeQueueState()
+    data = dict(row)
+    return MergeQueueState(
+        frozen=bool(data["frozen"]),
+        frozen_reason=data.get("frozen_reason"),
+        frozen_at=_iso_to_dt(data.get("frozen_at")),
+        current_merge_story_id=data.get("current_merge_story_id"),
+    )
+
+
+async def set_current_merge_story(
+    db: aiosqlite.Connection,
+    story_id: str | None,
+) -> None:
+    """设置当前正在 merge 的 story ID（None 表示清除）。"""
+    await db.execute(
+        "UPDATE merge_queue_state SET current_merge_story_id = ? WHERE id = 1",
+        (story_id,),
+    )
+    await db.commit()
+
+
+async def set_merge_queue_frozen(
+    db: aiosqlite.Connection,
+    *,
+    frozen: bool,
+    reason: str | None,
+) -> None:
+    """设置 merge queue 冻结状态。"""
+    frozen_at = _dt_to_iso(datetime.now(tz=UTC)) if frozen else None
+    await db.execute(
+        "UPDATE merge_queue_state SET frozen = ?, frozen_reason = ?, frozen_at = ? WHERE id = 1",
+        (int(frozen), reason, frozen_at),
+    )
+    await db.commit()
+
+
+async def get_pending_merges(db: aiosqlite.Connection) -> list[MergeQueueEntry]:
+    """返回所有 status='waiting' 的 merge queue 条目。"""
+    cursor = await db.execute(
+        "SELECT * FROM merge_queue WHERE status = 'waiting' ORDER BY approved_at ASC, id ASC"
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_merge_queue_entry(r) for r in rows]
+
+
+async def remove_from_merge_queue(
+    db: aiosqlite.Connection,
+    story_id: str,
+) -> None:
+    """从 merge queue 移除指定 story。"""
+    await db.execute(
+        "DELETE FROM merge_queue WHERE story_id = ?",
+        (story_id,),
+    )
+    await db.commit()
+
+
+async def set_pre_merge_head(
+    db: aiosqlite.Connection,
+    story_id: str,
+    commit_hash: str,
+) -> None:
+    """记录 merge 前 main 分支的 HEAD commit hash。"""
+    await db.execute(
+        "UPDATE merge_queue SET pre_merge_head = ? WHERE story_id = ?",
+        (commit_hash, story_id),
+    )
+    await db.commit()
+
+
+async def get_merge_queue_entry(
+    db: aiosqlite.Connection,
+    story_id: str,
+) -> MergeQueueEntry | None:
+    """按 story_id 查询 merge queue entry。"""
+    cursor = await db.execute(
+        "SELECT * FROM merge_queue WHERE story_id = ?",
+        (story_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return _row_to_merge_queue_entry(row)
+
+
+def _row_to_merge_queue_entry(row: aiosqlite.Row) -> MergeQueueEntry:
+    """SQLite Row → MergeQueueEntry。"""
+    data = dict(row)
+    data["approved_at"] = _iso_to_dt(data["approved_at"])
+    data["enqueued_at"] = _iso_to_dt(data["enqueued_at"])
+    return MergeQueueEntry.model_validate(data)

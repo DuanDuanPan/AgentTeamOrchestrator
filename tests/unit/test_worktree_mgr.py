@@ -711,3 +711,198 @@ class TestPathConstruction:
         call_args = mock_exec.call_args[0]
         branch_arg_index = list(call_args).index("-b") + 1
         assert call_args[branch_arg_index] == "worktree-story-story-1"
+
+
+# ---------------------------------------------------------------------------
+# Rebase / Merge 操作测试 (Story 4.2)
+# ---------------------------------------------------------------------------
+
+
+class TestRebaseOntoMain:
+    """rebase_onto_main() 测试。"""
+
+    async def test_rebase_success(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """rebase 成功返回 (True, "")。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        # Insert story with worktree path
+        story = _make_story("story-1", worktree_path=str(tmp_path / "wt"))
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        # Mock git commands: fetch + rebase both succeed
+        fetch_proc = _make_proc_mock(returncode=0)
+        rebase_proc = _make_proc_mock(returncode=0)
+        call_count = 0
+
+        async def mock_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return fetch_proc
+            return rebase_proc
+
+        patch_target = "ato.worktree_mgr.asyncio.create_subprocess_exec"
+        with patch(patch_target, side_effect=mock_exec):
+            success, stderr = await mgr.rebase_onto_main("story-1")
+
+        assert success is True
+        assert stderr == ""
+
+    async def test_rebase_conflict(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """冲突返回 (False, stderr)。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        story = _make_story("story-1", worktree_path=str(tmp_path / "wt"))
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        fetch_proc = _make_proc_mock(returncode=0)
+        rebase_proc = _make_proc_mock(returncode=1, stderr="CONFLICT in file.py")
+        call_count = 0
+
+        async def mock_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return fetch_proc
+            return rebase_proc
+
+        with patch("ato.worktree_mgr.asyncio.create_subprocess_exec", side_effect=mock_exec):
+            success, stderr = await mgr.rebase_onto_main("story-1")
+
+        assert success is False
+        assert "CONFLICT" in stderr
+
+
+class TestMergeToMain:
+    """merge_to_main() 测试。"""
+
+    async def test_ff_merge_success(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Fast-forward merge 成功。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        # Save branch metadata
+        mgr._save_branch_meta("story-1", "worktree-story-story-1")
+
+        checkout_proc = _make_proc_mock(returncode=0)
+        merge_proc = _make_proc_mock(returncode=0)
+        call_count = 0
+
+        async def mock_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return checkout_proc
+            return merge_proc
+
+        with patch("ato.worktree_mgr.asyncio.create_subprocess_exec", side_effect=mock_exec):
+            success, stderr = await mgr.merge_to_main("story-1")
+
+        assert success is True
+        assert stderr == ""
+
+    async def test_non_ff_merge_fails(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """非 fast-forward merge 失败。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        mgr._save_branch_meta("story-1", "worktree-story-story-1")
+
+        checkout_proc = _make_proc_mock(returncode=0)
+        merge_proc = _make_proc_mock(returncode=1, stderr="Not possible to fast-forward")
+        call_count = 0
+
+        async def mock_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return checkout_proc
+            return merge_proc
+
+        with patch("ato.worktree_mgr.asyncio.create_subprocess_exec", side_effect=mock_exec):
+            success, stderr = await mgr.merge_to_main("story-1")
+
+        assert success is False
+        assert "Fast-forward merge failed" in stderr
+
+
+class TestContinueRebase:
+    """continue_rebase() 测试。"""
+
+    async def test_continue_success(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        story = _make_story("story-1", worktree_path=str(tmp_path / "wt"))
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        proc = _make_proc_mock(returncode=0)
+        with patch("ato.worktree_mgr.asyncio.create_subprocess_exec", return_value=proc):
+            success, stderr = await mgr.continue_rebase("story-1")
+
+        assert success is True
+
+
+class TestGetConflictFiles:
+    """get_conflict_files() 测试。"""
+
+    async def test_parses_conflict_files(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        story = _make_story("story-1", worktree_path=str(tmp_path / "wt"))
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        proc = _make_proc_mock(returncode=0, stdout="file1.py\nfile2.py\n")
+        with patch("ato.worktree_mgr.asyncio.create_subprocess_exec", return_value=proc):
+            files = await mgr.get_conflict_files("story-1")
+
+        assert files == ["file1.py", "file2.py"]

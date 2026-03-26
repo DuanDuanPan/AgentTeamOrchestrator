@@ -97,6 +97,7 @@ phases:
     role: qa
     type: structured_job
     next_on_success: done
+    next_on_failure: fixing
 
 # ---------------------------------------------------------------------------
 # 并发控制
@@ -137,5 +138,22 @@ cost:
 # 示例：
 #   reviewing: opus
 #   qa: codex-mini-latest
+
+# ---------------------------------------------------------------------------
+# Merge & Regression 配置
+# ---------------------------------------------------------------------------
+
+# 回归测试命令（merge 到 main 后在仓库根目录执行）
+regression_test_command: "uv run pytest"
+
+# Rebase 超时时间（秒）
+merge_rebase_timeout: 120
+
+# Agent 解决 rebase 冲突最大重试次数
+merge_conflict_resolution_max_attempts: 1
+
+# ---------------------------------------------------------------------------
+# 模型覆盖映射（可选）
+# ---------------------------------------------------------------------------
 
 model_map: {}

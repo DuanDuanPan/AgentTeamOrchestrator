@@ -113,6 +113,9 @@ class ATOSettings(BaseSettings):
     timeout: TimeoutConfig = TimeoutConfig()
     cost: CostConfig = CostConfig()
     model_map: dict[str, str] = {}
+    regression_test_command: str = "uv run pytest"
+    merge_rebase_timeout: int = 120
+    merge_conflict_resolution_max_attempts: int = 1
 
     @classmethod
     def settings_customise_sources(

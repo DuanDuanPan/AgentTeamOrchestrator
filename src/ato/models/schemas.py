@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 6
+SCHEMA_VERSION: int = 7
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -32,6 +32,7 @@ ApprovalType = Literal[
     "budget_exceeded",
     "regression_failure",
     "precommit_failure",
+    "rebase_conflict",
     "convergent_loop_escalation",
     "batch_confirmation",
     "timeout",
@@ -53,6 +54,7 @@ APPROVAL_TYPE_TO_NOTIFICATION: dict[str, NotificationLevel] = {
     "convergent_loop_escalation": "normal",
     "batch_confirmation": "normal",
     "precommit_failure": "normal",
+    "rebase_conflict": "normal",
     "needs_human_review": "normal",
 }
 """approval_type → NotificationLevel 映射。"""
@@ -68,6 +70,7 @@ APPROVAL_RECOMMENDED_ACTIONS: dict[str, str] = {
     "convergent_loop_escalation": "escalate",
     "batch_confirmation": "confirm",
     "precommit_failure": "retry",
+    "rebase_conflict": "manual_resolve",
     "needs_human_review": "review",
 }
 """approval_type → 推荐操作映射。"""
@@ -374,6 +377,36 @@ class BatchStoryLink(_StrictBase):
     batch_id: str
     story_id: str
     sequence_no: int
+
+
+# ---------------------------------------------------------------------------
+# Merge Queue 模型 (Story 4.2)
+# ---------------------------------------------------------------------------
+
+MergeQueueStatus = Literal["waiting", "merging", "regression_pending", "merged", "failed"]
+"""Merge queue entry 状态。"""
+
+
+class MergeQueueEntry(_StrictBase):
+    """merge_queue 表对应的 Pydantic 模型。"""
+
+    id: int
+    story_id: str
+    approval_id: str
+    approved_at: datetime
+    enqueued_at: datetime
+    status: MergeQueueStatus
+    regression_task_id: str | None = None
+    pre_merge_head: str | None = None
+
+
+class MergeQueueState(_StrictBase):
+    """merge_queue_state 表对应的 Pydantic 模型（单例行）。"""
+
+    frozen: bool = False
+    frozen_reason: str | None = None
+    frozen_at: datetime | None = None
+    current_merge_story_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

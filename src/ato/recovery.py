@@ -56,6 +56,7 @@ _PHASE_FAIL_EVENT: dict[str, str] = {
     "validating": "validate_fail",
     "reviewing": "review_fail",
     "qa_testing": "qa_fail",
+    "regression": "regression_fail",
 }
 
 # Phase → BMAD skill type 映射（仅 convergent_loop phases）
@@ -202,9 +203,15 @@ class RecoveryEngine:
                 if self._interactive_phases
                 else _is_interactive_phase(task.phase)
             )
-            if is_interactive:
+            # merging/regression phases 由 MergeQueue 管理，不走通用 agent 重调度
+            is_merge_managed = task.phase in ("merging", "regression")
+            if is_interactive or is_merge_managed:
                 action = "needs_human"
-                reason = f"Interactive session (phase={task.phase}), PID not alive"
+                reason = (
+                    f"Merge-managed phase (phase={task.phase}), PID not alive"
+                    if is_merge_managed
+                    else f"Interactive session (phase={task.phase}), PID not alive"
+                )
             else:
                 action = "reschedule"
                 reason = f"Structured job (phase={task.phase}), PID not alive, no artifact"

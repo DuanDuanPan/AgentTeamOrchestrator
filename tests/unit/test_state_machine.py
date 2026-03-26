@@ -588,3 +588,41 @@ class TestSaveStoryState:
             "blocked": "blocked",
         }
         assert expected == PHASE_TO_STATUS
+
+
+# ---------------------------------------------------------------------------
+# regression_fail 转换测试 (Story 4.2)
+# ---------------------------------------------------------------------------
+
+
+class TestRegressionFail:
+    """regression → fixing 转换测试。"""
+
+    async def test_regression_fail_returns_to_fixing(self) -> None:
+        """regression_fail 将状态从 regression 回退到 fixing。"""
+        sm = await StoryLifecycle.create()
+
+        # Navigate to regression state
+        await sm.send("start_create")
+        await sm.send("create_done")
+        await sm.send("validate_pass")
+        await sm.send("start_dev")
+        await sm.send("dev_done")
+        await sm.send("review_pass")
+        await sm.send("qa_pass")
+        await sm.send("uat_pass")
+        await sm.send("merge_done")
+
+        assert sm.current_state.id == "regression"
+
+        # regression_fail → fixing
+        await sm.send("regression_fail")
+        assert sm.current_state.id == "fixing"
+
+    async def test_canonical_transitions_regression_has_failure(self) -> None:
+        """CANONICAL_TRANSITIONS 中 regression 应该有 fixing 作为 failure 目标。"""
+        from ato.state_machine import CANONICAL_TRANSITIONS
+
+        success, failure = CANONICAL_TRANSITIONS["regression"]
+        assert success == "done"
+        assert failure == "fixing"

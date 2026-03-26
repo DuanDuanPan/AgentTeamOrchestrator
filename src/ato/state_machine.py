@@ -87,7 +87,7 @@ CANONICAL_TRANSITIONS: dict[str, tuple[str, str | None]] = {
     "qa_testing": ("uat", "fixing"),
     "uat": ("merging", None),
     "merging": ("regression", None),
-    "regression": ("done", None),
+    "regression": ("done", "fixing"),
 }
 
 
@@ -152,6 +152,7 @@ class StoryLifecycle(StateMachine):
     uat_pass = uat.to(merging)
     merge_done = merging.to(regression)
     regression_pass = regression.to(done)
+    regression_fail = regression.to(fixing)
 
     # escalate: 任何非 final / 非 blocked 状态可升级到 blocked
     escalate = (
