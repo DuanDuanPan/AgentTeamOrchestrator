@@ -122,24 +122,26 @@ class TestCreateApprovalCommitFalseSuppressesNudge:
                 ),
             )
 
-            with patch("ato.approval_helpers.send_user_notification") as mock_bell:
-                with patch.object(nudge, "notify") as mock_notify:
-                    approval = await create_approval(
-                        db,
-                        story_id="s-cf",
-                        approval_type="crash_recovery",
-                        payload_dict={"task_id": "t1"},
-                        nudge=nudge,
-                        commit=False,
-                    )
+            with (
+                patch("ato.approval_helpers.send_user_notification") as mock_bell,
+                patch.object(nudge, "notify") as mock_notify,
+            ):
+                approval = await create_approval(
+                    db,
+                    story_id="s-cf",
+                    approval_type="crash_recovery",
+                    payload_dict={"task_id": "t1"},
+                    nudge=nudge,
+                    commit=False,
+                )
 
-                    # DB 已写入（在当前连接可见）
-                    pending = await get_pending_approvals(db)
-                    assert any(a.approval_id == approval.approval_id for a in pending)
+                # DB 已写入（在当前连接可见）
+                pending = await get_pending_approvals(db)
+                assert any(a.approval_id == approval.approval_id for a in pending)
 
-                    # nudge 和 bell 均未触发
-                    mock_notify.assert_not_called()
-                    mock_bell.assert_not_called()
+                # nudge 和 bell 均未触发
+                mock_notify.assert_not_called()
+                mock_bell.assert_not_called()
         finally:
             await db.close()
 
@@ -169,19 +171,21 @@ class TestCreateApprovalCommitFalseSuppressesNudge:
                 ),
             )
 
-            with patch("ato.approval_helpers.send_user_notification") as mock_bell:
-                with patch.object(nudge, "notify") as mock_notify:
-                    await create_approval(
-                        db,
-                        story_id="s-ct",
-                        approval_type="session_timeout",
-                        payload_dict={"task_id": "t1"},
-                        nudge=nudge,
-                        commit=True,
-                    )
+            with (
+                patch("ato.approval_helpers.send_user_notification") as mock_bell,
+                patch.object(nudge, "notify") as mock_notify,
+            ):
+                await create_approval(
+                    db,
+                    story_id="s-ct",
+                    approval_type="session_timeout",
+                    payload_dict={"task_id": "t1"},
+                    nudge=nudge,
+                    commit=True,
+                )
 
-                    mock_notify.assert_called_once()
-                    mock_bell.assert_called_once()
+                mock_notify.assert_called_once()
+                mock_bell.assert_called_once()
         finally:
             await db.close()
 

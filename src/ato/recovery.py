@@ -166,7 +166,7 @@ class RecoveryEngine:
         self._interactive_phases = interactive_phases or set()
         self._convergent_loop_phases = convergent_loop_phases or set()
         self._settings = settings  # ATOSettings, typed as Any to avoid circular import
-        self._background_tasks: list[asyncio.Task[None]] = []
+        self._background_tasks: list[asyncio.Task[Any]] = []
 
     async def await_background_tasks(self) -> None:
         """等待所有后台任务完成。供测试和 Orchestrator shutdown 使用。"""
@@ -347,6 +347,7 @@ class RecoveryEngine:
 
         is_convergent = task.phase in self._convergent_loop_phases
 
+        t: asyncio.Task[Any]
         if is_convergent:
             t = asyncio.create_task(
                 self._dispatch_convergent_loop(task),

@@ -164,16 +164,16 @@ class ATOApp(App[None]):
 
             # 2. Pending approvals 计数
             cursor = await db.execute("SELECT COUNT(*) FROM approvals WHERE status = 'pending'")
-            row = await cursor.fetchone()
-            self.pending_approvals = int(row[0]) if row else 0
+            approval_row = await cursor.fetchone()
+            self.pending_approvals = int(approval_row[0]) if approval_row else 0
 
             # 3. 今日成本汇总
             cursor = await db.execute(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM cost_log "
                 "WHERE date(created_at) = date('now')"
             )
-            row = await cursor.fetchone()
-            self.today_cost_usd = float(row[0]) if row else 0.0
+            cost_row = await cursor.fetchone()
+            self.today_cost_usd = float(cost_row[0]) if cost_row else 0.0
 
             # 4. 最后更新时间
             self.last_updated = datetime.now(tz=UTC).strftime("%H:%M:%S")
