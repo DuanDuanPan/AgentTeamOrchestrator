@@ -1,6 +1,6 @@
 # Story 6.3b: 异常审批与多选交互
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -111,84 +111,84 @@ Story 6.3a 已实现：
 
 **本 story 只新增 ExceptionApprovalPanel 与多选异常审批交互，不重建 6.3a 已有的 binary 审批路径。**
 
-- [ ] Task 1: ExceptionApprovalPanel Widget (AC: #1, #5)
-  - [ ] 1.1 在 `src/ato/tui/widgets/exception_approval_panel.py` 创建 `ExceptionApprovalPanel(Widget)` 类
-  - [ ] 1.2 定义属性：`approval_id`, `story_id`, `approval_type`, `risk_level`, `payload_dict`（解析后的 dict）, `options`（选项列表）, `expanded_context`
-  - [ ] 1.3 实现 `render()` 方法——多行块渲染：
+- [x] Task 1: ExceptionApprovalPanel Widget (AC: #1, #5)
+  - [x] 1.1 在 `src/ato/tui/widgets/exception_approval_panel.py` 创建 `ExceptionApprovalPanel(Widget)` 类
+  - [x] 1.2 定义属性：`approval_id`, `story_id`, `approval_type`, `risk_level`, `payload_dict`（解析后的 dict）, `options`（选项列表）, `expanded_context`
+  - [x] 1.3 实现 `render()` 方法——多行块渲染：
     - 标题行：类型图标 + 异常类型描述 + story_id
     - "发生了什么"：来自 `get_exception_context()` 的 what 文本
     - "影响范围"：来自 `get_exception_context()` 的 impact 文本
     - "你的选项"：每行一个 `[N] 选项描述`
     - 底部：`按 1/2/3 选择，[d] 查看更多上下文`
-  - [ ] 1.4 使用 TCSS class / variant 表达边框颜色：`high` → `$error`，`medium` → `$warning`，其他 → `$surface`
-  - [ ] 1.5 实现 `_format_context(approval_type, payload_dict)` 方法——严格对齐 AC5 的真实 payload 字段，字段缺失时优雅降级
-  - [ ] 1.6 实现 `_format_options(options)` 方法——生成带数字键前缀的选项列表
-  - [ ] 1.7 实现 `update_data()` 方法批量更新属性
+  - [x] 1.4 使用 TCSS class / variant 表达边框颜色：`high` → `$error`，`medium` → `$warning`，其他 → `$surface`
+  - [x] 1.5 实现 `_format_context(approval_type, payload_dict)` 方法——严格对齐 AC5 的真实 payload 字段，字段缺失时优雅降级
+  - [x] 1.6 实现 `_format_options(options)` 方法——生成带数字键前缀的选项列表
+  - [x] 1.7 实现 `update_data()` 方法批量更新属性
 
-- [ ] Task 2: DashboardScreen 数字键处理与异常审批提交 (AC: #2, #6)
-  - [ ] 2.1 为 `1`-`9` 增加异常审批数字键处理入口（可用 binding 或 key handler），但必须满足：
+- [x] Task 2: DashboardScreen 数字键处理与异常审批提交 (AC: #2, #6)
+  - [x] 2.1 为 `1`-`9` 增加异常审批数字键处理入口（可用 binding 或 key handler），但必须满足：
     - three-panel 模式下，选中多选异常审批时 plain 数字键可提交
     - tabbed 模式下，不得破坏 `ATOApp` 已有的 `[1]-[4]` 切页快捷键
-  - [ ] 2.2 实现 `_handle_option_key(index)` 或等价方法：
+  - [x] 2.2 实现 `_handle_option_key(index)` 或等价方法：
     - 检查当前选中项是否为异常审批（`is_binary_approval() == False`）
     - 从 `payload.options` 或 `APPROVAL_DEFAULT_VALID_OPTIONS` 获取选项列表
     - 验证数字键对应的索引在选项范围内
     - 调用 `ATOApp.submit_approval_decision(approval_id, status="approved", decision=option_key, decision_reason=f"tui:{N} -> {option_key}")`
     - 成功前先加入 `_submitted_approvals` 集合，失败时回滚
-  - [ ] 2.3 确保 `y`/`n` 在异常审批上无效（复用 6.3a 的 `is_binary_approval()` 边界）
-  - [ ] 2.4 数字键在常规审批、story 选中、无选中项、超出范围时全部 no-op
+  - [x] 2.3 确保 `y`/`n` 在异常审批上无效（复用 6.3a 的 `is_binary_approval()` 边界）
+  - [x] 2.4 数字键在常规审批、story 选中、无选中项、超出范围时全部 no-op
 
-- [ ] Task 3: 右面板联动——异常审批展示 (AC: #1, #5, #6)
-  - [ ] 3.1 修改 `DashboardScreen._update_detail_panel()`：
+- [x] Task 3: 右面板联动——异常审批展示 (AC: #1, #5, #6)
+  - [x] 3.1 修改 `DashboardScreen._update_detail_panel()`：
     - 当选中的审批 `is_binary_approval() == False` 且布局为 three-panel 时，渲染 ExceptionApprovalPanel 到 `#right-top-content`
     - 当选中的审批 `is_binary_approval() == True` 时，保持现有 `_render_approval_context()` 行为
-  - [ ] 3.2 修改 `DashboardScreen._update_action_panel()`：
+  - [x] 3.2 修改 `DashboardScreen._update_action_panel()`：
     - three-panel 异常审批时，右下面板显示数字键动作标签 + `[d] 更多上下文`
     - 提交后显示 "$muted 已提交，等待处理"
-  - [ ] 3.3 `d` 键在异常审批上切换 richer context 视图：
+  - [x] 3.3 `d` 键在异常审批上切换 richer context 视图：
     - 若 payload 已有 `stderr` / `error_output` / `unresolved_findings` / `raw_output_preview` / `round_summaries`，优先展开这些真实字段
     - 若 payload 没有报告路径，不要伪造 `agent 输出日志路径`
 
-- [ ] Task 4: 左面板异常审批排序与高亮 (AC: #4, #6)
-  - [ ] 4.1 修改 `DashboardScreen._update_story_list()` 排序逻辑：
+- [x] Task 4: 左面板异常审批排序与高亮 (AC: #4, #6)
+  - [x] 4.1 修改 `DashboardScreen._update_story_list()` 排序逻辑：
     - 异常审批（`is_binary_approval() == False`）排在常规审批之前
     - 常规审批排在 story 之前
     - 异常审批组、常规审批组内部保持当前 pending approval 顺序
-  - [ ] 4.2 修改 `ApprovalCard` 渲染 / 样式：
+  - [x] 4.2 修改 `ApprovalCard` 渲染 / 样式：
     - 异常审批使用 `$error` 风格图标（覆盖 6.3a 常规审批的 `$warning` 风格）
     - risk_level=high 时附加暗红背景 class
-  - [ ] 4.3 tabbed 模式 `[1]审批` Tab 保留异常审批列表可见化与增强样式，删除旧 CLI fallback 文案，但不改变 `[1]-[4]` 切页契约
+  - [x] 4.3 tabbed 模式 `[1]审批` Tab 保留异常审批列表可见化与增强样式，删除旧 CLI fallback 文案，但不改变 `[1]-[4]` 切页契约
 
-- [ ] Task 5: 6.3a fallback 文案退场 (AC: #6)
-  - [ ] 5.1 在 three-panel 的 `DashboardScreen._update_action_panel()` 中删除多选审批旧 fallback 提示文本
-  - [ ] 5.2 在 `[1]审批` Tab 中删除 `↳ 此审批需多选，请使用 CLI 或等待 6.3b` 子文本
-  - [ ] 5.3 确保多选异常审批现在有专用 detail/action 路径，而不是继续沿用 CLI fallback copy
+- [x] Task 5: 6.3a fallback 文案退场 (AC: #6)
+  - [x] 5.1 在 three-panel 的 `DashboardScreen._update_action_panel()` 中删除多选审批旧 fallback 提示文本
+  - [x] 5.2 在 `[1]审批` Tab 中删除 `↳ 此审批需多选，请使用 CLI 或等待 6.3b` 子文本
+  - [x] 5.3 确保多选异常审批现在有专用 detail/action 路径，而不是继续沿用 CLI fallback copy
 
-- [ ] Task 6: 共享 Helper 扩展 (AC: #2, #3, #5)
-  - [ ] 6.1 在 `src/ato/approval_helpers.py` 新增 `resolve_multi_decision(approval_type, index, payload)` 方法：
+- [x] Task 6: 共享 Helper 扩展 (AC: #2, #3, #5)
+  - [x] 6.1 在 `src/ato/approval_helpers.py` 新增 `resolve_multi_decision(approval_type, index, payload)` 方法：
     - 优先使用 `payload.options`
     - payload 无 options 时回退到 `APPROVAL_DEFAULT_VALID_OPTIONS`
     - 返回 `(decision_key, status="approved")`
-  - [ ] 6.2 新增 `get_exception_context(approval_type, payload_dict)` 方法：
+  - [x] 6.2 新增 `get_exception_context(approval_type, payload_dict)` 方法：
     - 返回结构化的 `(what, impact)` 文本
     - 严格对齐当前真实 payload 合同，字段缺失时优雅降级
-  - [ ] 6.3 新增 `format_option_labels(approval_type, options)` 方法：
+  - [x] 6.3 新增 `format_option_labels(approval_type, options)` 方法：
     - 返回用户可读的中文标签列表（供 ExceptionApprovalPanel 展示）
 
-- [ ] Task 7: TCSS 样式 (AC: #1, #4)
-  - [ ] 7.1 在 `src/ato/tui/app.tcss` 新增 `ExceptionApprovalPanel` 样式：
+- [x] Task 7: TCSS 样式 (AC: #1, #4)
+  - [x] 7.1 在 `src/ato/tui/app.tcss` 新增 `ExceptionApprovalPanel` 样式：
     - 最小高度 8 行，内边距 1
     - 默认 `border: solid $surface`
-  - [ ] 7.2 新增 risk variant class（如 `.exception-approval-high`, `.exception-approval-medium`）控制边框颜色
-  - [ ] 7.3 新增 `.approval-exception-row` / `.approval-exception-high` 样式，用于左面板异常审批高亮
-  - [ ] 7.4 新增 `.exception-approval-option` 样式：数字键高亮
+  - [x] 7.2 新增 risk variant class（如 `.exception-approval-high`, `.exception-approval-medium`）控制边框颜色
+  - [x] 7.3 新增 `.approval-exception-row` / `.approval-exception-high` 样式，用于左面板异常审批高亮
+  - [x] 7.4 新增 `.exception-approval-option` 样式：数字键高亮
 
-- [ ] Task 8: widgets 模块导出 (AC: #1)
-  - [ ] 8.1 在 `src/ato/tui/widgets/__init__.py` 导出 `ExceptionApprovalPanel`
-  - [ ] 8.2 更新 `__all__` 列表
+- [x] Task 8: widgets 模块导出 (AC: #1)
+  - [x] 8.1 在 `src/ato/tui/widgets/__init__.py` 导出 `ExceptionApprovalPanel`
+  - [x] 8.2 更新 `__all__` 列表
 
-- [ ] Task 9: 单元测试 (AC: #1-#5)
-  - [ ] 9.1 `tests/unit/test_exception_approval_panel.py`（新建文件）：
+- [x] Task 9: 单元测试 (AC: #1-#5)
+  - [x] 9.1 `tests/unit/test_exception_approval_panel.py`（新建文件）：
     - `test_regression_failure_panel_renders_three_elements` — 三要素渲染：发生了什么 + 影响范围 + 选项
     - `test_regression_failure_panel_red_border` — risk_level=high → $error 边框
     - `test_session_timeout_panel_yellow_border` — risk_level=medium → $warning 边框
@@ -198,7 +198,7 @@ Story 6.3a 已实现：
     - `test_format_context_convergent_loop_uses_round_payload` — escalation 上下文含 rounds/open_blocking/convergence
     - `test_format_context_gracefully_handles_missing_fields` — 不伪造不存在的 payload 字段
     - `test_all_current_exception_types_covered` — 所有当前多选异常类型都有 context 格式化
-  - [ ] 9.2 `tests/unit/test_multi_decision.py`（新建文件）：
+  - [x] 9.2 `tests/unit/test_multi_decision.py`（新建文件）：
     - `test_resolve_multi_decision_valid_index` — 有效索引返回正确 decision
     - `test_resolve_multi_decision_out_of_range` — 超出范围抛出 ValueError
     - `test_resolve_multi_decision_uses_payload_options` — 优先使用 payload.options
@@ -206,8 +206,8 @@ Story 6.3a 已实现：
     - `test_needs_human_review_options_align_schema` — `needs_human_review` 对齐 `retry/skip/escalate`
     - `test_convergent_loop_escalation_options_align_schema` — `convergent_loop_escalation` 对齐 `retry/skip/escalate`
 
-- [ ] Task 10: 集成测试 (AC: #1-#6)
-  - [ ] 10.1 `tests/integration/test_tui_exception_approval.py`（新建文件）：
+- [x] Task 10: 集成测试 (AC: #1-#6)
+  - [x] 10.1 `tests/integration/test_tui_exception_approval.py`（新建文件）：
     - `test_regression_failure_renders_exception_panel_in_three_panel` — regression_failure 审批在右上面板渲染 ExceptionApprovalPanel
     - `test_number_key_1_selects_revert_in_three_panel` — 按 `1` 写入 decision="revert" + status="approved"
     - `test_number_key_on_binary_approval_ignored` — 数字键在常规审批上无效
@@ -386,15 +386,52 @@ def get_exception_context(approval_type: str, payload: dict[str, object]) -> tup
 
 - 2026-03-27: create-story 创建 — 基于 Epic 6 / PRD / 架构 / UX spec / 前序 Story 6.3a 生成 6.3b 初稿
 - 2026-03-27: validate-create-story 修订 —— 删除 UX-only `critical_timeout` / `cascade_failure` 实现合同；将 `needs_human_review` 与 `convergent_loop_escalation` 选项对齐当前 schema / core consumer；收紧上下文字段到真实 payload 合同；明确 three-panel 数字键与 tabbed `[1]-[4]` 切页的边界；修正 regression flow 的实际创建/消费代码引用；补回模板 validation note 与 Change Log
+- 2026-03-27: dev-story 实现 — 全部 10 个 Task 完成，新增 4 个文件 + 修改 8 个文件，24 个单元测试 + 10 个集成测试通过，全量回归 1308 passed
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- ✅ Task 1: ExceptionApprovalPanel Widget — 新建 widget 支持多行块渲染（标题 + 三要素 + 数字键选项），CSS class 驱动 risk 边框颜色
+- ✅ Task 2: DashboardScreen 数字键处理 — on_key + ATOApp.action_switch_tab 委托实现 three-panel 模式数字键选择，tabbed 模式保持 [1]-[4] 切页
+- ✅ Task 3: 右面板联动 — _render_exception_approval_context() 渲染异常审批上下文，_update_action_panel() 显示数字键动作提示
+- ✅ Task 4: 左面板排序与高亮 — _sort_approvals() 异常审批排前，ApprovalCard 增加 $error 风格图标和 approval-exception-high 背景
+- ✅ Task 5: fallback 文案退场 — 删除所有 "此审批需多选，请使用 CLI 或等待 6.3b" 文案，y/n 在异常审批上静默 no-op
+- ✅ Task 6: 共享 helper — resolve_multi_decision, get_exception_context, format_option_labels, get_options_for_approval, get_exception_type_title
+- ✅ Task 7: TCSS 样式 — ExceptionApprovalPanel 基础样式 + risk variant + 左面板异常行高亮
+- ✅ Task 8: Widget 导出 — ExceptionApprovalPanel 加入 widgets/__init__.py
+- ✅ Task 9: 13 + 11 = 24 个单元测试全部通过
+- ✅ Task 10: 10 个集成测试全部通过
+- ✅ 全量回归：1308 passed, 0 failed
+
+### Implementation Plan
+
+- 先实现共享 helpers（Task 6），因为 ExceptionApprovalPanel 和 DashboardScreen 都依赖它们
+- ExceptionApprovalPanel 使用 Rich.Text 直接渲染（不是 DOM 挂载），保持与 ApprovalCard 一致的轻量设计
+- 数字键路由通过 ATOApp.action_switch_tab 委托到 DashboardScreen._handle_option_key，避免 App 绑定吞掉按键事件
+- 为 5-9 键增加 App 绑定（无 Tab 描述标签），覆盖所有可能的异常审批选项数
+- 已更新 6.3a 旧 fallback 测试 test_multi_option_approval_shows_cli_fallback → test_multi_option_approval_shows_digit_key_options
+
 ### File List
+
+**新增文件：**
+- src/ato/tui/widgets/exception_approval_panel.py — ExceptionApprovalPanel Widget
+- tests/unit/test_exception_approval_panel.py — 面板渲染单元测试（13 tests）
+- tests/unit/test_multi_decision.py — 多选决策 helper 单元测试（11 tests）
+- tests/integration/test_tui_exception_approval.py — 异常审批集成测试（10 tests）
+
+**修改文件：**
+- src/ato/approval_helpers.py — 新增 resolve_multi_decision, get_exception_context, format_option_labels, get_options_for_approval, get_exception_type_title
+- src/ato/tui/dashboard.py — 数字键处理 + exception panel 渲染 + 排序 + fallback 移除
+- src/ato/tui/widgets/approval_card.py — 异常审批行样式增强（$error 图标 + high-risk 背景 class）
+- src/ato/tui/widgets/__init__.py — 导出 ExceptionApprovalPanel
+- src/ato/tui/app.py — action_switch_tab 增加 three-panel 委托 + 5-9 键绑定
+- src/ato/tui/app.tcss — ExceptionApprovalPanel 样式 + risk variant + 异常行高亮
+- tests/integration/test_tui_pilot.py — 更新旧 fallback 测试为 digit key 测试
+- _bmad-output/implementation-artifacts/sprint-status.yaml — 6-3b status → review

@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -24,8 +25,10 @@ from textual.widgets import ContentSwitcher, Static, TabbedContent, TabPane
 from ato.approval_helpers import (
     format_approval_summary,
     get_binary_approval_labels,
+    get_options_for_approval,
     is_binary_approval,
     resolve_binary_decision,
+    resolve_multi_decision,
 )
 from ato.models.schemas import APPROVAL_TYPE_ICONS
 from ato.tui.theme import (
@@ -36,6 +39,7 @@ from ato.tui.theme import (
     sort_stories_by_status,
 )
 from ato.tui.widgets.approval_card import ApprovalCard
+from ato.tui.widgets.exception_approval_panel import ExceptionApprovalPanel
 from ato.tui.widgets.heartbeat_indicator import HeartbeatIndicator
 from ato.tui.widgets.story_status_line import StoryStatusLine, _format_elapsed
 
@@ -118,10 +122,15 @@ class DashboardScreen(Widget):
                     scroll.can_focus = False
                     yield scroll
                 with _FocusablePanel(id="panel-right", classes="right-panel"):
-                    yield Static(
-                        "选择左面板的 story 查看详情",
-                        id="right-top-content",
-                    )
+                    with ContentSwitcher(
+                        initial="right-top-content",
+                        id="right-top-switcher",
+                    ):
+                        yield Static(
+                            "选择左面板的 story 查看详情",
+                            id="right-top-content",
+                        )
+                        yield ExceptionApprovalPanel(id="right-top-exception")
                     yield Static(
                         "",
                         id="right-bottom-content",
@@ -308,12 +317,8 @@ class DashboardScreen(Widget):
         approval_type = getattr(approval, "approval_type", "")
         payload = getattr(approval, "payload", None)
 
-        # 多选审批降级 — 不执行写入
+        # 多选异常审批 — y/n 无效（Story 6.3b）
         if not is_binary_approval(approval_type, payload):
-            self._update_static(
-                "#right-bottom-content",
-                Text("此审批需多选，请使用 CLI 或等待 6.3b", style=RICH_COLORS["$warning"]),
-            )
             return
 
         result = resolve_binary_decision(approval_type, key)  # type: ignore[arg-type]
@@ -352,6 +357,106 @@ class DashboardScreen(Widget):
         """写库失败时回退已提交状态，允许用户重试。"""
         self._submitted_approvals.discard(aid)
         self._update_action_panel()
+
+    # ------------------------------------------------------------------
+    # 数字键多选异常审批提交 (Story 6.3b)
+    # ------------------------------------------------------------------
+
+    def _handle_option_key(self, index: int) -> None:
+        """处理数字键选择异常审批选项。
+
+        Args:
+            index: 0-based 选项索引（按键 1 → index 0）。
+        """
+        # 必须选中一个审批项
+        if not self._selected_item_id or not self._selected_item_id.startswith("approval:"):
+            return
+
+        aid = self._selected_item_id.removeprefix("approval:")
+
+        # 已提交的审批不允许二次提交
+        if aid in self._submitted_approvals:
+            return
+
+        approval = self._approvals_by_id.get(aid)
+        if approval is None:
+            return
+
+        approval_type = getattr(approval, "approval_type", "")
+        payload = getattr(approval, "payload", None)
+
+        # 仅对多选异常审批生效（二选一审批用 y/n）
+        if is_binary_approval(approval_type, payload):
+            return
+
+        # 尝试解析决策
+        try:
+            decision, status = resolve_multi_decision(approval_type, index, payload)
+        except ValueError:
+            # 超出范围——no-op，不写 SQLite、不给假成功提示
+            return
+
+        decision_reason = f"tui:{index + 1} -> {decision}"
+
+        # 标记已提交中间状态
+        self._submitted_approvals.add(aid)
+        self._update_action_panel()
+
+        # 异步写入 SQLite + nudge
+        from ato.tui.app import ATOApp
+
+        try:
+            app = self.app
+        except Exception:
+            return
+        if not isinstance(app, ATOApp):
+            return
+
+        async def _do_submit() -> None:
+            try:
+                ok = await app.submit_approval_decision(
+                    approval_id=aid,
+                    status=status,
+                    decision=decision,
+                    decision_reason=decision_reason,
+                )
+                if not ok:
+                    self._rollback_submitted(aid)
+            except Exception:
+                self._rollback_submitted(aid)
+
+        self.run_worker(_do_submit(), exclusive=False)
+
+    def on_key(self, event: events.Key) -> None:
+        """捕获数字键用于异常审批选择。
+
+        仅在 three-panel 模式下、选中多选异常审批时生效。
+        tabbed 模式下数字键由 ATOApp.action_switch_tab() 处理。
+        """
+        if event.key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+            # 检查是否在 three-panel 模式
+            app = self.app
+            if app is None:
+                return
+            from ato.tui.app import ATOApp
+
+            if not isinstance(app, ATOApp):
+                return
+            if app.layout_mode != "three-panel":
+                return
+
+            # 检查是否选中了多选异常审批
+            if self._selected_item_id and self._selected_item_id.startswith("approval:"):
+                aid = self._selected_item_id.removeprefix("approval:")
+                approval = self._approvals_by_id.get(aid)
+                if approval:
+                    approval_type = getattr(approval, "approval_type", "")
+                    payload = getattr(approval, "payload", None)
+                    if not is_binary_approval(approval_type, payload):
+                        index = int(event.key) - 1
+                        self._handle_option_key(index)
+                        event.prevent_default()
+                        event.stop()
 
     def action_toggle_detail(self) -> None:
         """d 键：切换审批展开/折叠态。"""
@@ -497,8 +602,10 @@ class DashboardScreen(Widget):
         # 构建统一的 item ID 列表
         new_item_ids: list[str] = []
         # 仅主面板包含审批项（Tab 模式审批在独立 Tab）
+        # 异常审批排在常规审批之前 (AC4)
         if is_primary:
-            for a in self._approval_records:
+            sorted_approvals = self._sort_approvals(self._approval_records)
+            for a in sorted_approvals:
                 new_item_ids.append(f"approval:{getattr(a, 'approval_id', '')}")
         for sid in sorted_story_ids:
             new_item_ids.append(f"story:{sid}")
@@ -515,7 +622,7 @@ class DashboardScreen(Widget):
                     getattr(a, "approval_type", ""),
                     getattr(a, "story_id", ""),
                 )
-                for a in self._approval_records
+                for a in sorted_approvals
             ]
             new_snapshot: list[tuple[str, str, str]] = approval_snapshot + story_snapshot
         else:
@@ -585,9 +692,9 @@ class DashboardScreen(Widget):
                 self._rebuild_gen_tab += 1
                 gen = self._rebuild_gen_tab
 
-            # 先渲染审批卡片（仅主面板）
+            # 先渲染审批卡片（仅主面板，异常审批在前）
             if is_primary:
-                for a_record in self._approval_records:
+                for a_record in sorted_approvals:
                     aid = getattr(a_record, "approval_id", "")
                     ac_w = ApprovalCard(id=f"ac{gen}-{aid}", classes="approval-row")
                     container.mount(ac_w)
@@ -731,16 +838,21 @@ class DashboardScreen(Widget):
     def _update_detail_panel(self) -> None:
         """右上面板联动——区分审批和 story。"""
         if not self._selected_item_id:
-            self._update_static("#right-top-content", "选择左面板的 story 查看详情")
+            self._show_right_top_static("选择左面板的 story 查看详情")
             return
 
         if self._selected_item_id.startswith("approval:"):
             aid = self._selected_item_id.removeprefix("approval:")
             approval = self._approvals_by_id.get(aid)
             if approval:
-                self._render_approval_context(approval)
+                approval_type = getattr(approval, "approval_type", "")
+                payload = getattr(approval, "payload", None)
+                if not is_binary_approval(approval_type, payload):
+                    self._render_exception_approval_context(approval)
+                else:
+                    self._render_approval_context(approval)
             else:
-                self._update_static("#right-top-content", "选择左面板的 story 查看详情")
+                self._show_right_top_static("选择左面板的 story 查看详情")
         else:
             sid = self._selected_item_id.removeprefix("story:")
             self._render_story_detail(sid)
@@ -868,13 +980,36 @@ class DashboardScreen(Widget):
             detail.append(f"{recommended}", style=RICH_COLORS["$info"])
             detail.append(f" [{risk or '-'}]", style=risk_color)
 
-        self._update_static("#right-top-content", detail)
+        self._show_right_top_static(detail)
+
+    def _render_exception_approval_context(self, approval: object) -> None:
+        """渲染异常审批多选面板内容到右上面板（Story 6.3b）。"""
+        aid = getattr(approval, "approval_id", "")
+        approval_type = getattr(approval, "approval_type", "")
+        story_id = getattr(approval, "story_id", "")
+        payload_str = getattr(approval, "payload", None)
+        risk_level = getattr(approval, "risk_level", "") or ""
+
+        payload_for_panel = self._build_exception_panel_payload(
+            approval_type=approval_type,
+            story_id=story_id,
+            payload_str=payload_str,
+        )
+
+        self._show_right_top_exception(
+            approval_id=aid,
+            story_id=story_id,
+            approval_type=approval_type,
+            risk_level=risk_level,
+            payload=payload_for_panel,
+            expanded_context=self._expanded_approval_id == aid,
+        )
 
     def _render_story_detail(self, story_id: str) -> None:
         """渲染 story 详情到右上面板。"""
         story = self._stories_by_id.get(story_id)
         if not story:
-            self._update_static("#right-top-content", "选择左面板的 story 查看详情")
+            self._show_right_top_static("选择左面板的 story 查看详情")
             return
 
         sid = str(story.get("story_id", ""))
@@ -906,7 +1041,7 @@ class DashboardScreen(Widget):
                 style=RICH_COLORS["$info"],
             )
 
-        self._update_static("#right-top-content", detail)
+        self._show_right_top_static(detail)
 
     def _update_action_panel(self) -> None:
         """右下面板——审批操作提示或通用提示。"""
@@ -937,14 +1072,18 @@ class DashboardScreen(Widget):
             payload = getattr(approval, "payload", None)
 
             if not is_binary_approval(approval_type, payload):
-                # 多选审批 fallback
-                self._update_static(
-                    "#right-bottom-content",
-                    Text(
-                        "此审批需多选，请使用 CLI 或等待 6.3b",
-                        style=RICH_COLORS["$warning"],
-                    ),
-                )
+                # 多选异常审批 — 数字键动作提示 (Story 6.3b)
+                options = get_options_for_approval(approval_type, payload)
+                action_text = Text()
+                for i, opt in enumerate(options, start=1):
+                    action_text.append(f"[{i}] ", style=f"bold {RICH_COLORS['$info']}")
+                    action_text.append(f"{opt}  ", style=RICH_COLORS["$text"])
+                action_text.append("[d] ", style=RICH_COLORS["$muted"])
+                if self._expanded_approval_id == aid:
+                    action_text.append("收起上下文", style=RICH_COLORS["$muted"])
+                else:
+                    action_text.append("更多上下文", style=RICH_COLORS["$muted"])
+                self._update_static("#right-bottom-content", action_text)
                 return
 
             # 二选一审批——显示动作标签 + 快捷键
@@ -976,6 +1115,8 @@ class DashboardScreen(Widget):
         except Exception:
             return
 
+        # 异常审批排在常规审批之前 (AC4)
+        sorted_tab_approvals = self._sort_approvals(self._approval_records)
         approval_snapshot = [
             (
                 getattr(a, "approval_id", ""),
@@ -983,9 +1124,9 @@ class DashboardScreen(Widget):
                 getattr(a, "story_id", ""),
                 "binary"
                 if is_binary_approval(getattr(a, "approval_type", ""), getattr(a, "payload", None))
-                else "fallback",
+                else "exception",
             )
-            for a in self._approval_records
+            for a in sorted_tab_approvals
         ]
 
         if not self._approval_records:
@@ -1002,7 +1143,7 @@ class DashboardScreen(Widget):
             self._rebuild_gen_approvals_tab += 1
             gen = self._rebuild_gen_approvals_tab
 
-            for a_record in self._approval_records:
+            for a_record in sorted_tab_approvals:
                 aid = getattr(a_record, "approval_id", "")
                 approval_type = getattr(a_record, "approval_type", "")
                 payload = getattr(a_record, "payload", None)
@@ -1018,20 +1159,11 @@ class DashboardScreen(Widget):
                     risk_level=getattr(a_record, "risk_level", None),
                 )
 
-                if not is_binary_approval(approval_type, payload):
-                    container.mount(
-                        Static(
-                            "  ↳ 此审批需多选，请使用 CLI 或等待 6.3b",
-                            id=f"atab-fb{gen}-{aid}",
-                            classes="approval-submitted",
-                        )
-                    )
-
             self._rendered_approvals_snapshot_tab = approval_snapshot
             return
 
         gen = self._rebuild_gen_approvals_tab
-        for a_record in self._approval_records:
+        for a_record in sorted_tab_approvals:
             aid = getattr(a_record, "approval_id", "")
             try:
                 ac = container.query_one(f"#atab{gen}-{aid}", ApprovalCard)
@@ -1045,6 +1177,48 @@ class DashboardScreen(Widget):
                 )
             except Exception:
                 pass
+
+    def _build_exception_panel_payload(
+        self,
+        *,
+        approval_type: str,
+        story_id: str,
+        payload_str: str | None,
+    ) -> str | None:
+        """为异常审批面板补齐 dashboard 已知的 story 级上下文。"""
+        payload_dict: dict[str, object] = {}
+        if payload_str:
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                payload_dict = json.loads(payload_str)
+
+        if approval_type == "rebase_conflict":
+            story = self._stories_by_id.get(story_id, {})
+            worktree_path = story.get("worktree_path")
+            if worktree_path and "worktree_path" not in payload_dict:
+                payload_dict = {
+                    **payload_dict,
+                    "worktree_path": str(worktree_path),
+                }
+
+        if payload_dict:
+            return json.dumps(payload_dict, ensure_ascii=False)
+        return payload_str
+
+    def _sort_approvals(self, approvals: list[object]) -> list[object]:
+        """将异常审批排在常规审批之前 (AC4)。
+
+        异常审批组和常规审批组内部保持原始顺序，避免刷新时列表跳动。
+        """
+        exception_approvals: list[object] = []
+        binary_approvals: list[object] = []
+        for a in approvals:
+            atype = getattr(a, "approval_type", "")
+            payload = getattr(a, "payload", None)
+            if is_binary_approval(atype, payload):
+                binary_approvals.append(a)
+            else:
+                exception_approvals.append(a)
+        return exception_approvals + binary_approvals
 
     def _compute_elapsed(self, story_id: str) -> int:
         """计算 story 的经过时间（秒）。"""
@@ -1076,5 +1250,38 @@ class DashboardScreen(Widget):
         try:
             widget = self.query_one(selector, Static)
             widget.update(text)
+        except Exception:
+            pass
+
+    def _show_right_top_static(self, text: str | Text) -> None:
+        """切换右上区域到 Static 详情视图。"""
+        with contextlib.suppress(Exception):
+            switcher = self.query_one("#right-top-switcher", ContentSwitcher)
+            switcher.current = "right-top-content"
+        self._update_static("#right-top-content", text)
+
+    def _show_right_top_exception(
+        self,
+        *,
+        approval_id: str,
+        story_id: str,
+        approval_type: str,
+        risk_level: str,
+        payload: str | None,
+        expanded_context: bool,
+    ) -> None:
+        """切换右上区域到真实 ExceptionApprovalPanel。"""
+        try:
+            panel = self.query_one("#right-top-exception", ExceptionApprovalPanel)
+            panel.update_data(
+                approval_id=approval_id,
+                story_id=story_id,
+                approval_type=approval_type,
+                risk_level=risk_level,
+                payload=payload,
+                expanded_context=expanded_context,
+            )
+            switcher = self.query_one("#right-top-switcher", ContentSwitcher)
+            switcher.current = "right-top-exception"
         except Exception:
             pass

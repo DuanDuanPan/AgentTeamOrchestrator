@@ -144,6 +144,167 @@ def get_binary_approval_labels(approval_type: str) -> tuple[str, str] | None:
     return _BINARY_APPROVAL_LABELS.get(approval_type)
 
 
+# ---------------------------------------------------------------------------
+# 多选异常审批辅助函数 (Story 6.3b)
+# ---------------------------------------------------------------------------
+
+# 异常审批类型人类可读标题（AC3 映射表）
+_EXCEPTION_TYPE_TITLES: dict[str, str] = {
+    "regression_failure": "REGRESSION FAILURE",
+    "session_timeout": "SESSION TIMEOUT",
+    "crash_recovery": "CRASH RECOVERY",
+    "precommit_failure": "PRE-COMMIT FAILURE",
+    "rebase_conflict": "REBASE CONFLICT",
+    "needs_human_review": "NEEDS HUMAN REVIEW",
+    "convergent_loop_escalation": "CONVERGENT LOOP ESCALATION",
+}
+
+# 选项的中文标签（供 ExceptionApprovalPanel 展示）
+_OPTION_LABELS: dict[str, str] = {
+    "revert": "回滚当前 merge",
+    "fix_forward": "保持 queue 冻结并创建修复路径",
+    "pause": "保持冻结，等待人工处理",
+    "restart": "重新启动",
+    "resume": "从中断处继续",
+    "abandon": "放弃",
+    "retry": "重试",
+    "manual_fix": "人工修复",
+    "skip": "跳过",
+    "manual_resolve": "人工解决冲突",
+    "escalate": "升级处理",
+}
+
+
+def resolve_multi_decision(
+    approval_type: str, index: int, payload: str | None = None
+) -> tuple[str, str]:
+    """从 approval_type + 数字索引解析多选决策。
+
+    优先使用 payload.options，但每个 option 必须存在于
+    ``APPROVAL_DEFAULT_VALID_OPTIONS[approval_type]`` 白名单中——
+    Orchestrator ``_handle_approval_decision()`` 只识别白名单 decision，
+    非法 decision 会导致审批卡在"已决定但永远无法消费"的坏状态。
+    payload.options 包含任何白名单外的值时整体 fallback 到默认选项。
+
+    Args:
+        approval_type: 审批类型。
+        index: 0-based 选项索引。
+        payload: JSON 编码的 payload 字符串。
+
+    Returns:
+        (decision_key, status="approved") 元组。
+
+    Raises:
+        ValueError: 索引超出选项范围或无可用选项。
+    """
+    options = get_options_for_approval(approval_type, payload)
+
+    if not options:
+        msg = f"No options available for approval type: {approval_type}"
+        raise ValueError(msg)
+
+    if index < 0 or index >= len(options):
+        msg = f"Index {index} out of range for {len(options)} options"
+        raise ValueError(msg)
+
+    return (options[index], "approved")
+
+
+def get_exception_context(approval_type: str, payload: dict[str, object]) -> tuple[str, str]:
+    """返回 (what, impact) 文本；字段缺失时省略对应行（AC5）。
+
+    严格遵循"缺失即省略"原则——不输出占位符或空值行。
+    """
+    parts: list[str] = []
+
+    match approval_type:
+        case "session_timeout":
+            what = "Interactive session 已超过阈值，正在等待操作者决策。"
+            if "task_id" in payload:
+                parts.append(f"task_id: {payload['task_id']}")
+            if "elapsed_seconds" in payload:
+                parts.append(f"elapsed_seconds: {payload['elapsed_seconds']}")
+        case "crash_recovery":
+            what = "任务在 dispatch 或执行过程中失败，需要决定如何恢复。"
+            if "phase" in payload:
+                parts.append(f"phase: {payload['phase']}")
+            if "task_id" in payload:
+                parts.append(f"task_id: {payload['task_id']}")
+        case "rebase_conflict":
+            what = "Worktree rebase 到 main 时产生合并冲突。"
+            if "conflict_files" in payload:
+                parts.append(f"conflict_files: {payload['conflict_files']}")
+            if "worktree_path" in payload:
+                parts.append(f"worktree_path: {payload['worktree_path']}")
+            if payload.get("stderr"):
+                parts.append(f"stderr: {payload['stderr']}")
+        case "precommit_failure":
+            what = "Pre-commit 检查失败，需要决定重试、人工修复或跳过。"
+            if payload.get("error_output"):
+                parts.append(f"error_output: {payload['error_output']}")
+        case "needs_human_review":
+            what = "BMAD 解析失败，需要人工决定是否重试或升级。"
+            if "skill_type" in payload:
+                parts.append(f"skill_type: {payload['skill_type']}")
+            if "parser_mode" in payload:
+                parts.append(f"parser_mode: {payload['parser_mode']}")
+            if payload.get("raw_output_preview"):
+                parts.append(f"preview: {payload['raw_output_preview']}")
+            if "task_id" in payload:
+                parts.append(f"task_id: {payload['task_id']}")
+        case "convergent_loop_escalation":
+            what = "Convergent Loop 达到上限仍未收敛。"
+            if "rounds_completed" in payload:
+                parts.append(f"rounds_completed: {payload['rounds_completed']}")
+            if "open_blocking_count" in payload:
+                parts.append(f"open_blocking_count: {payload['open_blocking_count']}")
+            if "final_convergence_rate" in payload:
+                parts.append(
+                    f"final_convergence_rate: {payload['final_convergence_rate']}"
+                )
+            if "unresolved_findings" in payload:
+                findings = payload["unresolved_findings"]
+                count = len(findings) if isinstance(findings, list) else findings
+                parts.append(f"unresolved_findings: {count}")
+        case "regression_failure":
+            what = "Regression 在 main 上失败，merge queue 已冻结。"
+            if payload.get("reason"):
+                parts.append(f"reason: {payload['reason']}")
+        case _:
+            what = approval_type
+
+    return (what, "\n".join(parts))
+
+
+def get_exception_type_title(approval_type: str) -> str:
+    """返回异常审批类型的人类可读标题。"""
+    return _EXCEPTION_TYPE_TITLES.get(approval_type, approval_type.upper().replace("_", " "))
+
+
+def format_option_labels(approval_type: str, options: list[str]) -> list[str]:
+    """返回用户可读的中文标签列表（供 ExceptionApprovalPanel 展示）。"""
+    return [_OPTION_LABELS.get(opt, opt) for opt in options]
+
+
+def get_options_for_approval(approval_type: str, payload: str | None = None) -> list[str]:
+    """获取审批的选项列表（优先 payload.options，fallback 到默认）。
+
+    payload.options 中的每个值必须存在于白名单中，否则整体 fallback。
+    """
+    allowed = set(APPROVAL_DEFAULT_VALID_OPTIONS.get(approval_type, []))
+    if payload and allowed:
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            pd = json.loads(payload)
+            opts = pd.get("options")
+            if (
+                isinstance(opts, list)
+                and all(isinstance(o, str) for o in opts)
+                and all(o in allowed for o in opts)
+            ):
+                return opts
+    return APPROVAL_DEFAULT_VALID_OPTIONS.get(approval_type, [])
+
+
 async def create_approval(
     db: aiosqlite.Connection,
     *,

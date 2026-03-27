@@ -36,6 +36,11 @@ class ATOApp(App[None]):
         ("2", "switch_tab(2)", "Tab 2"),
         ("3", "switch_tab(3)", "Tab 3"),
         ("4", "switch_tab(4)", "Tab 4"),
+        ("5", "switch_tab(5)", ""),
+        ("6", "switch_tab(6)", ""),
+        ("7", "switch_tab(7)", ""),
+        ("8", "switch_tab(8)", ""),
+        ("9", "switch_tab(9)", ""),
     ]
 
     # Reactive 属性驱动 UI 更新
@@ -127,7 +132,15 @@ class ATOApp(App[None]):
         header.set_display_mode(mode)
 
     def action_switch_tab(self, tab_number: int) -> None:
-        """数字键切换 Tab（仅在 tabbed 模式下生效）。"""
+        """数字键切换 Tab（tabbed 模式）或异常审批选择（three-panel 模式）。"""
+        if self.layout_mode == "three-panel":
+            # 三面板模式下委托给 DashboardScreen 处理异常审批数字键
+            try:
+                dashboard = self.query_one(DashboardScreen)
+                dashboard._handle_option_key(tab_number - 1)
+            except NoMatches:
+                pass
+            return
         if self.layout_mode != "tabbed":
             return
         try:

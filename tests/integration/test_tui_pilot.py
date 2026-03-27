@@ -864,8 +864,8 @@ async def test_tabbed_mode_approvals_tab_updates_in_place(tui_db_path: Path) -> 
         assert "[high]" in updated_text
 
 
-async def test_multi_option_approval_shows_cli_fallback(tui_db_path: Path) -> None:
-    """多选审批在 TUI 中只显示 fallback 提示，不误启用 y/n。"""
+async def test_multi_option_approval_shows_digit_key_options(tui_db_path: Path) -> None:
+    """多选审批在 TUI 中显示数字键选项（Story 6.3b），不误启用 y/n。"""
     import json
 
     from textual.widgets import Static
@@ -887,12 +887,16 @@ async def test_multi_option_approval_shows_cli_fallback(tui_db_path: Path) -> No
         dashboard = app.query_one(DashboardScreen)
         assert dashboard._selected_item_id == "approval:a4"
 
-        # 右下面板应显示 fallback 提示
+        # 右下面板应显示数字键选项（Story 6.3b 替换 fallback）
         right_bottom = dashboard.query_one("#right-bottom-content", Static)
         rendered = str(right_bottom.render())
-        assert "CLI" in rendered or "6.3b" in rendered
+        assert "[1]" in rendered
+        assert "restart" in rendered
+        # 不应再显示旧 fallback 文案
+        assert "CLI" not in rendered
+        assert "6.3b" not in rendered
 
-        # 直接调用 _submit_decision — 多选审批不应写入 SQLite
+        # 直接调用 _submit_decision("y") — 多选审批上 y/n 无效
         dashboard._submit_decision("y")
         await pilot.pause(delay=0.5)
 

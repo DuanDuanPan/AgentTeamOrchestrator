@@ -10,7 +10,7 @@ from rich.text import Text
 from textual.reactive import reactive
 from textual.widget import Widget
 
-from ato.approval_helpers import format_approval_summary
+from ato.approval_helpers import format_approval_summary, is_binary_approval
 from ato.models.schemas import APPROVAL_TYPE_ICONS
 from ato.tui.theme import RICH_COLORS, map_risk_to_color
 
@@ -49,15 +49,28 @@ class ApprovalCard(Widget):
         self.recommended_action = recommended_action or ""
         self.risk_level = risk_level or ""
 
+        # 异常审批样式增强 (Story 6.3b AC4)
+        is_exception = not is_binary_approval(approval_type, payload)
+        self.remove_class("approval-exception-row")
+        self.remove_class("approval-exception-high")
+        if is_exception:
+            self.add_class("approval-exception-row")
+            if risk_level == "high":
+                self.add_class("approval-exception-high")
+
     def render(self) -> Text:
         """折叠态单行渲染。"""
         icon = APPROVAL_TYPE_ICONS.get(self.approval_type, "?")
         risk_color_var = map_risk_to_color(self.risk_level or None)
         risk_color = RICH_COLORS.get(risk_color_var, RICH_COLORS["$muted"])
 
+        # 异常审批使用 $error 色图标 (AC4)
+        is_exception = self.has_class("approval-exception-row")
+        icon_color = RICH_COLORS["$error"] if is_exception else RICH_COLORS["$warning"]
+
         result = Text()
-        # 类型图标（使用 $warning 色）
-        result.append(f"{icon} ", style=RICH_COLORS["$warning"])
+        # 类型图标
+        result.append(f"{icon} ", style=icon_color)
         # story ID
         result.append(f"{self.story_id}  ", style=RICH_COLORS["$accent"])
         # 摘要
