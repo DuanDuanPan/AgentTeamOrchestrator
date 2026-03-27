@@ -591,8 +591,8 @@ class MergeQueue:
             cursor = await db.execute(
                 "SELECT * FROM merge_queue WHERE status = 'regression_pending' ORDER BY id ASC"
             )
-            rows = await cursor.fetchall()
-            if len(rows) > 1:  # type: ignore[arg-type]
+            rows = list(await cursor.fetchall())
+            if len(rows) > 1:
                 logger.warning(
                     "merge_queue_multiple_regression_pending",
                     story_ids=[dict(row)["story_id"] for row in rows],

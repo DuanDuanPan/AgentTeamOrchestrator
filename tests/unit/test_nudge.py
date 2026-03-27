@@ -6,10 +6,16 @@ import asyncio
 import os
 import signal
 import time
+from unittest.mock import patch
 
 import pytest
 
-from ato.nudge import Nudge, send_external_nudge
+from ato.nudge import (
+    Nudge,
+    format_notification_message,
+    send_external_nudge,
+    send_user_notification,
+)
 
 
 class TestNudgeNotifyAndWait:
@@ -87,3 +93,56 @@ class TestSendExternalNudge:
             assert received[0] == signal.SIGUSR1
         finally:
             signal.signal(signal.SIGUSR1, original_handler)
+
+
+class TestSendUserNotificationLevels:
+    """Story 4.4: 四级通知 bell 行为测试。"""
+
+    def test_send_user_notification_urgent_double_bell(self) -> None:
+        """urgent 级别发送两次 bell。"""
+        import sys
+
+        with patch.object(sys, "stderr") as mock_stderr:
+            send_user_notification("urgent", "test msg")
+            written = [c.args[0] for c in mock_stderr.write.call_args_list]
+            assert "\a\a" in written, "urgent should emit double bell"
+            assert any("⚠ 紧急" in w for w in written)
+
+    def test_send_user_notification_milestone_bell(self) -> None:
+        """milestone 级别发送单次 bell。"""
+        import sys
+
+        with patch.object(sys, "stderr") as mock_stderr:
+            send_user_notification("milestone", "story done")
+            written = [c.args[0] for c in mock_stderr.write.call_args_list]
+            assert "\a" in written, "milestone should emit single bell"
+            assert any("🎉" in w for w in written)
+
+    def test_send_user_notification_normal_single_bell(self) -> None:
+        """normal 级别发送单次 bell。"""
+        import sys
+
+        with patch.object(sys, "stderr") as mock_stderr:
+            send_user_notification("normal", "approval created")
+            written = [c.args[0] for c in mock_stderr.write.call_args_list]
+            assert "\a" in written
+            assert "\a\a" not in written, "normal should NOT emit double bell"
+
+    def test_send_user_notification_silent_no_output(self) -> None:
+        """silent 级别无 bell 无 stderr 输出。"""
+        import sys
+
+        with patch.object(sys, "stderr") as mock_stderr:
+            send_user_notification("silent", "phase change")
+            mock_stderr.write.assert_not_called()
+
+
+class TestFormatNotificationMessage:
+    """Story 4.4: 消息前缀格式化测试。"""
+
+    def test_format_notification_message_prefixes(self) -> None:
+        """各级别前缀正确。"""
+        assert format_notification_message("urgent", "x") == "⚠ 紧急: x"
+        assert format_notification_message("milestone", "y") == "🎉 y"
+        assert format_notification_message("normal", "z") == "z"
+        assert format_notification_message("silent", "w") == "w"

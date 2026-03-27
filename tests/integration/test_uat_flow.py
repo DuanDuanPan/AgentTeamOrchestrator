@@ -46,7 +46,7 @@ async def _seed_story(
             StoryRecord(
                 story_id=story_id,
                 title=f"Test {story_id}",
-                status=status,
+                status=status,  # type: ignore[arg-type]
                 current_phase=phase,
                 worktree_path="/tmp/wt/" + story_id,
                 created_at=_NOW,
@@ -74,7 +74,7 @@ async def _seed_task(
                 phase=phase,
                 role="developer",
                 cli_tool="claude",
-                status=status,
+                status=status,  # type: ignore[arg-type]
                 pid=12345,
                 started_at=_NOW,
             ),
@@ -97,9 +97,7 @@ async def _read_story(db_path: Path, story_id: str) -> StoryRecord | None:
 
 
 class TestUatPassE2E:
-    async def test_uat_pass_transitions_to_merging(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_uat_pass_transitions_to_merging(self, initialized_db_path: Path) -> None:
         """ato uat --result pass → TQ submit uat_pass → story.current_phase == merging。"""
         sid = "story-uat-e2e-pass"
         await _seed_story(initialized_db_path, sid, "uat", "uat")
@@ -123,9 +121,7 @@ class TestUatPassE2E:
 
 
 class TestUatFailE2E:
-    async def test_uat_fail_transitions_to_fixing(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_uat_fail_transitions_to_fixing(self, initialized_db_path: Path) -> None:
         """ato uat --result fail → TQ submit uat_fail → story.current_phase == fixing。"""
         sid = "story-uat-e2e-fail"
         await _seed_story(initialized_db_path, sid, "uat", "uat")
@@ -149,9 +145,7 @@ class TestUatFailE2E:
 
 
 class TestUatFailConvergentLoopReentry:
-    async def test_uat_fail_then_fix_done_then_review(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_uat_fail_then_fix_done_then_review(self, initialized_db_path: Path) -> None:
         """uat → fixing → reviewing: CL 回退后完整 review 流程。"""
         sid = "story-uat-cl-reentry"
         await _seed_story(initialized_db_path, sid, "uat", "uat")
@@ -191,9 +185,7 @@ class TestUatFailConvergentLoopReentry:
 
 
 class TestSubmitDevelopingVerification:
-    async def test_detect_completed_interactive_task(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_detect_completed_interactive_task(self, initialized_db_path: Path) -> None:
         """_detect_completed_interactive_tasks 应检测 developing 阶段已完成的 task。"""
         from ato.core import _detect_completed_interactive_tasks
         from ato.models.db import get_connection, update_task_status
@@ -233,9 +225,7 @@ class TestSubmitDevelopingVerification:
 
 
 class TestUatCrashRecoveryApproval:
-    async def test_uat_timeout_creates_approval(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_uat_timeout_creates_approval(self, initialized_db_path: Path) -> None:
         """uat 阶段 interactive session 超时应创建 session_timeout approval。"""
         from ato.core import _check_interactive_timeouts
         from ato.models.db import get_connection, get_pending_approvals
@@ -267,9 +257,7 @@ class TestUatCrashRecoveryApproval:
         finally:
             await db.close()
 
-        timeout_approvals = [
-            a for a in approvals if a.approval_type == "session_timeout"
-        ]
+        timeout_approvals = [a for a in approvals if a.approval_type == "session_timeout"]
         assert len(timeout_approvals) == 1
         assert timeout_approvals[0].story_id == sid
 
@@ -287,9 +275,7 @@ class TestOrchestratorTQCacheConsistency:
     后续 fix_done 应成功（不被缓存中的 stale uat 状态拒绝）。
     """
 
-    async def test_uat_fail_via_db_marker_then_fix_done(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_uat_fail_via_db_marker_then_fix_done(self, initialized_db_path: Path) -> None:
         """模拟完整流程：TQ 缓存 story → CLI 标记 uat_fail → Orchestrator 检测 → fix_done 成功。"""
         from ato.core import _detect_failed_uat_tasks
 

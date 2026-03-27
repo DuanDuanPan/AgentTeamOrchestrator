@@ -18,7 +18,7 @@ from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from ato.models.db import get_connection, get_story
 from ato.models.schemas import StateTransitionError, TransitionEvent
-from ato.nudge import Nudge
+from ato.nudge import Nudge, send_user_notification
 from ato.state_machine import (
     StoryLifecycle,
     save_story_state,
@@ -204,13 +204,18 @@ class TransitionQueue:
 
                 sm = await self._get_or_create_machine(event.story_id, db)
                 await sm.send(event.event_name)
-                await save_story_state(db, event.story_id, sm.current_state_value)
+                new_state = sm.current_state_value
+                await save_story_state(db, event.story_id, new_state)
                 await db.commit()
+
+                # Post-commit hook: story 完成里程碑通知 + batch 完成检测
+                if new_state == "done":
+                    await self._on_story_done(db, event.story_id)
 
                 latency_ms = (time.monotonic() - t_start) * 1000
                 logger.info(
                     "transition_processing_end",
-                    new_state=sm.current_state_value,
+                    new_state=new_state,
                     latency_ms=round(latency_ms, 1),
                 )
             except Exception:
@@ -224,6 +229,22 @@ class TransitionQueue:
             finally:
                 self._queue.task_done()
                 clear_contextvars()
+
+    async def _on_story_done(self, db: aiosqlite.Connection, story_id: str) -> None:
+        """Story 完成后的 post-commit hook：里程碑通知 + batch 完成检测。"""
+        from ato.models.db import complete_batch, get_active_batch, get_batch_progress
+
+        send_user_notification("milestone", f"Story {story_id} 已完成！")
+
+        # 检查 active batch 是否全部交付
+        batch = await get_active_batch(db)
+        if batch is None:
+            return
+        progress = await get_batch_progress(db, batch.batch_id)
+        if progress.done == progress.total and progress.total > 0:
+            completed = await complete_batch(db, batch.batch_id)
+            if completed:
+                send_user_notification("milestone", "Batch 全部交付完成！")
 
     async def _get_or_create_machine(
         self,

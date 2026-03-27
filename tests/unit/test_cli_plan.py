@@ -118,19 +118,19 @@ class TestPlanStoryNotFound:
             result = runner.invoke(app, ["plan", "nonexistent", "--db-path", str(db_file)])
 
         assert result.exit_code == 1
-        assert "Story not found" in result.output
+        assert "Story 不存在" in result.output
         mock_db.close.assert_awaited_once()
 
 
 class TestPlanDbNotExist:
     """3.4 数据库不存在。"""
 
-    def test_exit_code_1_and_error_message(self, tmp_path: Path) -> None:
+    def test_exit_code_2_and_error_message(self, tmp_path: Path) -> None:
         db_path = tmp_path / "nonexistent.db"
 
         result = runner.invoke(app, ["plan", "story-001", "--db-path", str(db_path)])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "数据库不存在" in result.output
 
 

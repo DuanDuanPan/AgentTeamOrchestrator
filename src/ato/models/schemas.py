@@ -71,9 +71,25 @@ APPROVAL_RECOMMENDED_ACTIONS: dict[str, str] = {
     "batch_confirmation": "confirm",
     "precommit_failure": "retry",
     "rebase_conflict": "manual_resolve",
-    "needs_human_review": "review",
+    "needs_human_review": "retry",
 }
 """approval_type → 推荐操作映射。"""
+
+APPROVAL_DEFAULT_VALID_OPTIONS: dict[str, list[str]] = {
+    "merge_authorization": ["approve", "reject"],
+    "session_timeout": ["restart", "resume", "abandon"],
+    "crash_recovery": ["restart", "resume", "abandon"],
+    "blocking_abnormal": ["confirm_fix", "human_review"],
+    "budget_exceeded": ["increase_budget", "reject"],
+    "regression_failure": ["revert", "fix_forward", "pause"],
+    "timeout": ["continue_waiting", "abandon"],
+    "convergent_loop_escalation": ["retry", "skip", "escalate"],
+    "batch_confirmation": ["confirm", "reject"],
+    "precommit_failure": ["retry", "manual_fix", "skip"],
+    "rebase_conflict": ["manual_resolve", "skip", "abandon"],
+    "needs_human_review": ["retry", "skip", "escalate"],
+}
+"""无 payload.options 时各 approval_type 的默认合法选项。"""
 
 # ---------------------------------------------------------------------------
 # 错误分类枚举

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ato.models.db import (
@@ -68,9 +69,7 @@ class TestMergeQueueCRUD:
         finally:
             await db.close()
 
-    async def test_dequeue_order_uses_approved_at_then_id(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_dequeue_order_uses_approved_at_then_id(self, initialized_db_path: Path) -> None:
         await _insert_test_story(initialized_db_path, "s1")
         await _insert_test_story(initialized_db_path, "s2")
         await _insert_test_story(initialized_db_path, "s3")
@@ -95,9 +94,7 @@ class TestMergeQueueCRUD:
         finally:
             await db.close()
 
-    async def test_dequeue_returns_none_when_empty(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_dequeue_returns_none_when_empty(self, initialized_db_path: Path) -> None:
         db = await get_connection(initialized_db_path)
         try:
             entry = await dequeue_next_merge(db)
@@ -105,9 +102,7 @@ class TestMergeQueueCRUD:
         finally:
             await db.close()
 
-    async def test_mark_regression_dispatched(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_mark_regression_dispatched(self, initialized_db_path: Path) -> None:
         await _insert_test_story(initialized_db_path, "s1")
         db = await get_connection(initialized_db_path)
         try:
@@ -150,9 +145,7 @@ class TestMergeQueueCRUD:
         finally:
             await db.close()
 
-    async def test_merge_queue_state_singleton(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_merge_queue_state_singleton(self, initialized_db_path: Path) -> None:
         db = await get_connection(initialized_db_path)
         try:
             state = await get_merge_queue_state(db)
@@ -171,9 +164,7 @@ class TestMergeQueueCRUD:
         finally:
             await db.close()
 
-    async def test_set_current_merge_story(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_set_current_merge_story(self, initialized_db_path: Path) -> None:
         db = await get_connection(initialized_db_path)
         try:
             await set_current_merge_story(db, "s1")
@@ -200,9 +191,7 @@ class TestMergeQueueCRUD:
         finally:
             await db.close()
 
-    async def test_remove_from_merge_queue(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_remove_from_merge_queue(self, initialized_db_path: Path) -> None:
         await _insert_test_story(initialized_db_path, "s1")
         db = await get_connection(initialized_db_path)
         try:
@@ -223,16 +212,22 @@ class TestMergeQueueCRUD:
 class TestMergeQueueClass:
     """MergeQueue 核心逻辑测试。"""
 
-    def _make_queue(
-        self, db_path: Path
-    ) -> tuple[MagicMock, MagicMock, MagicMock]:
+    def _make_queue(self, db_path: Path) -> tuple[Any, Any, Any]:
         """创建 MergeQueue 及其 mock 依赖。"""
         from ato.merge_queue import MergeQueue
 
-        worktree_mgr = AsyncMock(spec=["rebase_onto_main", "merge_to_main",
-                                       "cleanup", "get_path", "continue_rebase",
-                                       "abort_rebase", "get_conflict_files",
-                                       "project_root"])
+        worktree_mgr = AsyncMock(
+            spec=[
+                "rebase_onto_main",
+                "merge_to_main",
+                "cleanup",
+                "get_path",
+                "continue_rebase",
+                "abort_rebase",
+                "get_conflict_files",
+                "project_root",
+            ]
+        )
         worktree_mgr.project_root = Path("/fake/repo")
 
         tq = AsyncMock()
@@ -264,9 +259,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_enqueue_keeps_frozen_queue_frozen(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_enqueue_keeps_frozen_queue_frozen(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
 
@@ -290,9 +283,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_process_next_frozen_returns_false(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_process_next_frozen_returns_false(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
 
         # Freeze the queue
@@ -342,9 +333,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_process_next_busy_returns_false(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_process_next_busy_returns_false(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
 
         # Set a current merge story
@@ -357,16 +346,12 @@ class TestMergeQueueClass:
         result = await queue.process_next()
         assert result is False
 
-    async def test_process_next_empty_returns_false(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_process_next_empty_returns_false(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
         result = await queue.process_next()
         assert result is False
 
-    async def test_process_next_dequeues_and_starts_worker(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_process_next_dequeues_and_starts_worker(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
 
@@ -389,9 +374,7 @@ class TestMergeQueueClass:
             finally:
                 await db.close()
 
-    async def test_regression_fail_freezes_queue(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_regression_fail_freezes_queue(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
 
@@ -416,9 +399,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_regression_fail_creates_urgent_approval(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_regression_fail_creates_urgent_approval(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
 
@@ -442,9 +423,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_unfreeze_restores_processing(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_unfreeze_restores_processing(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
 
         # Freeze first
@@ -464,9 +443,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_concurrent_enqueue_serialized(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_concurrent_enqueue_serialized(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
         await _insert_test_story(initialized_db_path, "s2")
@@ -490,9 +467,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_rebase_conflict_escalates_on_failure(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_rebase_conflict_escalates_on_failure(self, initialized_db_path: Path) -> None:
         queue, worktree_mgr, _ = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
 
@@ -515,9 +490,7 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_precommit_failure_creates_approval(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_precommit_failure_creates_approval(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
 
@@ -543,7 +516,7 @@ class TestMergeQueueClass:
 class TestStaleLockRecovery:
     """recover_stale_lock() 验证。"""
 
-    def _make_queue(self, db_path: Path) -> tuple:
+    def _make_queue(self, db_path: Path) -> Any:
         from ato.merge_queue import MergeQueue
 
         worktree_mgr = AsyncMock()
@@ -563,9 +536,7 @@ class TestStaleLockRecovery:
         )
         return queue
 
-    async def test_clears_stale_lock_no_entry(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_clears_stale_lock_no_entry(self, initialized_db_path: Path) -> None:
         """current_merge_story_id 指向不存在的 entry → 清空。"""
         queue = self._make_queue(initialized_db_path)
 
@@ -584,9 +555,7 @@ class TestStaleLockRecovery:
         finally:
             await db.close()
 
-    async def test_clears_stale_lock_completed_entry(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_clears_stale_lock_completed_entry(self, initialized_db_path: Path) -> None:
         """current_merge_story_id 指向已 merged 的 entry → 清空。"""
         queue = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
@@ -609,9 +578,7 @@ class TestStaleLockRecovery:
         finally:
             await db.close()
 
-    async def test_merging_entry_removed_and_lock_released(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_merging_entry_removed_and_lock_released(self, initialized_db_path: Path) -> None:
         """crash 后 entry 在 merging → 移除 entry + 释放锁，使 story 可重建 approval。"""
         queue = self._make_queue(initialized_db_path)
         await _insert_test_story(initialized_db_path, "s1")
@@ -725,9 +692,7 @@ class TestStaleLockRecovery:
         assert event.event_name == "regression_pass"
         queue._worktree_mgr.cleanup.assert_awaited_once_with("s1")
 
-    async def test_noop_when_no_lock(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_noop_when_no_lock(self, initialized_db_path: Path) -> None:
         """current_merge_story_id 为 None 时无操作。"""
         queue = self._make_queue(initialized_db_path)
         await queue.recover_stale_lock()
@@ -743,9 +708,7 @@ class TestStaleLockRecovery:
 class TestRegressionTestExecution:
     """_run_regression_test 正确性验证。"""
 
-    def _make_queue(
-        self, db_path: Path
-    ) -> tuple:
+    def _make_queue(self, db_path: Path) -> Any:
         from ato.merge_queue import MergeQueue
 
         worktree_mgr = AsyncMock()
@@ -805,6 +768,7 @@ class TestRegressionTestExecution:
 
         # Verify task was updated without TypeError
         from ato.models.db import get_tasks_by_story
+
         db = await get_connection(initialized_db_path)
         try:
             tasks = await get_tasks_by_story(db, "s1")
@@ -823,9 +787,7 @@ class TestRegressionTestExecution:
         from ato.models.schemas import TaskRecord
 
         queue, _, _ = self._make_queue(initialized_db_path)
-        queue._settings.regression_test_command = (
-            'pytest --cov="src dir" "tests/unit/test file.py"'
-        )
+        queue._settings.regression_test_command = 'pytest --cov="src dir" "tests/unit/test file.py"'
         await _insert_test_story(initialized_db_path, "s1")
 
         task_id = "test-regression-task-quoted"

@@ -21,5 +21,6 @@ repos:
           - structlog
           - textual>=2.0
           - typer
+          - textual>=2.0
           - types-PyYAML>=6.0
         exclude: ^(\.(agent|agents|claude)/|_bmad/)
