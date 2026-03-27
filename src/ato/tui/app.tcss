@@ -140,6 +140,27 @@ HeartbeatIndicator {
     color: $text;
 }
 
+/* ===== ApprovalCard (Story 6.3a) ===== */
+
+ApprovalCard {
+    height: 1;
+    padding: 0 1;
+}
+
+.approval-row {
+    height: 1;
+}
+
+.selected-approval {
+    background: $warning 15%;
+    color: $text;
+}
+
+.approval-submitted {
+    color: $muted;
+    text-style: italic;
+}
+
 /* ===== 空状态 (Story 6.2b) ===== */
 
 .empty-state {

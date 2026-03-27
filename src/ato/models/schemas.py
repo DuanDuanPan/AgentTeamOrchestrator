@@ -75,6 +75,22 @@ APPROVAL_RECOMMENDED_ACTIONS: dict[str, str] = {
 }
 """approval_type → 推荐操作映射。"""
 
+APPROVAL_TYPE_ICONS: dict[str, str] = {
+    "merge_authorization": "🔀",
+    "session_timeout": "⏱",
+    "crash_recovery": "↩",
+    "blocking_abnormal": "⚠",
+    "budget_exceeded": "💰",
+    "regression_failure": "✖",
+    "convergent_loop_escalation": "🔄",
+    "batch_confirmation": "📦",
+    "timeout": "⏳",
+    "precommit_failure": "🔧",
+    "rebase_conflict": "⚡",
+    "needs_human_review": "👁",
+}
+"""approval_type → 展示图标映射。CLI 与 TUI 共享，避免 TUI 模块耦合。"""
+
 # ---------------------------------------------------------------------------
 # 错误分类枚举
 # ---------------------------------------------------------------------------

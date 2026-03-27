@@ -18,6 +18,7 @@ from ato.models.db import (
     get_open_findings,
     get_pending_approvals,
     get_story,
+    get_story_findings_summary,
     get_tasks_by_story,
     init_db,
     insert_approval,
@@ -979,6 +980,62 @@ class TestFindingCrud:
             counts = await count_findings_by_severity(db, "s-ce", 1)
             assert counts["blocking"] == 0
             assert counts["suggestion"] == 0
+        finally:
+            await db.close()
+
+    async def test_get_story_findings_summary_collapses_cross_round_history(
+        self, initialized_db_path: Path
+    ) -> None:
+        """同一 dedup_hash 跨轮次历史仅按最新 round 统计一次。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fs"))
+            description = "shared issue"
+            dedup_hash = compute_dedup_hash("src/ato/core.py", "E001", "blocking", description)
+            records = [
+                _make_finding("f-s-1", "s-fs", status="open", round_num=1).model_copy(
+                    update={"description": description, "dedup_hash": dedup_hash}
+                ),
+                _make_finding("f-s-2", "s-fs", status="still_open", round_num=2).model_copy(
+                    update={"description": description, "dedup_hash": dedup_hash}
+                ),
+                _make_finding("f-s-3", "s-fs", status="closed", round_num=3).model_copy(
+                    update={"description": description, "dedup_hash": dedup_hash}
+                ),
+            ]
+            await insert_findings_batch(db, records)
+
+            summary = await get_story_findings_summary(db)
+            assert summary["s-fs"]["blocking_closed"] == 1
+            assert summary["s-fs"].get("blocking_open", 0) == 0
+        finally:
+            await db.close()
+
+    async def test_get_story_findings_summary_preserves_latest_round_duplicates(
+        self, initialized_db_path: Path
+    ) -> None:
+        """同一最新 round 内的重复 finding 仍保留数量。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fsd"))
+            description = "parallel issue"
+            dedup_hash = compute_dedup_hash("src/ato/core.py", "E001", "blocking", description)
+            records = [
+                _make_finding("f-d-1", "s-fsd", status="closed", round_num=1).model_copy(
+                    update={"description": description, "dedup_hash": dedup_hash}
+                ),
+                _make_finding("f-d-2", "s-fsd", status="open", round_num=3).model_copy(
+                    update={"description": description, "dedup_hash": dedup_hash}
+                ),
+                _make_finding("f-d-3", "s-fsd", status="open", round_num=3).model_copy(
+                    update={"description": description, "dedup_hash": dedup_hash}
+                ),
+            ]
+            await insert_findings_batch(db, records)
+
+            summary = await get_story_findings_summary(db)
+            assert summary["s-fsd"]["blocking_open"] == 2
+            assert summary["s-fsd"].get("blocking_closed", 0) == 0
         finally:
             await db.close()
 

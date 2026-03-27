@@ -21,7 +21,7 @@ from ato.tui.widgets.three_question_header import ThreeQuestionHeader
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 
-class ATOApp(App[None]):
+class ATOApp(App[None]):  # type: ignore[misc]
     """ATO TUI 主应用。
 
     作为独立前台进程运行，通过 SQLite 与后台 Orchestrator 通信。
@@ -66,6 +66,10 @@ class ATOApp(App[None]):
         self._story_costs: dict[str, float] = {}
         self._story_started_at: dict[str, str] = {}
         self._story_cl_rounds: dict[str, int] = {}
+        # Pending approval 完整记录（Story 6.3a）
+        self._pending_approval_records: list[object] = []
+        # Story 级 findings 摘要（Story 6.3a AC2）
+        self._story_findings_summary: dict[str, dict[str, int]] = {}
 
     def compose(self) -> ComposeResult:
         """骨架布局：Header + ThreeQuestionHeader + DashboardScreen + Footer。"""
@@ -222,6 +226,14 @@ class ATOApp(App[None]):
                 "SELECT story_id, MAX(round_num) as current_round FROM findings GROUP BY story_id"
             )
             self._story_cl_rounds = {str(row[0]): int(row[1]) for row in await cursor.fetchall()}
+
+            # 9. Pending approval 完整记录（Story 6.3a）
+            from ato.models.db import get_pending_approvals, get_story_findings_summary
+
+            self._pending_approval_records = await get_pending_approvals(db)  # type: ignore[assignment]
+
+            # 10. Story 级 findings 摘要（Story 6.3a AC2 — QA 结果）
+            self._story_findings_summary = await get_story_findings_summary(db)
         finally:
             await db.close()
 
@@ -245,6 +257,8 @@ class ATOApp(App[None]):
                 story_started_at=self._story_started_at,
                 story_cl_rounds=self._story_cl_rounds,
                 convergent_loop_max_rounds=self._convergent_loop_max_rounds,
+                pending_approval_records=self._pending_approval_records,
+                story_findings_summary=self._story_findings_summary,
             )
         except NoMatches:
             pass  # DashboardScreen 尚未挂载
@@ -335,6 +349,64 @@ class ATOApp(App[None]):
             await db.close()
 
         # Nudge best-effort — 每次重新读取 PID，应对 Orchestrator 重启
+        current_pid = self._resolve_orchestrator_pid()
+        if current_pid is not None:
+            try:
+                send_external_nudge(current_pid)
+            except ProcessLookupError:
+                logger.warning(
+                    "nudge_skipped_process_not_found",
+                    orchestrator_pid=current_pid,
+                )
+            except PermissionError:
+                logger.warning(
+                    "nudge_skipped_permission_error",
+                    orchestrator_pid=current_pid,
+                )
+        return True
+
+    async def submit_approval_decision(
+        self,
+        *,
+        approval_id: str,
+        status: str,
+        decision: str,
+        decision_reason: str | None = None,
+    ) -> bool:
+        """提交审批决策（分离 status/decision/decision_reason）。
+
+        使用 ``update_approval_decision()`` 写入正确的 status 和 decision，
+        与 CLI ``ato approve`` 语义对齐。
+
+        Returns:
+            True 写入成功，False 审批已被处理。
+        """
+        from ato.models.db import get_connection, update_approval_decision
+        from ato.nudge import send_external_nudge
+
+        db = await get_connection(self._db_path)
+        try:
+            now = datetime.now(tz=UTC)
+            try:
+                await update_approval_decision(
+                    db,
+                    approval_id,
+                    status=status,
+                    decision=decision,
+                    decision_reason=decision_reason,
+                    decided_at=now,
+                )
+            except ValueError:
+                logger.warning(
+                    "submit_approval_not_found",
+                    approval_id=approval_id,
+                )
+                return False
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Nudge best-effort
         current_pid = self._resolve_orchestrator_pid()
         if current_pid is not None:
             try:

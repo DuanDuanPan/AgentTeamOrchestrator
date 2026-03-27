@@ -611,11 +611,11 @@ async def update_approval_decision(
     """
     cursor = await db.execute(
         "UPDATE approvals SET status = ?, decision = ?, decision_reason = ?, decided_at = ? "
-        "WHERE approval_id = ?",
+        "WHERE approval_id = ? AND status = 'pending'",
         (status, decision, decision_reason, _dt_to_iso(decided_at), approval_id),
     )
     if cursor.rowcount == 0:
-        msg = f"Approval '{approval_id}' not found in database"
+        msg = f"Approval '{approval_id}' not found or already decided"
         raise ValueError(msg)
 
 
@@ -1057,6 +1057,60 @@ async def count_findings_by_severity(
         if severity in result:
             result[severity] = int(row[1])
     return result
+
+
+async def get_story_findings_summary(
+    db: aiosqlite.Connection,
+) -> dict[str, dict[str, int]]:
+    """按 story 聚合 Review Findings 摘要。
+
+    TUI 的审批详情需要展示“当前逻辑 issue 摘要”，而不是把同一
+    ``dedup_hash`` 在多轮中的历史记录直接累加。
+
+    聚合规则：
+    - 先按 ``story_id + severity + dedup_hash`` 找到该 hash 的最新 ``round_num``
+    - 仅统计该最新轮次上的记录，避免跨轮次重复累计
+    - ``still_open`` 视作 ``open`` 展示
+    - 同一轮内的重复记录保留其数量，不做额外压扁
+    """
+    cursor = await db.execute(
+        """
+        WITH latest_hash_rounds AS (
+            SELECT
+                story_id,
+                severity,
+                dedup_hash,
+                MAX(round_num) AS latest_round
+            FROM findings
+            GROUP BY story_id, severity, dedup_hash
+        )
+        SELECT
+            f.story_id,
+            f.severity,
+            f.status,
+            COUNT(*) AS cnt
+        FROM findings AS f
+        JOIN latest_hash_rounds AS lhr
+          ON f.story_id = lhr.story_id
+         AND f.severity = lhr.severity
+         AND f.dedup_hash = lhr.dedup_hash
+         AND f.round_num = lhr.latest_round
+        GROUP BY f.story_id, f.severity, f.status
+        """
+    )
+    rows = await cursor.fetchall()
+    summary: dict[str, dict[str, int]] = {}
+    for row in rows:
+        sid_key = str(row[0])
+        severity = str(row[1])
+        status = str(row[2])
+        count = int(row[3])
+        if sid_key not in summary:
+            summary[sid_key] = {}
+        bucket = "open" if status in {"open", "still_open"} else "closed"
+        key = f"{severity}_{bucket}"
+        summary[sid_key][key] = summary[sid_key].get(key, 0) + count
+    return summary
 
 
 def _row_to_finding(row: aiosqlite.Row) -> FindingRecord:

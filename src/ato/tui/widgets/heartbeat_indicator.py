@@ -22,7 +22,7 @@ from ato.tui.widgets.story_status_line import (
 _SPINNER_FRAMES = "\u25d0\u25d3\u25d1\u25d2"  # ◐◓◑◒
 
 
-class HeartbeatIndicator(Widget):
+class HeartbeatIndicator(Widget):  # type: ignore[misc]
     """活跃 Story 心跳指示器。
 
     显示动画 spinner + story ID + 阶段 + CL 轮次 + 进度条 + 成本 + 经过时间。
@@ -37,7 +37,7 @@ class HeartbeatIndicator(Widget):
     started_at: reactive[float] = reactive(0.0)
 
     def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+        super().__init__(**kwargs)
         self._spinner_index = 0
         self._elapsed_seconds = 0
 

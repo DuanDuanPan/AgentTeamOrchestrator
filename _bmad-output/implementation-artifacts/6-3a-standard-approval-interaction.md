@@ -1,6 +1,6 @@
 # Story 6.3a: 常规审批交互
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -81,70 +81,70 @@ so that 审批决策在 30 秒内完成。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: ApprovalCard Widget (AC: #1)
-  - [ ] 1.1 在 `src/ato/tui/widgets/approval_card.py` 创建 `ApprovalCard(Widget)` 类
-  - [ ] 1.2 定义 reactive 属性：`approval_id: reactive[str]`、`story_id: reactive[str]`、`approval_type: reactive[str]`、`summary: reactive[str]`、`recommended_action: reactive[str]`、`risk_level: reactive[str]`
-  - [ ] 1.3 实现 `render()` 方法——折叠态单行渲染：`{类型图标} {story_id}  {摘要}  [{推荐}] [{风险}]`
-  - [ ] 1.4 复用现有审批图标/摘要模板；如当前实现仍在 `cli.py` 私有函数中，先提取到共享 helper，再供 CLI/TUI 共用；提取时必须保留已存在的 `rebase_conflict` 等当前 approval type
-  - [ ] 1.5 风险指示颜色编码：`high` → `$error`、`medium` → `$warning`、`low` → `$success`、`None` → `$muted`
-  - [ ] 1.6 实现 `update_data()` 方法批量更新 reactive 属性
+- [x] Task 1: ApprovalCard Widget (AC: #1)
+  - [x] 1.1 在 `src/ato/tui/widgets/approval_card.py` 创建 `ApprovalCard(Widget)` 类
+  - [x] 1.2 定义 reactive 属性：`approval_id: reactive[str]`、`story_id: reactive[str]`、`approval_type: reactive[str]`、`summary: reactive[str]`、`recommended_action: reactive[str]`、`risk_level: reactive[str]`
+  - [x] 1.3 实现 `render()` 方法——折叠态单行渲染：`{类型图标} {story_id}  {摘要}  [{推荐}] [{风险}]`
+  - [x] 1.4 复用现有审批图标/摘要模板；如当前实现仍在 `cli.py` 私有函数中，先提取到共享 helper，再供 CLI/TUI 共用；提取时必须保留已存在的 `rebase_conflict` 等当前 approval type
+  - [x] 1.5 风险指示颜色编码：`high` → `$error`、`medium` → `$warning`、`low` → `$success`、`None` → `$muted`
+  - [x] 1.6 实现 `update_data()` 方法批量更新 reactive 属性
 
-- [ ] Task 2: ApprovalDetailPanel 展开态 (AC: #2)
-  - [ ] 2.1 在 `ApprovalCard` 或 `DashboardScreen` 中实现展开/折叠状态管理
-  - [ ] 2.2 展开态在右上面板（`#right-top-content`）渲染审批详情；右下面板保留动作提示/提交反馈
-  - [ ] 2.3 详情内容：审批类型说明、阶段转换上下文、成本/耗时信息、CL 轮次、payload 解析的结构化数据
-  - [ ] 2.4 使用 `Rich.Text` 渲染结构化详情，遵循现有 `_update_detail_panel()` 模式
-  - [ ] 2.5 `d` 键切换展开/折叠：展开时右上面板切到审批上下文，折叠时恢复原有联动内容
+- [x] Task 2: ApprovalDetailPanel 展开态 (AC: #2)
+  - [x] 2.1 在 `ApprovalCard` 或 `DashboardScreen` 中实现展开/折叠状态管理
+  - [x] 2.2 展开态在右上面板（`#right-top-content`）渲染审批详情；右下面板保留动作提示/提交反馈
+  - [x] 2.3 详情内容：审批类型说明、阶段转换上下文、成本/耗时信息、CL 轮次、payload 解析的结构化数据
+  - [x] 2.4 使用 `Rich.Text` 渲染结构化详情，遵循现有 `_update_detail_panel()` 模式
+  - [x] 2.5 `d` 键切换展开/折叠：展开时右上面板切到审批上下文，折叠时恢复原有联动内容
 
-- [ ] Task 3: 键位绑定与审批决策提交 (AC: #3, #5, #7)
-  - [ ] 3.1 在 `DashboardScreen` 中添加 `BINDINGS`：`("d", "toggle_detail", "展开/折叠")`、`("y", "approve", "批准")`、`("n", "reject", "拒绝")`
-  - [ ] 3.2 实现 `action_approve()` 方法：
+- [x] Task 3: 键位绑定与审批决策提交 (AC: #3, #5, #7)
+  - [x] 3.1 在 `DashboardScreen` 中添加 `BINDINGS`：`("d", "toggle_detail", "展开/折叠")`、`("y", "approve", "批准")`、`("n", "reject", "拒绝")`
+  - [x] 3.2 实现 `action_approve()` 方法：
     - 检查当前选中的是审批项（非普通 story）
     - 仅对本 Story 支持的二选一审批生效；`payload.options > 2` 或 Story 6.3b 范围的审批在此禁用
     - 通过共享 helper 按 `approval_type + payload.options` 解析 `y` 对应的具体 decision，不得直接把 `recommended_action` 当作唯一真值
     - 调用 `update_approval_decision()`，或先重构 `ATOApp.write_approval()` / 新增 `submit_approval_decision()` 以接收分离的 `status`、`decision`、`decision_reason`
     - `decision_reason` 至少记录 `tui` 来源、按键和值（如 `tui:y -> approve`）
     - 在右下面板显示 "$muted 已提交，等待处理"，直到下一轮轮询移除该项
-  - [ ] 3.3 实现 `action_reject()` 方法：
+  - [x] 3.3 实现 `action_reject()` 方法：
     - 与 `action_approve()` 使用同一套共享映射/写入封装，解析 `n` 对应的具体 decision（例如 `reject` / `human_review` / `abandon`）
     - 按 Story 4.1 规则写入正确的 `status` 与 `decision_reason`
     - 在右下面板显示 "$muted 已提交，等待处理"，直到下一轮轮询移除该项
-  - [ ] 3.4 实现 `action_toggle_detail()` 方法：切换选中审批项的展开/折叠态
-  - [ ] 3.5 `y`/`n` 仅在当前选中项为审批且属于本 Story 支持的二选一语义时生效；选中普通 story 或多选审批时无写入，仅显示 fallback 提示
-  - [ ] 3.6 即时反馈以右下面板行内状态为主，持续到 SQLite 状态更新；`notify()` 最多作为增强提示，不可替代主反馈路径
+  - [x] 3.4 实现 `action_toggle_detail()` 方法：切换选中审批项的展开/折叠态
+  - [x] 3.5 `y`/`n` 仅在当前选中项为审批且属于本 Story 支持的二选一语义时生效；选中普通 story 或多选审批时无写入，仅显示 fallback 提示
+  - [x] 3.6 即时反馈以右下面板行内状态为主，持续到 SQLite 状态更新；`notify()` 最多作为增强提示，不可替代主反馈路径
 
-- [ ] Task 4: ATOApp 数据扩展——审批数据加载 (AC: #6)
-  - [ ] 4.1 扩展 `ATOApp._load_data()`：查询 pending approvals 完整记录列表（复用 `get_pending_approvals()`）
-  - [ ] 4.2 在 `ATOApp` 存储 `_pending_approval_records: list[ApprovalRecord]` 快照
-  - [ ] 4.3 在 `_update_dashboard()` 中传递 `pending_approval_records` 到 `DashboardScreen.update_content()`
-  - [ ] 4.4 扩展 `DashboardScreen.update_content()` 接口：新增 `pending_approval_records` 可选参数
+- [x] Task 4: ATOApp 数据扩展——审批数据加载 (AC: #6)
+  - [x] 4.1 扩展 `ATOApp._load_data()`：查询 pending approvals 完整记录列表（复用 `get_pending_approvals()`）
+  - [x] 4.2 在 `ATOApp` 存储 `_pending_approval_records: list[ApprovalRecord]` 快照
+  - [x] 4.3 在 `_update_dashboard()` 中传递 `pending_approval_records` 到 `DashboardScreen.update_content()`
+  - [x] 4.4 扩展 `DashboardScreen.update_content()` 接口：新增 `pending_approval_records` 可选参数
 
-- [ ] Task 5: DashboardScreen 审批列表集成 (AC: #4, #5)
-  - [ ] 5.1 修改 `_update_story_list()` 方法：在 story 列表上方渲染 pending 审批的 `ApprovalCard`
-  - [ ] 5.2 审批项参与排序逻辑：始终排在所有 story 之前（审批优先原则）
-  - [ ] 5.3 审批项参与 ↑↓ 选择导航：`_selected_index` 统一管理审批+story 列表
-  - [ ] 5.4 选中审批项时：右上面板联动显示审批上下文详情，右下面板显示该审批的动作标签/快捷键/提交中间状态
-  - [ ] 5.5 替换右下面板 `"操作区域（占位）"` 为审批相关操作提示
-  - [ ] 5.6 Tab 模式 `[1]审批` Tab 同步渲染 ApprovalCard 列表（替换占位文字）；遇到多选审批时显示 CLI / 6.3b fallback 提示，而不是错误启用 `y`/`n`
+- [x] Task 5: DashboardScreen 审批列表集成 (AC: #4, #5)
+  - [x] 5.1 修改 `_update_story_list()` 方法：在 story 列表上方渲染 pending 审批的 `ApprovalCard`
+  - [x] 5.2 审批项参与排序逻辑：始终排在所有 story 之前（审批优先原则）
+  - [x] 5.3 审批项参与 ↑↓ 选择导航：`_selected_index` 统一管理审批+story 列表
+  - [x] 5.4 选中审批项时：右上面板联动显示审批上下文详情，右下面板显示该审批的动作标签/快捷键/提交中间状态
+  - [x] 5.5 替换右下面板 `"操作区域（占位）"` 为审批相关操作提示
+  - [x] 5.6 Tab 模式 `[1]审批` Tab 同步渲染 ApprovalCard 列表（替换占位文字）；遇到多选审批时显示 CLI / 6.3b fallback 提示，而不是错误启用 `y`/`n`
 
-- [ ] Task 6: TCSS 样式 (AC: #1, #4)
-  - [ ] 6.1 在 `app.tcss` 添加 `ApprovalCard` 样式：高度 1 行、`$warning` 背景暗色
-  - [ ] 6.2 选中审批项使用 `selected-story` 复用或新增 `selected-approval` 高亮样式
-  - [ ] 6.3 审批详情展开态样式
-  - [ ] 6.4 即时反馈样式采用 `$muted` 行内中间状态，与 UX 中“已提交，等待处理”保持一致；不要只做短暂 toast
+- [x] Task 6: TCSS 样式 (AC: #1, #4)
+  - [x] 6.1 在 `app.tcss` 添加 `ApprovalCard` 样式：高度 1 行、`$warning` 背景暗色
+  - [x] 6.2 选中审批项使用 `selected-story` 复用或新增 `selected-approval` 高亮样式
+  - [x] 6.3 审批详情展开态样式
+  - [x] 6.4 即时反馈样式采用 `$muted` 行内中间状态，与 UX 中“已提交，等待处理”保持一致；不要只做短暂 toast
 
-- [ ] Task 7: widgets 模块导出 (AC: #1)
-  - [ ] 7.1 在 `widgets/__init__.py` 导出 `ApprovalCard`
-  - [ ] 7.2 更新 `__all__` 列表
+- [x] Task 7: widgets 模块导出 (AC: #1)
+  - [x] 7.1 在 `widgets/__init__.py` 导出 `ApprovalCard`
+  - [x] 7.2 更新 `__all__` 列表
 
-- [ ] Task 8: 单元测试 (AC: #1, #3)
-  - [ ] 8.1 `tests/unit/test_approval_card.py`（新文件）：
+- [x] Task 8: 单元测试 (AC: #1, #3)
+  - [x] 8.1 `tests/unit/test_approval_card.py`（新文件）：
     - `test_approval_card_render_collapsed` — 折叠态单行渲染包含图标、story ID、摘要、推荐、风险
     - `test_approval_card_risk_level_colors` — high/medium/low/None 颜色映射正确
     - `test_approval_card_type_icons` — 各审批类型图标映射正确（含当前已存在的 `rebase_conflict`）
     - `test_approval_card_summary_generation` — 摘要模板拼接正确（各审批类型）
     - `test_approval_card_update_data` — 批量更新 reactive 属性正确反映
-  - [ ] 8.2 `tests/unit/test_dashboard.py`（扩展或新建）：
+  - [x] 8.2 `tests/unit/test_dashboard.py`（扩展或新建）：
     - `test_approval_items_sort_before_stories` — 审批项排在 story 之前
     - `test_y_key_maps_merge_authorization_to_approve` — `y` 键对 `merge_authorization` 写入 `decision="approve"`
     - `test_blocking_abnormal_y_n_mapping` — `blocking_abnormal` 的 `y/n` 分别映射到 `confirm_fix` / `human_review`
@@ -153,8 +153,8 @@ so that 审批决策在 30 秒内完成。
     - `test_d_key_toggles_detail` — `d` 键切换展开/折叠
     - `test_y_key_ignored_on_story_selection` — 选中 story 时 `y` 无效
 
-- [ ] Task 9: 集成测试 (AC: #1, #3, #4, #6, #7)
-  - [ ] 9.1 `tests/integration/test_tui_pilot.py`（扩展）：
+- [x] Task 9: 集成测试 (AC: #1, #3, #4, #6, #7)
+  - [x] 9.1 `tests/integration/test_tui_pilot.py`（扩展）：
     - `test_dashboard_renders_pending_approvals` — 有 pending 审批时 ApprovalCard 正确渲染
     - `test_dashboard_merge_authorization_y_writes_sqlite` — `y` 键对 merge 授权写入 `status="approved"`, `decision="approve"` 并触发 nudge
     - `test_dashboard_blocking_abnormal_n_writes_sqlite` — `n` 键对 blocking 异常写入 `decision="human_review"`
@@ -474,14 +474,43 @@ async def test_dashboard_merge_authorization_y_writes_sqlite(
 ### Change Log
 
 - 2026-03-27: create-story 创建 — 基于 Epic 6 / PRD FR19-20,FR37 / 架构 Decision 2 / UX 设计规范 / Story 4.1 Approval 基础 / Story 6.2b Dashboard 实现生成完整开发上下文
-- 2026-03-27: validate-create-story 修订 —— 把审批上下文固定到右上面板、动作/确认固定到右下面板；收紧 `y/n` 只适用于二选一审批并对齐 `blocking_abnormal` 等真实 decision 映射；补齐 `decision_reason` 持久化与行内“已提交，等待处理”中间状态；为多选审批增加 CLI / 6.3b fallback；去除易漂移的行号引用并补回现有 `rebase_conflict` 图标映射
+- 2026-03-27: validate-create-story 修订 —— 把审批上下文固定到右上面板、动作/确认固定到右下面板；收紧 `y/n` 只适用于二选一审批并对齐 `blocking_abnormal` 等真实 decision 映射；补齐 `decision_reason` 持久化与行内”已提交，等待处理”中间状态；为多选审批增加 CLI / 6.3b fallback；去除易漂移的行号引用并补回现有 `rebase_conflict` 图标映射
+- 2026-03-27: dev-story 实现完成 — 完整实现 9 个 Task，提取共享审批 helpers，创建 ApprovalCard Widget，集成到 DashboardScreen 统一选择管理，22 单元测试 + 7 集成测试全通过
 
 ## Dev Agent Record
 
 ### Agent Model Used
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
+N/A
 
 ### Completion Notes List
+- 从 `cli.py` 提取 `_APPROVAL_TYPE_ICONS` 到 `tui/theme.py` 作为共享常量 `APPROVAL_TYPE_ICONS`
+- 从 `cli.py` 提取 `_approval_summary()` 到 `approval_helpers.py` 作为 `format_approval_summary()`，CLI 委托调用
+- 新增二选一审批决策映射：`is_binary_approval()`, `resolve_binary_decision()`, `get_binary_approval_labels()`
+- 创建 `ApprovalCard` Widget：折叠态单行渲染（图标 + story ID + 摘要 + 推荐 + 风险）
+- `DashboardScreen` 重构为统一选择管理（`_sorted_item_ids` = 审批 + story），向后兼容 `_selected_story_id`
+- 新增 `y`/`n`/`d` 键位绑定：`action_approve`, `action_reject`, `action_toggle_detail`
+- `ATOApp` 新增 `submit_approval_decision()` 方法（分离 status/decision/decision_reason）
+- 右下面板：二选一审批显示动作标签 + 快捷键，已提交显示"已提交，等待处理"，多选审批显示 CLI/6.3b fallback
+- 解决 Textual async removal + mount DuplicateIds 问题：引入 rebuild generation counter
+- 22 个新增单元测试 + 7 个集成测试，全量 1251 个测试通过
+- Tab 模式 [1]审批 Tab 从占位 Static 改为 VerticalScroll + ApprovalCard 列表
 
 ### File List
+**新增文件：**
+- `src/ato/tui/widgets/approval_card.py` — ApprovalCard Widget
+- `tests/unit/test_approval_card.py` — ApprovalCard 单元测试（22 tests）
+- `tests/unit/test_dashboard_approval.py` — Dashboard 审批单元测试（7 tests）
+
+**修改文件：**
+- `src/ato/approval_helpers.py` — 新增 format_approval_summary, is_binary_approval, resolve_binary_decision, get_binary_approval_labels
+- `src/ato/cli.py` — _APPROVAL_TYPE_ICONS 委托到 theme.py, _approval_summary 委托到 approval_helpers
+- `src/ato/tui/app.py` — _load_data 加载 pending_approval_records, 新增 submit_approval_decision()
+- `src/ato/tui/dashboard.py` — 统一选择管理、审批列表集成、y/n/d 键位、右面板联动、Tab 审批 Tab
+- `src/ato/tui/theme.py` — 新增 APPROVAL_TYPE_ICONS, map_risk_to_color
+- `src/ato/tui/widgets/__init__.py` — 导出 ApprovalCard
+- `src/ato/tui/app.tcss` — 新增 ApprovalCard / selected-approval / approval-submitted 样式
+- `tests/integration/test_tui_pilot.py` — 新增 7 个审批交互集成测试
+- `tests/integration/test_tui_responsive.py` — 适配 tab-approvals-container 变更

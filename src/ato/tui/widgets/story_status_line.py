@@ -51,7 +51,7 @@ def _format_elapsed(seconds: int) -> str:
     return f"{hours}h {mins}m"
 
 
-class StoryStatusLine(Widget):
+class StoryStatusLine(Widget):  # type: ignore[misc]
     """Story 状态行：图标 + story ID + 阶段 + 进度条 + 耗时 + 成本。
 
     数据由 ATOApp 通过 ``update_data()`` 推送，不自行创建 SQLite 连接。

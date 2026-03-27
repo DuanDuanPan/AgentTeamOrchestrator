@@ -16,7 +16,7 @@ from ato.tui.theme import RICH_COLORS
 _SEP = " │ "
 
 
-class ThreeQuestionHeader(Widget):
+class ThreeQuestionHeader(Widget):  # type: ignore[misc]
     """三问顶栏：系统状态 │ 审批计数 │ 成本摘要 │ 更新时间。
 
     数据由 ATOApp 通过 ``update_data()`` 推送，不自行创建 SQLite 连接。

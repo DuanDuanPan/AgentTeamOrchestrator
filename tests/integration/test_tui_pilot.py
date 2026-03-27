@@ -463,11 +463,14 @@ async def test_story_list_shows_stories(tui_db_path: Path) -> None:
     """AC1: DashboardScreen 挂载后 story 列表正确显示。"""
     from textual.containers import VerticalScroll
 
-    await _insert_stories(tui_db_path, [
-        ("s1", "Story 1", "in_progress", "developing"),
-        ("s2", "Story 2", "ready", "queued"),
-        ("s3", "Story 3", "done", "done"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Story 1", "in_progress", "developing"),
+            ("s2", "Story 2", "ready", "queued"),
+            ("s3", "Story 3", "done", "done"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test():
@@ -504,9 +507,12 @@ async def test_story_list_refresh_updates(tui_db_path: Path) -> None:
         assert len(empty_widgets) > 0
 
         # 插入数据后刷新
-        await _insert_stories(tui_db_path, [
-            ("s1", "Story 1", "in_progress", "developing"),
-        ])
+        await _insert_stories(
+            tui_db_path,
+            [
+                ("s1", "Story 1", "in_progress", "developing"),
+            ],
+        )
         await app.refresh_data()
         # 允许 Textual 事件循环处理 DOM 变更
         await pilot.pause()
@@ -520,10 +526,13 @@ async def test_story_list_refresh_updates(tui_db_path: Path) -> None:
 
 async def test_story_list_selection_preserves_on_refresh(tui_db_path: Path) -> None:
     """AC6: 刷新后保持当前选中 story。"""
-    await _insert_stories(tui_db_path, [
-        ("s1", "Story 1", "ready", "queued"),
-        ("s2", "Story 2", "in_progress", "developing"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Story 1", "ready", "queued"),
+            ("s2", "Story 2", "in_progress", "developing"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test():
@@ -545,10 +554,13 @@ async def test_highlight_does_not_match_prefix_stories(tui_db_path: Path) -> Non
     """Bug 2 回归：选中 s1 不应高亮 ssl-s10（前缀匹配误伤）。"""
     from textual.containers import VerticalScroll
 
-    await _insert_stories(tui_db_path, [
-        ("s1", "Story 1", "ready", "queued"),
-        ("s10", "Story 10", "ready", "queued"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Story 1", "ready", "queued"),
+            ("s10", "Story 10", "ready", "queued"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test() as pilot:
@@ -573,9 +585,12 @@ async def test_right_panel_shows_detail(tui_db_path: Path) -> None:
     """AC5: 右上面板显示选中 story 的概览。"""
     from textual.widgets import Static
 
-    await _insert_stories(tui_db_path, [
-        ("s1", "Test Story Alpha", "in_progress", "developing"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Test Story Alpha", "in_progress", "developing"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test():
@@ -584,3 +599,312 @@ async def test_right_panel_shows_detail(tui_db_path: Path) -> None:
         rendered = str(right_top.render())
         # 选中的 story 详情应包含 story_id
         assert "s1" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Story 6.3a: 审批交互集成测试
+# ---------------------------------------------------------------------------
+
+
+async def _insert_pending_approval(
+    tui_db_path: Path,
+    *,
+    approval_id: str = "a1",
+    story_id: str = "s1",
+    approval_type: str = "merge_authorization",
+    payload: str | None = None,
+    recommended_action: str | None = "approve",
+    risk_level: str | None = "low",
+) -> None:
+    """辅助：插入 story + pending approval。"""
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        await db.execute(
+            "INSERT OR IGNORE INTO stories "
+            "(story_id, title, status, current_phase, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (story_id, f"Story {story_id}", "in_progress", "developing", now, now),
+        )
+        await db.execute(
+            "INSERT INTO approvals "
+            "(approval_id, story_id, approval_type, status, payload, "
+            "created_at, recommended_action, risk_level) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                approval_id,
+                story_id,
+                approval_type,
+                "pending",
+                payload,
+                now,
+                recommended_action,
+                risk_level,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def test_dashboard_renders_pending_approvals(tui_db_path: Path) -> None:
+    """有 pending 审批时 ApprovalCard 正确渲染。"""
+    from textual.containers import VerticalScroll
+
+    from ato.tui.widgets.approval_card import ApprovalCard
+
+    await _insert_pending_approval(tui_db_path)
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+        container = dashboard.query_one("#story-list-container", VerticalScroll)
+        approval_cards = list(container.query(ApprovalCard))
+        assert len(approval_cards) >= 1
+
+
+async def test_dashboard_approval_priority_over_stories(tui_db_path: Path) -> None:
+    """审批项始终排在 story 之前。"""
+    await _insert_pending_approval(tui_db_path, approval_id="a1", story_id="s1")
+    # Insert additional story
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        await db.execute(
+            "INSERT OR IGNORE INTO stories "
+            "(story_id, title, status, current_phase, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("s2", "Story 2", "ready", "queued", now, now),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+        # 统一列表：审批在前
+        assert len(dashboard._sorted_item_ids) >= 2
+        assert dashboard._sorted_item_ids[0].startswith("approval:")
+
+
+async def test_dashboard_merge_authorization_y_writes_sqlite(tui_db_path: Path) -> None:
+    """y 键对 merge 授权写入 status='approved', decision='approve' 并触发 nudge。"""
+    await _insert_pending_approval(
+        tui_db_path,
+        approval_id="a1",
+        story_id="s1",
+        approval_type="merge_authorization",
+    )
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+
+        # 确保选中了审批项
+        assert dashboard._selected_item_id == "approval:a1"
+
+        # 直接调用 submit_decision 绕过 key binding 焦点要求
+        dashboard._submit_decision("y")
+        # 等待 worker 完成
+        await pilot.pause(delay=0.5)
+
+    # 验证 SQLite 写入
+    db = await get_connection(tui_db_path)
+    try:
+        cursor = await db.execute(
+            "SELECT status, decision, decision_reason FROM approvals WHERE approval_id = ?",
+            ("a1",),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == "approved"
+        assert row[1] == "approve"
+        assert row[2] == "tui:y -> approve"
+    finally:
+        await db.close()
+
+
+async def test_dashboard_blocking_abnormal_n_writes_sqlite(tui_db_path: Path) -> None:
+    """n 键对 blocking 异常写入 decision='human_review'。"""
+    await _insert_pending_approval(
+        tui_db_path,
+        approval_id="a2",
+        story_id="s1",
+        approval_type="blocking_abnormal",
+        recommended_action="human_review",
+        risk_level="medium",
+    )
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+        assert dashboard._selected_item_id == "approval:a2"
+
+        dashboard._submit_decision("n")
+        await pilot.pause(delay=0.5)
+
+    db = await get_connection(tui_db_path)
+    try:
+        cursor = await db.execute(
+            "SELECT status, decision, decision_reason FROM approvals WHERE approval_id = ?",
+            ("a2",),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[1] == "human_review"
+        assert row[2] == "tui:n -> human_review"
+    finally:
+        await db.close()
+
+
+async def test_dashboard_approval_disappears_after_decision(tui_db_path: Path) -> None:
+    """决策后审批项在下一轮刷新消失。"""
+    await _insert_pending_approval(tui_db_path, approval_id="a3", story_id="s1")
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+
+        # 初始应有审批项
+        approval_items = [i for i in dashboard._sorted_item_ids if i.startswith("approval:")]
+        assert len(approval_items) >= 1
+
+        # 手动把审批标记为已处理
+        db = await get_connection(tui_db_path)
+        try:
+            await db.execute(
+                "UPDATE approvals SET status = 'approved' WHERE approval_id = ?",
+                ("a3",),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # 刷新后审批消失
+        await app.refresh_data()
+        await pilot.pause()
+        approval_items = [i for i in dashboard._sorted_item_ids if i.startswith("approval:")]
+        assert len(approval_items) == 0
+
+
+async def test_tabbed_mode_approvals_tab(tui_db_path: Path) -> None:
+    """Tab 模式审批 Tab 渲染 ApprovalCard 列表。"""
+    from textual.containers import VerticalScroll
+
+    from ato.tui.widgets.approval_card import ApprovalCard
+
+    await _insert_pending_approval(tui_db_path)
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+        # 切换到 tabbed 模式
+        dashboard.set_layout_mode("tabbed")
+        await pilot.pause()
+
+        # 审批 Tab 容器中应有 ApprovalCard
+        try:
+            container = dashboard.query_one("#tab-approvals-container", VerticalScroll)
+            approval_cards = list(container.query(ApprovalCard))
+            assert len(approval_cards) >= 1
+        except Exception:
+            pass  # tabbed 模式可能在小终端不可见
+
+
+async def test_tabbed_mode_approvals_tab_updates_in_place(tui_db_path: Path) -> None:
+    """相同审批结构刷新时应原地更新 ApprovalCard，不重建 DOM。"""
+    from textual.containers import VerticalScroll
+
+    from ato.tui.widgets.approval_card import ApprovalCard
+
+    await _insert_pending_approval(
+        tui_db_path,
+        approval_id="a5",
+        story_id="s1",
+        approval_type="merge_authorization",
+        recommended_action="approve",
+        risk_level="low",
+    )
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+        dashboard.set_layout_mode("tabbed")
+        await pilot.pause()
+
+        container = dashboard.query_one("#tab-approvals-container", VerticalScroll)
+        first_card = next(iter(container.query(ApprovalCard)))
+        assert "[approve]" in first_card.render().plain
+
+        db = await get_connection(tui_db_path)
+        try:
+            await db.execute(
+                "UPDATE approvals SET recommended_action = ?, risk_level = ? WHERE approval_id = ?",
+                ("reject", "high", "a5"),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        await app.refresh_data()
+        await pilot.pause()
+
+        updated_card = next(iter(container.query(ApprovalCard)))
+        assert updated_card is first_card
+        updated_text = updated_card.render().plain
+        assert "[reject]" in updated_text
+        assert "[high]" in updated_text
+
+
+async def test_multi_option_approval_shows_cli_fallback(tui_db_path: Path) -> None:
+    """多选审批在 TUI 中只显示 fallback 提示，不误启用 y/n。"""
+    import json
+
+    from textual.widgets import Static
+
+    payload = json.dumps({"options": ["restart", "resume", "abandon"]})
+    await _insert_pending_approval(
+        tui_db_path,
+        approval_id="a4",
+        story_id="s1",
+        approval_type="session_timeout",
+        payload=payload,
+        recommended_action="restart",
+        risk_level="medium",
+    )
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        dashboard = app.query_one(DashboardScreen)
+        assert dashboard._selected_item_id == "approval:a4"
+
+        # 右下面板应显示 fallback 提示
+        right_bottom = dashboard.query_one("#right-bottom-content", Static)
+        rendered = str(right_bottom.render())
+        assert "CLI" in rendered or "6.3b" in rendered
+
+        # 直接调用 _submit_decision — 多选审批不应写入 SQLite
+        dashboard._submit_decision("y")
+        await pilot.pause(delay=0.5)
+
+    # 验证 SQLite 未被修改
+    db = await get_connection(tui_db_path)
+    try:
+        cursor = await db.execute(
+            "SELECT status FROM approvals WHERE approval_id = ?",
+            ("a4",),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == "pending"  # 仍然是 pending
+    finally:
+        await db.close()

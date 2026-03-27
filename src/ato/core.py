@@ -971,11 +971,57 @@ class Orchestrator:
                 if entry is not None:
                     continue
 
+                # 收集审批上下文（AC2 — 阶段转换、成本、CL 轮次）
+                merge_payload: dict[str, object] = {
+                    "options": ["approve", "reject"],
+                    "to_phase": "merging",
+                }
+                # from_phase: 最近一个完成的 task 的 phase
+                prev_cursor = await db.execute(
+                    "SELECT phase FROM tasks "
+                    "WHERE story_id = ? AND status = 'completed' "
+                    "ORDER BY completed_at DESC LIMIT 1",
+                    (story_id,),
+                )
+                prev_row = await prev_cursor.fetchone()
+                if prev_row:
+                    merge_payload["from_phase"] = prev_row[0]
+                # 累计成本
+                cost_cursor = await db.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM cost_log WHERE story_id = ?",
+                    (story_id,),
+                )
+                cost_row = await cost_cursor.fetchone()
+                if cost_row and float(cost_row[0]) > 0:
+                    merge_payload["cost_usd"] = round(float(cost_row[0]), 2)
+                # CL 轮次
+                cl_cursor = await db.execute(
+                    "SELECT MAX(round_num) FROM findings WHERE story_id = ?",
+                    (story_id,),
+                )
+                cl_row = await cl_cursor.fetchone()
+                if cl_row and cl_row[0] is not None:
+                    merge_payload["cl_round"] = int(cl_row[0])
+                # 最早 task 开始时间 → 总耗时
+                elapsed_cursor = await db.execute(
+                    "SELECT MIN(started_at) FROM tasks "
+                    "WHERE story_id = ? AND started_at IS NOT NULL",
+                    (story_id,),
+                )
+                elapsed_row = await elapsed_cursor.fetchone()
+                if elapsed_row and elapsed_row[0]:
+                    start_dt = datetime.fromisoformat(str(elapsed_row[0]))
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=UTC)
+                    elapsed_s = int((datetime.now(tz=UTC) - start_dt).total_seconds())
+                    if elapsed_s > 0:
+                        merge_payload["elapsed_seconds"] = elapsed_s
+
                 await create_approval(
                     db,
                     story_id=story_id,
                     approval_type="merge_authorization",
-                    payload_dict={"options": ["approve", "reject"]},
+                    payload_dict=merge_payload,
                     nudge=self._nudge,
                 )
                 logger.info(
