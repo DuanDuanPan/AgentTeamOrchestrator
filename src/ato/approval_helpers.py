@@ -16,6 +16,7 @@ import structlog
 
 from ato.models.db import insert_approval
 from ato.models.schemas import (
+    APPROVAL_DEFAULT_VALID_OPTIONS,
     APPROVAL_RECOMMENDED_ACTIONS,
     APPROVAL_TYPE_TO_NOTIFICATION,
     ApprovalRecord,
@@ -112,8 +113,21 @@ async def create_approval(
                 orchestrator_pid=orchestrator_pid,
             )
 
-    # 用户可见 bell 通知
+    # 用户可见 bell 通知（自包含短 ID + 快捷命令）
     level = APPROVAL_TYPE_TO_NOTIFICATION.get(approval_type, "normal")
-    send_user_notification(level, f"新审批: {approval_type} (story: {story_id})")
+    short_id = approval_id[:8]
+    notification_msg = f"[{short_id}] {approval_type} (story: {story_id})"
+    if recommended_action:
+        # 优先用 payload 中的 options（创建时可自定义），fallback 到默认表
+        valid: list[str] = []
+        if payload_dict:
+            opts = payload_dict.get("options")
+            if isinstance(opts, list) and all(isinstance(o, str) for o in opts):
+                valid = opts
+        if not valid:
+            valid = APPROVAL_DEFAULT_VALID_OPTIONS.get(approval_type, [])
+        if recommended_action in valid:
+            notification_msg += f" → ato approve {short_id} --decision {recommended_action}"
+    send_user_notification(level, notification_msg)
 
     return approval

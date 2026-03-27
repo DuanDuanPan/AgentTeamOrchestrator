@@ -143,10 +143,7 @@ class MergeQueue:
         await complete_merge(db, story_id, success=True)
 
         state = await get_merge_queue_state(db)
-        if (
-            state.frozen
-            and get_regression_recovery_story_id(state.frozen_reason) == story_id
-        ):
+        if state.frozen and get_regression_recovery_story_id(state.frozen_reason) == story_id:
             await set_merge_queue_frozen(db, frozen=False, reason=None)
             logger.info(
                 "merge_queue_unfrozen",
@@ -594,7 +591,7 @@ class MergeQueue:
             cursor = await db.execute(
                 "SELECT * FROM merge_queue WHERE status = 'regression_pending' ORDER BY id ASC"
             )
-            rows = await cursor.fetchall()
+            rows = list(await cursor.fetchall())
             if len(rows) > 1:
                 logger.warning(
                     "merge_queue_multiple_regression_pending",

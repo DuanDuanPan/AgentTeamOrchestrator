@@ -1,6 +1,6 @@
 # Story 4.4: 通知体系与 CLI 交互质量
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -67,14 +67,14 @@ And 附带快捷命令提示（如 `ato approve <id> --decision <推荐>`）
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: NotificationService 增强 — 支持四级通知 (AC: #1, #2, #3)
-  - [ ] 1.1 在 `src/ato/nudge.py` 中增强 `send_user_notification()`：
+- [x] Task 1: NotificationService 增强 — 支持四级通知 (AC: #1, #2, #3)
+  - [x] 1.1 在 `src/ato/nudge.py` 中增强 `send_user_notification()`：
     - `urgent`: 连续发出两次 terminal bell（`\a\a`），并向 stderr 输出带"⚠ 紧急"前缀的单行通知
     - `normal`: 单次 terminal bell（`\a`），并向 stderr 输出单行通知
     - `milestone`: 单次 terminal bell（`\a`），并向 stderr 输出带"🎉"前缀的单行通知
     - `silent`: 无 bell、无 stderr 输出，仅保留结构化日志
     - 所有级别均通过 structlog 记录 `notification_sent` 事件
-  - [ ] 1.2 新增 `format_notification_message(level: str, message: str) -> str` 辅助函数：
+  - [x] 1.2 新增 `format_notification_message(level: str, message: str) -> str` 辅助函数：
     - 根据 level 添加前缀：urgent → "⚠ 紧急: "，milestone → "🎉 "
     - normal / silent 不加前缀
     - 返回格式化后的单行消息字符串（供 stderr、日志和未来 macOS 通知复用）

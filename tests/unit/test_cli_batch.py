@@ -86,7 +86,7 @@ class TestBatchStatusDbMissing:
         """数据库不存在时输出错误。"""
         bad_db = tmp_path / "nonexistent" / "state.db"
         result = runner.invoke(app, ["batch", "status", "--db-path", str(bad_db)])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "数据库不存在" in result.output
 
 
@@ -103,7 +103,7 @@ class TestBatchSelectDbMissing:
             app,
             ["batch", "select", "--db-path", str(bad_db), "--epics-file", str(epics)],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "数据库不存在" in result.output
 
 
@@ -120,7 +120,7 @@ class TestBatchSelectEpicsMissing:
             app,
             ["batch", "select", "--db-path", str(db_path), "--epics-file", str(bad_epics)],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "Epics 文件不存在" in result.output
 
 

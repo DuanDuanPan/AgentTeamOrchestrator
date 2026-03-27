@@ -19,12 +19,39 @@ from rich.text import Text
 
 from ato.config import PhaseDefinition, build_phase_definitions, load_config
 from ato.models.db import get_connection, get_story
+from ato.models.schemas import (
+    APPROVAL_DEFAULT_VALID_OPTIONS as _DEFAULT_VALID_OPTIONS,
+)
 from ato.models.schemas import CheckResult, ContextBriefing, StoryRecord
 from ato.preflight import run_preflight
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 app = typer.Typer(name="ato", help="Agent Team Orchestrator")
+
+# ---------------------------------------------------------------------------
+# 退出码常量
+# ---------------------------------------------------------------------------
+
+EXIT_SUCCESS = 0
+EXIT_ERROR = 1
+EXIT_ENV_ERROR = 2
+
+# ---------------------------------------------------------------------------
+# 统一错误格式
+# ---------------------------------------------------------------------------
+
+
+def _format_cli_error(what: str, options: str | list[str]) -> str:
+    """生成统一 CLI 错误消息。
+
+    格式：
+      发生了什么：<描述>
+      你的选项：<恢复操作>
+    """
+    opts = " / ".join(options) if isinstance(options, list) else options
+    return f"发生了什么：{what}\n你的选项：{opts}"
+
 
 # ---------------------------------------------------------------------------
 # batch 子命令组
@@ -178,8 +205,8 @@ def init_command(
     except click.exceptions.Abort:
         raise
     except Exception as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 async def _init_async(project_path: Path, db_path: Path) -> None:
@@ -190,8 +217,11 @@ async def _init_async(project_path: Path, db_path: Path) -> None:
 
     has_halt = any(r.status == "HALT" for r in results)
     if has_halt:
-        typer.echo("环境检查未通过，请根据上方提示修复后重新运行 `ato init`", err=True)
-        raise typer.Exit(code=2)
+        typer.echo(
+            _format_cli_error("环境检查未通过", "根据上方提示修复后重新运行 `ato init`"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     typer.prompt(
         "按 Enter 继续初始化，或 Ctrl-C 取消",
@@ -227,23 +257,29 @@ def batch_select(
     # 检查 DB
     if not resolved_db.exists():
         typer.echo(
-            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     # 检查 epics
     if not resolved_epics.exists():
-        typer.echo(f"错误：Epics 文件不存在: {resolved_epics}", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error(
+                f"Epics 文件不存在: {resolved_epics}",
+                "确认 epics 文件路径或使用 --epics-file 指定",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     try:
         asyncio.run(_batch_select_async(resolved_db, resolved_epics, max_stories, story_ids))
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"错误：{exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 async def _batch_select_async(
@@ -274,17 +310,22 @@ async def _batch_select_async(
         existing = await get_active_batch(db)
         if existing is not None:
             typer.echo(
-                f"已存在 active batch ({existing.batch_id[:8]}...)。"
-                "请先完成或取消当前 batch 后再创建新 batch。",
+                _format_cli_error(
+                    f"已存在 active batch ({existing.batch_id[:8]}...)",
+                    "先完成或取消当前 batch 后再创建新 batch",
+                ),
                 err=True,
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_ERROR)
 
         # 解析 epics（使用 canonical key map）
         epics_info = load_epics(epics_path, canonical_key_map=key_map)
         if not epics_info:
-            typer.echo("错误：未从 epics 文件中解析出任何 story。", err=True)
-            raise typer.Exit(code=1)
+            typer.echo(
+                _format_cli_error("未从 epics 文件中解析出任何 story", "检查 epics 文件格式"),
+                err=True,
+            )
+            raise typer.Exit(code=EXIT_ERROR)
 
         # 获取已有 story 状态
         existing_stories: dict[str, StoryRecord] = {}
@@ -314,10 +355,13 @@ async def _batch_select_async(
                     selected_infos.append(found)
             if unmatched:
                 typer.echo(
-                    f"错误：以下 story keys 不在 epics 中: {unmatched}",
+                    _format_cli_error(
+                        f"以下 story keys 不在 epics 中: {unmatched}",
+                        "检查 story key 拼写或运行 `ato batch select` 查看可用 stories",
+                    ),
                     err=True,
                 )
-                raise typer.Exit(code=1)
+                raise typer.Exit(code=EXIT_ERROR)
             proposal = BatchProposal(stories=selected_infos, reason="用户直接指定")
         else:
             # 推荐模式
@@ -349,18 +393,24 @@ async def _batch_select_async(
                 try:
                     raw_indices = [int(s.strip()) - 1 for s in selection.split(",")]
                 except ValueError:
-                    typer.echo("错误：无效输入，请输入编号", err=True)
-                    raise typer.Exit(code=1) from None
+                    typer.echo(
+                        _format_cli_error("无效输入", "输入数字编号（如 1,3,5）"),
+                        err=True,
+                    )
+                    raise typer.Exit(code=EXIT_ERROR) from None
                 # 去重（保留首次出现顺序）+ 范围校验
                 seen: set[int] = set()
                 selected_indices = []
                 for idx in raw_indices:
                     if idx < 0 or idx >= len(proposal.stories):
                         typer.echo(
-                            f"错误：编号 {idx + 1} 超出范围 (1-{len(proposal.stories)})",
+                            _format_cli_error(
+                                f"编号 {idx + 1} 超出范围 (1-{len(proposal.stories)})",
+                                "输入有效编号",
+                            ),
                             err=True,
                         )
-                        raise typer.Exit(code=1)
+                        raise typer.Exit(code=EXIT_ERROR)
                     if idx not in seen:
                         seen.add(idx)
                         selected_indices.append(idx)
@@ -389,18 +439,18 @@ def batch_status(
     # 检查 DB
     if not resolved_db.exists():
         typer.echo(
-            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     try:
         asyncio.run(_batch_status_async(resolved_db, output_json))
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"错误：{exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 _EMPTY_MSG = "尚无 story。运行 `ato batch select` 选择第一个 batch"
@@ -502,8 +552,11 @@ def start_cmd(
 
     # 重复启动防护
     if is_orchestrator_running(pid_path):
-        typer.echo("错误：Orchestrator 已在运行中。", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error("Orchestrator 已在运行中", "运行 `ato stop` 停止后重试"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 初始化日志
     from ato.logging import configure_logging
@@ -518,12 +571,21 @@ def start_cmd(
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"错误：Preflight 检查失败: {exc}", err=True)
-        raise typer.Exit(code=2) from exc
+        typer.echo(
+            _format_cli_error(f"Preflight 检查失败: {exc}", "运行 `ato init` 检查环境"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR) from exc
 
     if any(r.status == "HALT" for r in preflight_results):
-        typer.echo("错误：Preflight 检查存在 HALT 项，无法启动。", err=True)
-        raise typer.Exit(code=2)
+        typer.echo(
+            _format_cli_error(
+                "Preflight 检查存在 HALT 项，无法启动",
+                "运行 `ato init` 查看详细检查结果并修复",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     # 加载配置
     from ato.config import load_config
@@ -532,8 +594,11 @@ def start_cmd(
     try:
         settings = load_config(resolved_config)
     except Exception as exc:
-        typer.echo(f"错误：配置加载失败: {exc}", err=True)
-        raise typer.Exit(code=2) from exc
+        typer.echo(
+            _format_cli_error(f"配置加载失败: {exc}", "检查 ato.yaml 配置文件"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR) from exc
 
     # 启动 Orchestrator
     from ato.core import Orchestrator
@@ -580,8 +645,11 @@ def stop_cmd(
         remove_pid_file(pid_path)
         return
     except PermissionError as exc:
-        typer.echo("错误：无权向 Orchestrator 进程发送信号。", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(
+            _format_cli_error("无权向 Orchestrator 进程发送信号", "使用 sudo 或以正确用户运行"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
     # 轮询等待进程退出
     deadline = time.monotonic() + _STOP_TIMEOUT
@@ -607,15 +675,21 @@ def stop_cmd(
         typer.echo("Orchestrator 已停止。")
         return
     except PermissionError as exc:
-        typer.echo("错误：无权强制终止 Orchestrator 进程。", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(
+            _format_cli_error("无权强制终止 Orchestrator 进程", "使用 sudo 或以正确用户运行"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
     # 等待 SIGKILL 生效
     time.sleep(1.0)
     try:
         os.kill(pid, 0)
-        typer.echo("错误：Orchestrator 进程仍未退出。", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error("Orchestrator 进程仍未退出", "手动检查进程状态 (kill -9)"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
     except ProcessLookupError:
         typer.echo("Orchestrator 已强制停止。")
         remove_pid_file(pid_path)
@@ -751,10 +825,10 @@ def plan_command(
 
     if not resolved_db.exists():
         typer.echo(
-            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     try:
         asyncio.run(_plan_async(story_id, resolved_db, config_path))
@@ -763,8 +837,8 @@ def plan_command(
     except click.exceptions.Abort:
         raise
     except Exception as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 async def _plan_async(
@@ -780,8 +854,14 @@ async def _plan_async(
         await db.close()
 
     if story is None:
-        typer.echo(f"Story not found: {story_id}", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error(
+                f"Story 不存在: {story_id}",
+                "运行 `ato batch status` 查看可用 stories",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 配置加载（可选降级）
     phase_definitions: list[PhaseDefinition] = []
@@ -841,8 +921,11 @@ def tui_cmd(
     resolved_db = db_path or _DEFAULT_DB_PATH
 
     if not resolved_db.exists():
-        typer.echo("数据库未找到，请先运行 ato init", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error("数据库未找到", "运行 `ato init` 初始化项目"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     # 检测 Orchestrator 运行状态（复用 core.py 的 PID 读取约定）
     from ato.core import read_pid_file
@@ -872,8 +955,11 @@ def tui_cmd(
             settings = load_config(config_path)
             cl_max_rounds = settings.convergent_loop.max_rounds
         except Exception as exc:
-            typer.echo(f"错误：配置加载失败: {exc}", err=True)
-            raise typer.Exit(code=2) from exc
+            typer.echo(
+                _format_cli_error(f"配置加载失败: {exc}", "检查 ato.yaml 配置文件"),
+                err=True,
+            )
+            raise typer.Exit(code=EXIT_ENV_ERROR) from exc
     else:
         # 自动发现：失败可降级
         resolved_config = _resolve_tui_config(None, resolved_db)
@@ -974,18 +1060,18 @@ def submit_cmd(
     resolved_db = db_path or _DEFAULT_DB_PATH
     if not resolved_db.exists():
         typer.echo(
-            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     try:
         asyncio.run(_submit_async(story_id, resolved_db, briefing_file, config_path))
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"错误：{exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 async def _submit_async(
@@ -1013,8 +1099,14 @@ async def _submit_async(
         await db.close()
 
     if story is None:
-        typer.echo(f"Story not found: {story_id}", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error(
+                f"Story 不存在: {story_id}",
+                "运行 `ato batch status` 查看可用 stories",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 2. 加载配置，确定 interactive phases
     resolved_config = config_path or Path("ato.yaml")
@@ -1022,8 +1114,11 @@ async def _submit_async(
         # 尝试 ato.yaml.example
         resolved_config = Path("ato.yaml.example")
     if not resolved_config.exists():
-        typer.echo("错误：找不到 ato.yaml 配置文件。", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error("找不到 ato.yaml 配置文件", "创建 ato.yaml 或使用 --config 指定路径"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     settings = load_config(resolved_config)
     interactive_phases = {
@@ -1035,40 +1130,54 @@ async def _submit_async(
     # 3. 验证 story 在 interactive phase
     if story.current_phase not in interactive_phases:
         typer.echo(
-            f"Story '{story_id}' 不在 interactive session 阶段 "
-            f"（当前: {story.current_phase}，允许: {interactive_phases}）",
+            _format_cli_error(
+                f"Story '{story_id}' 不在 interactive session 阶段（当前: {story.current_phase}）",
+                f"等待 story 进入 interactive 阶段后再提交（允许: {interactive_phases}）",
+            ),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 4. 读取 sidecar 元数据
     sidecar_path = ato_dir / "sessions" / f"{story_id}.json"
     if not sidecar_path.exists():
         typer.echo(
-            f"错误：Session 元数据不存在: {sidecar_path}",
+            _format_cli_error(
+                f"Session 元数据不存在: {sidecar_path}",
+                "确认 interactive session 已启动",
+            ),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ERROR)
 
     sidecar_data = json.loads(sidecar_path.read_text())
     base_commit = sidecar_data.get("base_commit")
     if not base_commit:
-        typer.echo("错误：Session 元数据缺少 base_commit。", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error("Session 元数据缺少 base_commit", "检查 session 元数据文件"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 5. 验证有新 commit
     worktree_path = story.worktree_path
     if not worktree_path:
-        typer.echo("错误：Story 没有关联的 worktree 路径。", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error("Story 没有关联的 worktree 路径", "确认 story 已分配 worktree"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
 
     has_commits = await _check_new_commits(worktree_path, base_commit, db_path)
     if not has_commits:
         typer.echo(
-            f"No commits found in worktree since {base_commit[:8]}",
+            _format_cli_error(
+                f"Worktree 中无新 commit (since {base_commit[:8]})",
+                "在 worktree 中完成工作并 commit 后重试",
+            ),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 6. 构造 ContextBriefing
     now = datetime.now(tz=UTC)
@@ -1081,25 +1190,33 @@ async def _submit_async(
         # 校验 briefing 属于当前 story 和 phase
         if briefing.story_id != story_id:
             typer.echo(
-                f"错误：briefing 的 story_id ({briefing.story_id}) "
-                f"与当前 story ({story_id}) 不匹配。",
+                _format_cli_error(
+                    f"briefing 的 story_id ({briefing.story_id}) 与当前 story ({story_id}) 不匹配",
+                    "检查 --briefing-file 内容",
+                ),
                 err=True,
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_ERROR)
         if briefing.phase != story.current_phase:
             typer.echo(
-                f"错误：briefing 的 phase ({briefing.phase}) "
-                f"与当前 phase ({story.current_phase}) 不匹配。",
+                _format_cli_error(
+                    f"briefing phase ({briefing.phase})"
+                    f" 与当前 phase ({story.current_phase}) 不匹配",
+                    "检查 --briefing-file 内容",
+                ),
                 err=True,
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_ERROR)
         if briefing.task_type != story.current_phase:
             typer.echo(
-                f"错误：briefing 的 task_type ({briefing.task_type}) "
-                f"与当前 phase ({story.current_phase}) 不匹配。",
+                _format_cli_error(
+                    f"briefing task_type ({briefing.task_type})"
+                    f" 与当前 phase ({story.current_phase}) 不匹配",
+                    "检查 --briefing-file 内容",
+                ),
                 err=True,
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_ERROR)
     else:
         # 交互式输入——最小默认值
         agent_notes = typer.prompt("输入工作备注（可选，直接回车跳过）", default="")
@@ -1142,16 +1259,24 @@ async def _submit_async(
             elif len(candidates) > 1:
                 pids = [str(t.pid) for t in candidates]
                 typer.echo(
-                    f"错误：存在 {len(candidates)} 个 running interactive task "
-                    f"(PIDs: {', '.join(pids)})，但 sidecar PID ({sidecar_pid}) "
-                    f"未匹配到任何一个。请检查 session 元数据。",
+                    _format_cli_error(
+                        f"存在 {len(candidates)} 个 running interactive task "
+                        f"(PIDs: {', '.join(pids)})，但 sidecar PID ({sidecar_pid}) 未匹配",
+                        "检查 session 元数据",
+                    ),
                     err=True,
                 )
-                raise typer.Exit(code=1)
+                raise typer.Exit(code=EXIT_ERROR)
 
         if running_task is None:
-            typer.echo("错误：未找到运行中的 interactive task。", err=True)
-            raise typer.Exit(code=1)
+            typer.echo(
+                _format_cli_error(
+                    "未找到运行中的 interactive task",
+                    "确认 interactive session 已启动",
+                ),
+                err=True,
+            )
+            raise typer.Exit(code=EXIT_ERROR)
 
         await update_task_status(
             db,
@@ -1237,18 +1362,18 @@ def approvals_cmd(
     resolved_db = db_path or _DEFAULT_DB_PATH
     if not resolved_db.exists():
         typer.echo(
-            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     try:
         asyncio.run(_approvals_async(resolved_db, output_json))
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"错误：{exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 async def _approvals_async(db_path: Path, output_json: bool) -> None:
@@ -1310,28 +1435,180 @@ async def _approvals_async(db_path: Path, output_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ato approval-detail — 审批详情查看（三要素展示）
+# ---------------------------------------------------------------------------
+
+# 异常 approval 类型集合（使用 Rich Panel 三要素展示）
+_EXCEPTION_APPROVAL_TYPES = {
+    "regression_failure",
+    "blocking_abnormal",
+    "budget_exceeded",
+    "timeout",
+    "precommit_failure",
+    "rebase_conflict",
+}
+
+
+def _extract_impact(approval_type: str, payload_dict: dict[str, object]) -> str:
+    """从 approval_type + payload 提取影响范围描述。"""
+    if approval_type == "regression_failure":
+        blocked = payload_dict.get("blocked_stories", [])
+        count = (
+            len(blocked) if isinstance(blocked, list) else payload_dict.get("blocked_count", "?")
+        )
+        return f"后续 {count} 个 merge 被阻塞"
+    if approval_type == "blocking_abnormal":
+        count = payload_dict.get("blocking_count", "?")
+        threshold = payload_dict.get("threshold", "?")
+        return f"blocking 数 {count} 超阈值 {threshold}"
+    if approval_type == "budget_exceeded":
+        spent = payload_dict.get("spent_usd", "?")
+        budget = payload_dict.get("budget_usd", "?")
+        return f"已消费 ${spent}，预算 ${budget}"
+    if approval_type == "timeout":
+        elapsed = payload_dict.get("elapsed_seconds", "?")
+        return f"任务运行 {elapsed}s 未完成"
+    if approval_type == "precommit_failure":
+        return "代码质量检查未通过，需修复后重试"
+    if approval_type == "rebase_conflict":
+        return "分支冲突需人工解决"
+    return "请查看 payload 详情"
+
+
+def _render_exception_approval(approval: object) -> None:
+    """Rich 格式化异常审批三要素展示。"""
+    from rich.panel import Panel
+
+    payload_str = getattr(approval, "payload", None)
+    approval_type = getattr(approval, "approval_type", "")
+    risk_level = getattr(approval, "risk_level", None)
+    recommended = getattr(approval, "recommended_action", None)
+    approval_id = getattr(approval, "approval_id", "")
+
+    payload_dict: dict[str, object] = {}
+    if payload_str:
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            payload_dict = json.loads(payload_str)
+
+    options = payload_dict.get("options")
+    if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
+        options = _DEFAULT_VALID_OPTIONS.get(approval_type, [])
+
+    if not recommended:
+        from ato.models.schemas import APPROVAL_RECOMMENDED_ACTIONS
+
+        recommended = APPROVAL_RECOMMENDED_ACTIONS.get(approval_type, "")
+
+    # 构建内容
+    content = Text()
+    content.append("发生了什么\n", style="bold")
+    content.append(f"  {_approval_summary(approval_type, payload_str)}\n\n")
+
+    content.append("影响范围\n", style="bold")
+    content.append(f"  {_extract_impact(approval_type, payload_dict)}\n\n")
+
+    content.append("你的选项\n", style="bold")
+    for i, opt in enumerate(options, 1):
+        marker = "★ " if opt == recommended else "  "
+        content.append(f"  {marker}[{i}] {opt}\n")
+
+    # Panel 边框颜色
+    border = "red" if risk_level == "high" else "yellow" if risk_level == "medium" else "default"
+    icon = _APPROVAL_TYPE_ICONS.get(approval_type, "?")
+
+    panel = Panel(content, title=f"{icon} {approval_type}", border_style=border)
+    _console.print(panel)
+
+    # 快捷命令提示
+    if recommended and recommended in options:
+        short_id = approval_id[:8]
+        _console.print(
+            Text(f"  💡 ato approve {short_id} --decision {recommended}", style="dim"),
+        )
+
+
+def _render_simple_approval(approval: object) -> None:
+    """非异常类型审批的简化展示。"""
+    approval_type = getattr(approval, "approval_type", "")
+    approval_id = getattr(approval, "approval_id", "")
+    story_id = getattr(approval, "story_id", "")
+    status = getattr(approval, "status", "")
+    recommended = getattr(approval, "recommended_action", "")
+    risk_level = getattr(approval, "risk_level", "")
+    payload_str = getattr(approval, "payload", None)
+    created_at = getattr(approval, "created_at", "")
+
+    icon = _APPROVAL_TYPE_ICONS.get(approval_type, "?")
+    summary = _approval_summary(approval_type, payload_str)
+
+    _console.print(f"{icon} [{approval_id[:8]}] {approval_type}")
+    _console.print(f"  Story: {story_id}")
+    _console.print(f"  摘要: {summary}")
+    _console.print(f"  状态: {status} | 风险: {risk_level or '-'} | 推荐: {recommended or '-'}")
+    _console.print(f"  创建: {created_at}")
+
+    if recommended:
+        options = _extract_valid_options(approval)
+        if recommended in options:
+            _console.print(
+                Text(f"  💡 ato approve {approval_id[:8]} --decision {recommended}", style="dim"),
+            )
+
+
+@app.command("approval-detail")
+def approval_detail_cmd(
+    approval_id: str = typer.Argument(..., help="Approval ID（前缀 ≥4 字符）"),
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+) -> None:
+    """查看审批详情（三要素展示）。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
+
+    try:
+        asyncio.run(_approval_detail_async(resolved_db, approval_id))
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
+
+
+async def _approval_detail_async(db_path: Path, approval_id_prefix: str) -> None:
+    """approval-detail 命令的异步实现。"""
+    from ato.models.db import get_approval_by_id, get_connection
+
+    db = await get_connection(db_path)
+    try:
+        try:
+            approval = await get_approval_by_id(db, approval_id_prefix)
+        except ValueError as exc:
+            typer.echo(
+                _format_cli_error(str(exc), "运行 `ato approvals` 查看待处理审批"),
+                err=True,
+            )
+            raise typer.Exit(code=EXIT_ERROR) from exc
+    finally:
+        await db.close()
+
+    # 异常类型使用 Rich 三要素展示，其他类型简化展示
+    if approval.approval_type in _EXCEPTION_APPROVAL_TYPES:
+        _render_exception_approval(approval)
+    else:
+        _render_simple_approval(approval)
+
+
+# ---------------------------------------------------------------------------
 # ato approve — 审批决策提交
 # ---------------------------------------------------------------------------
 
 
 # 二元审批关键字
 _BINARY_DECISIONS = {"approve", "reject"}
-
-# 无 payload.options 时的默认合法选项（按 approval_type）
-_DEFAULT_VALID_OPTIONS: dict[str, list[str]] = {
-    "merge_authorization": ["approve", "reject"],
-    "session_timeout": ["restart", "resume", "abandon"],
-    "crash_recovery": ["restart", "resume", "abandon"],
-    "blocking_abnormal": ["confirm_fix", "human_review"],
-    "budget_exceeded": ["increase_budget", "reject"],
-    "regression_failure": ["revert", "fix_forward", "pause"],
-    "timeout": ["continue_waiting", "abandon"],
-    "convergent_loop_escalation": ["retry", "skip", "escalate"],
-    "batch_confirmation": ["confirm", "reject"],
-    "precommit_failure": ["retry", "manual_fix", "skip"],
-    "rebase_conflict": ["manual_resolve", "skip", "abandon"],
-    "needs_human_review": ["retry", "skip", "escalate"],
-}
 
 
 def _extract_valid_options(approval: object) -> list[str]:
@@ -1365,18 +1642,18 @@ def approve_cmd(
     resolved_db = db_path or _DEFAULT_DB_PATH
     if not resolved_db.exists():
         typer.echo(
-            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     try:
         asyncio.run(_approve_async(resolved_db, approval_id, decision, reason))
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"错误：{exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 async def _approve_async(
@@ -1398,26 +1675,34 @@ async def _approve_async(
         try:
             approval = await get_approval_by_id(db, approval_id_prefix)
         except ValueError as exc:
-            typer.echo(f"查询失败: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
+            typer.echo(
+                _format_cli_error(str(exc), "运行 `ato approvals` 查看待处理审批"),
+                err=True,
+            )
+            raise typer.Exit(code=EXIT_ERROR) from exc
 
         # 验证 pending
         if approval.status != "pending":
             typer.echo(
-                f"此审批已处理 (status={approval.status})。\n"
-                "选项: 运行 `ato approvals` 查看待处理审批。",
+                _format_cli_error(
+                    f"此审批已处理 (status={approval.status})",
+                    "运行 `ato approvals` 查看待处理审批",
+                ),
                 err=True,
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_ERROR)
 
         # 校验 decision 合法性
         valid_options = _extract_valid_options(approval)
         if valid_options and decision not in valid_options:
             typer.echo(
-                f"无效的决策选项: '{decision}'。\n该审批的合法选项: {', '.join(valid_options)}",
+                _format_cli_error(
+                    f"无效的决策选项: '{decision}'",
+                    [f"--decision {o}" for o in valid_options],
+                ),
                 err=True,
             )
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_ERROR)
 
         # 解析 status 写入规则
         now = datetime.now(tz=UTC)
@@ -1466,32 +1751,35 @@ def uat_cmd(
     resolved_db = db_path or _DEFAULT_DB_PATH
     if not resolved_db.exists():
         typer.echo(
-            f"错误：数据库不存在: {resolved_db}。请先运行 `ato init`。",
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ENV_ERROR)
 
     if result not in ("pass", "fail"):
         typer.echo(
-            f"错误：--result 必须是 'pass' 或 'fail'，收到: '{result}'",
+            _format_cli_error(
+                f"--result 必须是 'pass' 或 'fail'，收到: '{result}'",
+                "--result pass / --result fail",
+            ),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ERROR)
 
     if result == "fail" and not reason:
         typer.echo(
-            "错误：UAT 失败时必须提供 --reason 描述。",
+            _format_cli_error("UAT 失败时必须提供原因", "添加 --reason '描述失败原因'"),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ERROR)
 
     try:
         asyncio.run(_uat_async(story_id, result, reason, resolved_db))
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        typer.echo(f"错误：{exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
 
 async def _uat_async(
@@ -1519,17 +1807,25 @@ async def _uat_async(
         await db.close()
 
     if story is None:
-        typer.echo(f"错误：Story 不存在: {story_id}", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(
+            _format_cli_error(
+                f"Story 不存在: {story_id}",
+                "运行 `ato batch status` 查看可用 stories",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 2. 验证 story 在 uat 阶段
     if story.current_phase != "uat":
         typer.echo(
-            f"错误：Story '{story_id}' 不在 UAT 阶段"
-            f"（当前: {story.current_phase}）",
+            _format_cli_error(
+                f"Story '{story_id}' 不在 UAT 阶段（当前: {story.current_phase}）",
+                "等待 story 进入 UAT 阶段后重试",
+            ),
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_ERROR)
 
     # 3. 构造 UAT 结果 payload
     uat_payload = {
@@ -1551,10 +1847,13 @@ async def _uat_async(
 
             if running_task is None:
                 typer.echo(
-                    "错误：未找到运行中的 UAT task。",
+                    _format_cli_error(
+                        "未找到运行中的 UAT task",
+                        "确认 Orchestrator 已启动且 story 在 UAT 阶段",
+                    ),
                     err=True,
                 )
-                raise typer.Exit(code=1)
+                raise typer.Exit(code=EXIT_ERROR)
 
             await update_task_status(
                 db,
@@ -1585,10 +1884,13 @@ async def _uat_async(
 
             if running_task is None:
                 typer.echo(
-                    "错误：未找到运行中的 UAT task。",
+                    _format_cli_error(
+                        "未找到运行中的 UAT task",
+                        "确认 Orchestrator 已启动且 story 在 UAT 阶段",
+                    ),
                     err=True,
                 )
-                raise typer.Exit(code=1)
+                raise typer.Exit(code=EXIT_ERROR)
 
             await update_task_status(
                 db,
@@ -1605,6 +1907,5 @@ async def _uat_async(
         pid_path = ato_dir / "orchestrator.pid"
         _send_nudge_safe(pid_path)
         typer.echo(
-            f"✅ Story '{story_id}' UAT 未通过，退回 fix 阶段重新进入质量门控。"
-            f"原因: {reason}"
+            f"✅ Story '{story_id}' UAT 未通过，退回 fix 阶段重新进入质量门控。原因: {reason}"
         )

@@ -38,11 +38,11 @@ def _make_approval(
         approval_id=approval_id,
         story_id=story_id,
         approval_type=approval_type,
-        status=status,
+        status=status,  # type: ignore[arg-type]
         payload='{"task_id": "t1", "options": ["restart", "resume"]}',
         created_at=_NOW,
         recommended_action=recommended_action,
-        risk_level=risk_level,
+        risk_level=risk_level,  # type: ignore[arg-type]
     )
 
 
@@ -97,9 +97,7 @@ class TestCreateApprovalInsertAndNudge:
 class TestCreateApprovalCommitFalseSuppressesNudge:
     """commit=False 时 nudge 和 bell 必须被抑制，避免 poll loop 空转。"""
 
-    async def test_commit_false_suppresses_nudge_and_bell(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_commit_false_suppresses_nudge_and_bell(self, initialized_db_path: Path) -> None:
         from ato.approval_helpers import create_approval
         from ato.nudge import Nudge
 
@@ -145,9 +143,7 @@ class TestCreateApprovalCommitFalseSuppressesNudge:
         finally:
             await db.close()
 
-    async def test_commit_true_sends_nudge_and_bell(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_commit_true_sends_nudge_and_bell(self, initialized_db_path: Path) -> None:
         """对照：commit=True（默认）时 nudge 和 bell 正常触发。"""
         from ato.approval_helpers import create_approval
         from ato.nudge import Nudge
@@ -373,29 +369,32 @@ class TestNotificationLevelMapping:
 
 
 class TestSendUserNotificationBell:
-    def test_urgent_triggers_bell(self) -> None:
-        """urgent 触发 bell（写入 stderr）。"""
+    def test_urgent_triggers_double_bell(self) -> None:
+        """urgent 触发双次 bell + stderr 消息输出。"""
         import sys
 
         from ato.nudge import send_user_notification
 
         with patch.object(sys, "stderr") as mock_stderr:
             send_user_notification("urgent", "test")
-            mock_stderr.write.assert_called_once_with("\a")
-            mock_stderr.flush.assert_called_once()
+            written = [c.args[0] for c in mock_stderr.write.call_args_list]
+            assert "\a\a" in written, "urgent should emit double bell"
+            assert any("⚠ 紧急" in w for w in written), "urgent should have prefix"
 
-    def test_normal_triggers_bell(self) -> None:
-        """normal 触发 bell。"""
+    def test_normal_triggers_single_bell(self) -> None:
+        """normal 触发单次 bell + stderr 消息输出。"""
         import sys
 
         from ato.nudge import send_user_notification
 
         with patch.object(sys, "stderr") as mock_stderr:
             send_user_notification("normal", "test")
-            mock_stderr.write.assert_called_once_with("\a")
+            written = [c.args[0] for c in mock_stderr.write.call_args_list]
+            assert "\a" in written, "normal should emit single bell"
+            assert any("test" in w for w in written)
 
     def test_silent_no_bell(self) -> None:
-        """silent 无动作（不写 stderr）。"""
+        """silent 无 bell 无 stderr 输出。"""
         import sys
 
         from ato.nudge import send_user_notification
@@ -403,3 +402,65 @@ class TestSendUserNotificationBell:
         with patch.object(sys, "stderr") as mock_stderr:
             send_user_notification("silent", "test")
             mock_stderr.write.assert_not_called()
+
+
+class TestApprovalNotificationContent:
+    """Story 4.4: approval 通知正文自包含短 ID 与 CLI 快捷命令。"""
+
+    async def test_create_approval_notification_contains_short_id_and_quick_command(
+        self, initialized_db_path: Path
+    ) -> None:
+        """approval 通知正文自包含短 ID 与 CLI 快捷命令。"""
+        from ato.approval_helpers import create_approval
+        from ato.nudge import Nudge
+
+        nudge = Nudge()
+        db = await get_connection(initialized_db_path)
+        try:
+            from ato.models.db import insert_story
+            from ato.models.schemas import StoryRecord
+
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-notif",
+                    title="Test",
+                    status="in_progress",
+                    current_phase="developing",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                ),
+            )
+
+            with patch("ato.approval_helpers.send_user_notification") as mock_bell:
+                approval = await create_approval(
+                    db,
+                    story_id="s-notif",
+                    approval_type="merge_authorization",
+                    nudge=nudge,
+                )
+
+                mock_bell.assert_called_once()
+                call_args = mock_bell.call_args
+                level = call_args[0][0]
+                message = call_args[0][1]
+
+                # 包含短 ID
+                assert approval.approval_id[:8] in message
+                # 包含快捷命令
+                assert "ato approve" in message
+                assert "--decision approve" in message
+                # level 为 normal
+                assert level == "normal"
+        finally:
+            await db.close()
+
+    def test_recommended_action_aligns_with_valid_options(self) -> None:
+        """推荐操作必须落在合法 decision 集内。"""
+        from ato.models.schemas import APPROVAL_DEFAULT_VALID_OPTIONS, APPROVAL_RECOMMENDED_ACTIONS
+
+        for atype, recommended in APPROVAL_RECOMMENDED_ACTIONS.items():
+            valid = APPROVAL_DEFAULT_VALID_OPTIONS.get(atype, [])
+            assert recommended in valid, (
+                f"DRIFT: {atype} recommended='{recommended}' not in valid options {valid}"
+            )

@@ -86,7 +86,7 @@ development_status:
   4-1-approval-queue-nudge: done
   4-2-merge-queue-regression-safety: done
   4-3-uat-interactive-session-completion: done
-  4-4-notification-cli-quality: ready-for-dev
+  4-4-notification-cli-quality: done
   4-5-regression-test-merge-integration: backlog
   epic-4-retrospective: optional
 

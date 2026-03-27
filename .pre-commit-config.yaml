@@ -20,5 +20,6 @@ repos:
           - python-statemachine>=3.0
           - structlog
           - typer
+          - textual>=2.0
           - types-PyYAML>=6.0
         exclude: ^(\.(agent|agents|claude)/|_bmad/)

@@ -53,7 +53,7 @@ def _make_task(
         phase=phase,
         role="developer",
         cli_tool="claude",
-        status=status,
+        status=status,  # type: ignore[arg-type]
         pid=12345,
         started_at=_NOW,
     )
@@ -120,12 +120,12 @@ class TestUatParameterValidation:
         assert "reason" in result.output.lower() or "reason" in (result.stderr or "").lower()
 
     def test_db_not_exist(self, tmp_path: Path) -> None:
-        """数据库不存在应报错。"""
+        """数据库不存在应报错（环境错误，exit_code == 2）。"""
         fake_db = tmp_path / ".ato" / "state.db"
         result = runner.invoke(
             app, ["uat", "story-1", "--result", "pass", "--db-path", str(fake_db)]
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 2
         assert "不存在" in result.output or "数据库" in result.output
 
 
@@ -201,7 +201,7 @@ class TestUatPass:
             app, ["uat", "story-uat-1", "--result", "pass", "--db-path", str(db_path)]
         )
         assert result.exit_code == 0
-        mock_nudge.assert_called_once()  # type: ignore[union-attr]
+        mock_nudge.assert_called_once()  # type: ignore[attr-defined]
 
     @patch("ato.cli._send_nudge_safe")
     def test_pass_output_message(self, mock_nudge: object, tmp_path: Path) -> None:
@@ -238,10 +238,14 @@ class TestUatFail:
         result = runner.invoke(
             app,
             [
-                "uat", "story-uat-1",
-                "--result", "fail",
-                "--reason", "UI 不符合预期",
-                "--db-path", str(db_path),
+                "uat",
+                "story-uat-1",
+                "--result",
+                "fail",
+                "--reason",
+                "UI 不符合预期",
+                "--db-path",
+                str(db_path),
             ],
         )
         assert result.exit_code == 0
@@ -262,9 +266,7 @@ class TestUatFail:
         asyncio.run(_check())
 
     @patch("ato.cli._send_nudge_safe")
-    def test_fail_sets_uat_fail_requested_marker(
-        self, mock_nudge: object, tmp_path: Path
-    ) -> None:
+    def test_fail_sets_uat_fail_requested_marker(self, mock_nudge: object, tmp_path: Path) -> None:
         """fail 应标记 task expected_artifact='uat_fail_requested'，
         由 Orchestrator 在 _poll_cycle 中检测并执行状态转换。"""
         db_path = _setup_db(tmp_path)
@@ -272,10 +274,14 @@ class TestUatFail:
         result = runner.invoke(
             app,
             [
-                "uat", "story-uat-1",
-                "--result", "fail",
-                "--reason", "发现严重 bug",
-                "--db-path", str(db_path),
+                "uat",
+                "story-uat-1",
+                "--result",
+                "fail",
+                "--reason",
+                "发现严重 bug",
+                "--db-path",
+                str(db_path),
             ],
         )
         assert result.exit_code == 0
@@ -311,28 +317,34 @@ class TestUatFail:
         result = runner.invoke(
             app,
             [
-                "uat", "story-uat-1",
-                "--result", "fail",
-                "--reason", "理由",
-                "--db-path", str(db_path),
+                "uat",
+                "story-uat-1",
+                "--result",
+                "fail",
+                "--reason",
+                "理由",
+                "--db-path",
+                str(db_path),
             ],
         )
         assert result.exit_code != 0
         assert "运行中" in result.output or "task" in result.output.lower()
 
     @patch("ato.cli._send_nudge_safe")
-    def test_fail_output_includes_reason(
-        self, mock_nudge: object, tmp_path: Path
-    ) -> None:
+    def test_fail_output_includes_reason(self, mock_nudge: object, tmp_path: Path) -> None:
         """fail 路径的输出应包含失败原因。"""
         db_path = _setup_db(tmp_path)
         result = runner.invoke(
             app,
             [
-                "uat", "story-uat-1",
-                "--result", "fail",
-                "--reason", "性能不达标",
-                "--db-path", str(db_path),
+                "uat",
+                "story-uat-1",
+                "--result",
+                "fail",
+                "--reason",
+                "性能不达标",
+                "--db-path",
+                str(db_path),
             ],
         )
         assert result.exit_code == 0
@@ -345,11 +357,15 @@ class TestUatFail:
         result = runner.invoke(
             app,
             [
-                "uat", "story-uat-1",
-                "--result", "fail",
-                "--reason", "回归问题",
-                "--db-path", str(db_path),
+                "uat",
+                "story-uat-1",
+                "--result",
+                "fail",
+                "--reason",
+                "回归问题",
+                "--db-path",
+                str(db_path),
             ],
         )
         assert result.exit_code == 0
-        mock_nudge.assert_called_once()  # type: ignore[union-attr]
+        mock_nudge.assert_called_once()  # type: ignore[attr-defined]

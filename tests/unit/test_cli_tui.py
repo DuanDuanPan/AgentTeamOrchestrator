@@ -15,10 +15,10 @@ runner = CliRunner()
 
 
 def test_tui_db_not_found(tmp_path: Path) -> None:
-    """数据库不存在时退出码 1，输出错误提示。"""
+    """数据库不存在时退出码 2（环境错误），输出错误提示。"""
     db_path = tmp_path / ".ato" / "state.db"
     result = runner.invoke(cli_app, ["tui", "--db-path", str(db_path)])
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     assert "数据库未找到" in result.output
 
 
@@ -87,10 +87,10 @@ def test_tui_stale_pid_warning(tmp_path: Path) -> None:
 
 
 def test_tui_default_db_path_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """默认 db_path (.ato/state.db) 不存在时退出码 1。"""
+    """默认 db_path (.ato/state.db) 不存在时退出码 2（环境错误）。"""
     monkeypatch.chdir(tmp_path)  # 确保 CWD 无 .ato/state.db
     result = runner.invoke(cli_app, ["tui"], catch_exceptions=False)
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     assert "数据库未找到" in result.output
 
 
@@ -179,9 +179,7 @@ def test_tui_config_explicit_missing_exits_with_error(tmp_path: Path) -> None:
         cli_app,
         ["tui", "--db-path", str(db_path), "--config", str(tmp_path / "missing.yaml")],
     )
-    assert result.exit_code != 0, (
-        "显式 --config 指向不存在文件时应报错退出，不应静默启动 TUI"
-    )
+    assert result.exit_code != 0, "显式 --config 指向不存在文件时应报错退出，不应静默启动 TUI"
 
 
 def test_tui_config_auto_discover_failure_still_starts(tmp_path: Path) -> None:

@@ -50,25 +50,54 @@ class Nudge:
             self._event.clear()
 
 
+def format_notification_message(level: str, message: str) -> str:
+    """根据通知级别格式化消息文本。
+
+    Args:
+        level: NotificationLevel 值。
+        message: 原始消息文本。
+
+    Returns:
+        格式化后的单行消息字符串。
+    """
+    if level == "urgent":
+        return f"⚠ 紧急: {message}"
+    if level == "milestone":
+        return f"🎉 {message}"
+    # normal / silent: 不加前缀
+    return message
+
+
 def send_user_notification(level: str, message: str) -> None:
     """发送用户可见通知。
 
-    MVP 实现：
-    - ``urgent`` / ``normal`` → terminal bell (``\\a``)
-    - ``silent`` → 无动作
-    - ``milestone`` → 暂仅保留枚举，无动作（Story 4.4 范围）
+    行为矩阵：
+    - ``urgent`` → 连续两次 terminal bell + stderr 输出（带"⚠ 紧急"前缀）
+    - ``normal`` → 单次 terminal bell + stderr 输出
+    - ``milestone`` → 单次 terminal bell + stderr 输出（带"🎉"前缀）
+    - ``silent`` → 无 bell、无 stderr 输出，仅 structlog 日志
 
     Args:
         level: NotificationLevel 值。
         message: 通知消息文本。
     """
-    if level in ("urgent", "normal"):
-        import sys
+    import sys
 
+    formatted = format_notification_message(level, message)
+
+    if level == "urgent":
+        sys.stderr.write("\a\a")
+        sys.stderr.flush()
+        sys.stderr.write(formatted + "\n")
+        sys.stderr.flush()
+    elif level in ("normal", "milestone"):
         sys.stderr.write("\a")
         sys.stderr.flush()
-    # silent / milestone: 不发 bell
-    logger.info("notification_sent", level=level, message=message)
+        sys.stderr.write(formatted + "\n")
+        sys.stderr.flush()
+    # silent: 无 bell、无 stderr 输出
+
+    logger.info("notification_sent", level=level, message=formatted)
 
 
 def send_external_nudge(orchestrator_pid: int) -> None:

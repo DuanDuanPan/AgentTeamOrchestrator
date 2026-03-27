@@ -387,7 +387,7 @@ async def _insert_test_approval(
                 approval_id=approval_id,
                 story_id=story_id,
                 approval_type=approval_type,
-                status=status,
+                status=status,  # type: ignore[arg-type]
                 decision=decision,
                 decided_at=now,
                 created_at=now,
@@ -841,9 +841,7 @@ class TestProcessApprovalDecisions:
             release_dispatch.set()
             await asyncio.gather(*orchestrator._background_tasks, return_exceptions=True)
 
-    async def test_interactive_restart_deletes_sidecar(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_interactive_restart_deletes_sidecar(self, initialized_db_path: Path) -> None:
         """restart 模式下 _dispatch_interactive_restart 删除 sidecar，
         防止 dispatch_interactive fallback 读取旧 session_id。
         """
@@ -881,8 +879,10 @@ class TestProcessApprovalDecisions:
             patch("ato.subprocess_mgr.SubprocessManager") as mock_mgr_cls,
             patch("ato.adapters.claude_cli.ClaudeAdapter"),
             patch.object(
-                orchestrator, "_get_base_commit",
-                new_callable=AsyncMock, return_value="abc123",
+                orchestrator,
+                "_get_base_commit",
+                new_callable=AsyncMock,
+                return_value="abc123",
             ),
         ):
             mock_mgr = AsyncMock()
@@ -1041,9 +1041,7 @@ class TestConvergentRestartSingleApproval:
     _mark_dispatch_failed，外层不应再次调用。
     """
 
-    async def test_inner_exception_creates_single_approval(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_inner_exception_creates_single_approval(self, initialized_db_path: Path) -> None:
         from ato.config import PhaseDefinition
         from ato.models.db import get_connection, get_pending_approvals, update_task_status
 
@@ -1062,9 +1060,7 @@ class TestConvergentRestartSingleApproval:
                 "pending",
                 expected_artifact="restart_requested",
             )
-            await db.execute(
-                "UPDATE tasks SET phase = 'reviewing' WHERE task_id = 't-conv-1'"
-            )
+            await db.execute("UPDATE tasks SET phase = 'reviewing' WHERE task_id = 't-conv-1'")
             await db.commit()
         finally:
             await db.close()
@@ -1100,8 +1096,7 @@ class TestConvergentRestartSingleApproval:
                 transition_queue=MagicMock(),
                 nudge=MagicMock(),
             )
-            task_rec = task  # type: ignore[assignment]
-            await engine._mark_dispatch_failed(task_rec)
+            await engine._mark_dispatch_failed(task)  # type: ignore[arg-type]
             return False
 
         with (
@@ -1122,9 +1117,7 @@ class TestConvergentRestartSingleApproval:
         db2 = await get_connection(initialized_db_path)
         try:
             approvals = await get_pending_approvals(db2)
-            crash_approvals = [
-                a for a in approvals if a.approval_type == "crash_recovery"
-            ]
+            crash_approvals = [a for a in approvals if a.approval_type == "crash_recovery"]
             assert len(crash_approvals) == 1, (
                 f"Expected exactly 1 crash_recovery approval, got {len(crash_approvals)}"
             )
@@ -1307,9 +1300,7 @@ class TestMergeAuthorizationConsumption:
         event = orchestrator._tq.submit.call_args[0][0]
         assert event.event_name == "escalate"
 
-    async def test_regression_failure_fix_forward(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_regression_failure_fix_forward(self, initialized_db_path: Path) -> None:
         """fix_forward 提交 regression_fail transition，清理旧 row 且 queue 保持冻结。"""
         from ato.models.db import (
             enqueue_merge,

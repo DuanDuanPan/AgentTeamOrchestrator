@@ -463,11 +463,14 @@ async def test_story_list_shows_stories(tui_db_path: Path) -> None:
     """AC1: DashboardScreen 挂载后 story 列表正确显示。"""
     from textual.containers import VerticalScroll
 
-    await _insert_stories(tui_db_path, [
-        ("s1", "Story 1", "in_progress", "developing"),
-        ("s2", "Story 2", "ready", "queued"),
-        ("s3", "Story 3", "done", "done"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Story 1", "in_progress", "developing"),
+            ("s2", "Story 2", "ready", "queued"),
+            ("s3", "Story 3", "done", "done"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test():
@@ -504,9 +507,12 @@ async def test_story_list_refresh_updates(tui_db_path: Path) -> None:
         assert len(empty_widgets) > 0
 
         # 插入数据后刷新
-        await _insert_stories(tui_db_path, [
-            ("s1", "Story 1", "in_progress", "developing"),
-        ])
+        await _insert_stories(
+            tui_db_path,
+            [
+                ("s1", "Story 1", "in_progress", "developing"),
+            ],
+        )
         await app.refresh_data()
         # 允许 Textual 事件循环处理 DOM 变更
         await pilot.pause()
@@ -520,10 +526,13 @@ async def test_story_list_refresh_updates(tui_db_path: Path) -> None:
 
 async def test_story_list_selection_preserves_on_refresh(tui_db_path: Path) -> None:
     """AC6: 刷新后保持当前选中 story。"""
-    await _insert_stories(tui_db_path, [
-        ("s1", "Story 1", "ready", "queued"),
-        ("s2", "Story 2", "in_progress", "developing"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Story 1", "ready", "queued"),
+            ("s2", "Story 2", "in_progress", "developing"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test():
@@ -545,10 +554,13 @@ async def test_highlight_does_not_match_prefix_stories(tui_db_path: Path) -> Non
     """Bug 2 回归：选中 s1 不应高亮 ssl-s10（前缀匹配误伤）。"""
     from textual.containers import VerticalScroll
 
-    await _insert_stories(tui_db_path, [
-        ("s1", "Story 1", "ready", "queued"),
-        ("s10", "Story 10", "ready", "queued"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Story 1", "ready", "queued"),
+            ("s10", "Story 10", "ready", "queued"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test() as pilot:
@@ -573,9 +585,12 @@ async def test_right_panel_shows_detail(tui_db_path: Path) -> None:
     """AC5: 右上面板显示选中 story 的概览。"""
     from textual.widgets import Static
 
-    await _insert_stories(tui_db_path, [
-        ("s1", "Test Story Alpha", "in_progress", "developing"),
-    ])
+    await _insert_stories(
+        tui_db_path,
+        [
+            ("s1", "Test Story Alpha", "in_progress", "developing"),
+        ],
+    )
 
     app = ATOApp(db_path=tui_db_path)
     async with app.run_test():

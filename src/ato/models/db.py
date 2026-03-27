@@ -813,6 +813,23 @@ async def get_batch_progress(db: aiosqlite.Connection, batch_id: str) -> BatchPr
     return BatchProgress(done=done, active=active, pending=pending, failed=failed)
 
 
+async def complete_batch(db: aiosqlite.Connection, batch_id: str) -> bool:
+    """将 batch 从 active 收敛为 completed。
+
+    仅当 status 为 active 时执行更新，返回是否实际更新。
+    提供跨重启幂等性——已 completed 的 batch 不会重复更新。
+    """
+    now = datetime.now(tz=UTC)
+    cursor = await db.execute(
+        "UPDATE batches SET status = ?, completed_at = ? WHERE batch_id = ? AND status = ?",
+        ("completed", _dt_to_iso(now), batch_id, "active"),
+    )
+    updated = cursor.rowcount > 0
+    if updated:
+        await db.commit()
+    return updated
+
+
 def _row_to_batch(row: aiosqlite.Row) -> BatchRecord:
     """SQLite Row → BatchRecord。"""
     data = dict(row)
