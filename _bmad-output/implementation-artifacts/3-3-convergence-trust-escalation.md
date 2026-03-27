@@ -1,6 +1,6 @@
 # Story 3.3: 收敛信任与 Escalation 通知
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -52,52 +52,52 @@ So that 可以信任自动化质量结果，不会被无限循环阻塞。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现收敛率计算与阈值判定逻辑 (AC: #1)
-  - [ ] 1.1 在 `src/ato/convergent_loop.py` 中新增 `_calculate_convergence_rate(findings: Sequence[FindingRecord]) -> float` 纯 helper，计算 `closed_findings / total_findings`
-  - [ ] 1.2 修改 `run_rereview()`：在持久化 `still_open / closed / new` 结果后，基于同一轮已更新的 findings snapshot 计算收敛率，避免第二个 DB 连接读到旧状态
-  - [ ] 1.3 收敛率判定规则：`convergence_rate >= self._config.convergence_threshold AND 无 open blocking findings` → converged=True
-  - [ ] 1.4 structlog 记录收敛率：在 `convergent_loop_round_complete` 日志中新增 `convergence_rate` 字段
-  - [ ] 1.5 `run_loop()` 不重新实现收敛判定，但允许它累积每轮摘要供 escalation payload 使用
+- [x] Task 1: 实现收敛率计算与阈值判定逻辑 (AC: #1)
+  - [x] 1.1 在 `src/ato/convergent_loop.py` 中新增 `_calculate_convergence_rate(findings: Sequence[FindingRecord]) -> float` 纯 helper，计算 `closed_findings / total_findings`
+  - [x] 1.2 修改 `run_rereview()`：在持久化 `still_open / closed / new` 结果后，基于同一轮已更新的 findings snapshot 计算收敛率，避免第二个 DB 连接读到旧状态
+  - [x] 1.3 收敛率判定规则：`convergence_rate >= self._config.convergence_threshold AND 无 open blocking findings` → converged=True
+  - [x] 1.4 structlog 记录收敛率：在 `convergent_loop_round_complete` 日志中新增 `convergence_rate` 字段
+  - [x] 1.5 `run_loop()` 不重新实现收敛判定，但允许它累积每轮摘要供 escalation payload 使用
 
-- [ ] Task 2: 增强 Escalation Approval 的 Finding 变化历史 (AC: #2)
-  - [ ] 2.1 在 `run_loop()` 中收集首轮 review 与每轮 re-review 的 `round_summaries`（直接使用 `ConvergentLoopResult` 字段，不从 DB 逆向猜测）
-  - [ ] 2.2 新增 `_build_escalation_payload()` helper：组装 `final_convergence_rate`、`round_summaries`、`unresolved_findings`
-  - [ ] 2.3 修改 `_create_escalation_approval()`：保留现有 pending 幂等检查，但插入 approval 时复用 `src/ato/approval_helpers.py:create_approval()`
-  - [ ] 2.4 payload 需包含 `options=["retry", "skip", "escalate"]`，供 CLI/TUI approval consumer 直接消费
+- [x] Task 2: 增强 Escalation Approval 的 Finding 变化历史 (AC: #2)
+  - [x] 2.1 在 `run_loop()` 中收集首轮 review 与每轮 re-review 的 `round_summaries`（直接使用 `ConvergentLoopResult` 字段，不从 DB 逆向猜测）
+  - [x] 2.2 新增 `_build_escalation_payload()` helper：组装 `final_convergence_rate`、`round_summaries`、`unresolved_findings`
+  - [x] 2.3 修改 `_create_escalation_approval()`：保留现有 pending 幂等检查，但插入 approval 时复用 `src/ato/approval_helpers.py:create_approval()`
+  - [x] 2.4 payload 需包含 `options=["retry", "skip", "escalate"]`，供 CLI/TUI approval consumer 直接消费
 
-- [ ] Task 3: 实现 Finding 跨轮次状态摘要查询 (AC: #3)
-  - [ ] 3.1 在 `src/ato/models/db.py` 中新增 `get_finding_trajectory(db, story_id) -> list[dict[str, Any]]`：查询某 story 的所有 findings，返回每个 finding 的状态摘要
-  - [ ] 3.2 返回结构：`[{"finding_id": "...", "file_path": "...", "rule_id": "...", "severity": "...", "description": "...", "first_seen_round": 1, "current_status": "closed"}]`
-  - [ ] 3.3 直接复用 `get_findings_by_story()` 结果；不要对中间轮次做插值，也不要伪造“精确关闭于第几轮”
-  - [ ] 3.4 escalation payload 中的 `unresolved_findings` 只使用 `get_open_findings()` 当前快照，避免把已关闭 finding 再塞进人工决策摘要
+- [x] Task 3: 实现 Finding 跨轮次状态摘要查询 (AC: #3)
+  - [x] 3.1 在 `src/ato/models/db.py` 中新增 `get_finding_trajectory(db, story_id) -> list[dict[str, Any]]`：查询某 story 的所有 findings，返回每个 finding 的状态摘要
+  - [x] 3.2 返回结构：`[{"finding_id": "...", "file_path": "...", "rule_id": "...", "severity": "...", "description": "...", "first_seen_round": 1, "current_status": "closed"}]`
+  - [x] 3.3 直接复用 `get_findings_by_story()` 结果；不要对中间轮次做插值，也不要伪造“精确关闭于第几轮”
+  - [x] 3.4 escalation payload 中的 `unresolved_findings` 只使用 `get_open_findings()` 当前快照，避免把已关闭 finding 再塞进人工决策摘要
 
-- [ ] Task 4: 端到端集成测试 — 5-finding 场景 (AC: #4)
-  - [ ] 4.1 创建集成测试：`test_integration_five_finding_convergence`
-  - [ ] 4.2 场景设计：4 个 blocking + 1 个 suggestion → 第 1 轮 review 发现全部 5 个 → fix 修复 3 个 blocking → 第 2 轮 re-review 闭合 3 个、1 个 blocking still_open → fix 修复剩余 1 个 blocking → 第 3 轮 re-review 全部闭合 → 收敛
-  - [ ] 4.3 验证：`run_loop()` 在 ≤3 轮内收敛，`result.converged == True`
-  - [ ] 4.4 验证所有 5 个 finding 最终 status=closed
-  - [ ] 4.5 验证 escalation approval 未创建（因为收敛了）
-  - [ ] 4.6 Mock 策略：mock `dispatch_with_retry` 和 `bmad_adapter.parse` 返回不同轮次的预设结果（模拟 reviewer 逐步确认 fix）
+- [x] Task 4: 端到端集成测试 — 5-finding 场景 (AC: #4)
+  - [x] 4.1 创建集成测试：`test_integration_five_finding_convergence`
+  - [x] 4.2 场景设计：4 个 blocking + 1 个 suggestion → 第 1 轮 review 发现全部 5 个 → fix 修复 3 个 blocking → 第 2 轮 re-review 闭合 3 个、1 个 blocking still_open → fix 修复剩余 1 个 blocking → 第 3 轮 re-review 全部闭合 → 收敛
+  - [x] 4.3 验证：`run_loop()` 在 ≤3 轮内收敛，`result.converged == True`
+  - [x] 4.4 验证所有 5 个 finding 最终 status=closed
+  - [x] 4.5 验证 escalation approval 未创建（因为收敛了）
+  - [x] 4.6 Mock 策略：mock `dispatch_with_retry` 和 `bmad_adapter.parse` 返回不同轮次的预设结果（模拟 reviewer 逐步确认 fix）
 
-- [ ] Task 5: 非法 Transition 拒绝测试 (AC: #5)
-  - [ ] 5.1 优先复用 / 扩展 `tests/unit/test_state_machine.py` 中现有非法 transition 覆盖；不要在 `tests/unit/test_convergent_loop.py` 复制一整套状态机 happy path
-  - [ ] 5.2 场景：`start_create` → `create_done` → `validate_pass` → `start_dev` → `dev_done` → `review_fail` → story 进入 `fixing` → **尝试跳过 fix_done 直接提交 review_pass**
-  - [ ] 5.3 验证：状态机拒绝非法 transition，story 状态不变（仍为 fixing）
-  - [ ] 5.4 验证：structlog 记录非法 transition 尝试
+- [x] Task 5: 非法 Transition 拒绝测试 (AC: #5)
+  - [x] 5.1 优先复用 / 扩展 `tests/unit/test_state_machine.py` 中现有非法 transition 覆盖；不要在 `tests/unit/test_convergent_loop.py` 复制一整套状态机 happy path
+  - [x] 5.2 场景：`start_create` → `create_done` → `validate_pass` → `start_dev` → `dev_done` → `review_fail` → story 进入 `fixing` → **尝试跳过 fix_done 直接提交 review_pass**
+  - [x] 5.3 验证：状态机拒绝非法 transition，story 状态不变（仍为 fixing）
+  - [x] 5.4 验证：structlog 记录非法 transition 尝试
 
-- [ ] Task 6: 收敛率相关单元测试 (AC: #1)
-  - [ ] 6.1 `test_convergence_rate_calculation` — 验证 `_calculate_convergence_rate(findings)` 正确计算 `closed / total`
-  - [ ] 6.2 `test_convergence_rate_threshold_met` — 收敛率 ≥ threshold 且无 blocking → converged
-  - [ ] 6.3 `test_convergence_rate_threshold_not_met` — 收敛率 < threshold 即使无 blocking → 不收敛
-  - [ ] 6.4 `test_convergence_rate_with_open_blocking` — 收敛率 ≥ threshold 但有 open blocking → 不收敛
-  - [ ] 6.5 `test_convergence_rate_zero_findings` — 0 findings → 收敛率视为 1.0
-  - [ ] 6.6 `test_convergence_rate_logged_in_round_complete` — structlog 中含 convergence_rate 字段
+- [x] Task 6: 收敛率相关单元测试 (AC: #1)
+  - [x] 6.1 `test_convergence_rate_calculation` — 验证 `_calculate_convergence_rate(findings)` 正确计算 `closed / total`
+  - [x] 6.2 `test_convergence_rate_threshold_met` — 收敛率 ≥ threshold 且无 blocking → converged
+  - [x] 6.3 `test_convergence_rate_threshold_not_met` — 收敛率 < threshold 即使无 blocking → 不收敛
+  - [x] 6.4 `test_convergence_rate_with_open_blocking` — 收敛率 ≥ threshold 但有 open blocking → 不收敛
+  - [x] 6.5 `test_convergence_rate_zero_findings` — 0 findings → 收敛率视为 1.0
+  - [x] 6.6 `test_convergence_rate_logged_in_round_complete` — structlog 中含 convergence_rate 字段
 
-- [ ] Task 7: Escalation 摘要 / Finding 轨迹相关测试 (AC: #2, #3)
-  - [ ] 7.1 `test_escalation_payload_contains_round_summaries` — escalation approval payload 含 `round_summaries`
-  - [ ] 7.2 `test_escalation_payload_contains_unresolved_findings` — escalation approval payload 含 `unresolved_findings` 与 `options`
-  - [ ] 7.3 `test_get_finding_trajectory_returns_first_seen_and_current_status` — 查询结果返回 `first_seen_round` / `current_status`
-  - [ ] 7.4 `test_get_finding_trajectory_empty_story` — 无 findings 时返回空列表
+- [x] Task 7: Escalation 摘要 / Finding 轨迹相关测试 (AC: #2, #3)
+  - [x] 7.1 `test_escalation_payload_contains_round_summaries` — escalation approval payload 含 `round_summaries`
+  - [x] 7.2 `test_escalation_payload_contains_unresolved_findings` — escalation approval payload 含 `unresolved_findings` 与 `options`
+  - [x] 7.3 `test_get_finding_trajectory_returns_first_seen_and_current_status` — 查询结果返回 `first_seen_round` / `current_status`
+  - [x] 7.4 `test_get_finding_trajectory_empty_story` — 无 findings 时返回空列表
 
 ## Dev Notes
 
@@ -496,14 +496,34 @@ class TestConvergenceRateStructlog:
 ### Change Log
 
 - 2026-03-27: create-story 创建 — 基于 Epic 3 / PRD / 架构 / 前序 story 3.1-3.2d 生成 3.3 初稿
+- 2026-03-27: dev-story 实现完成 — 收敛率计算 + 阈值判定、escalation payload 增强（round_summaries / unresolved_findings / options）、finding 轨迹查询、14 个新测试、1196 全量通过无回归
 - 2026-03-27: validate-create-story 修订 —— 将“完整 per-finding 逐轮轨迹”收敛到当前 schema 可表达的 `first_seen_round + current_status`；把 escalation payload 改为 runtime `round_summaries + unresolved_findings + final_convergence_rate`；要求 `_create_escalation_approval()` 复用 `create_approval()`；修正非法 transition 示例里的旧状态机事件名；把 5-finding 场景统一为 4 blocking + 1 suggestion，避免 AC / 任务 / 例子互相打架
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
+Claude Opus 4.6 (1M context)
+
 ### Debug Log References
+
+无 debug issues。
 
 ### Completion Notes List
 
+- ✅ Task 1: 实现 `_calculate_convergence_rate()` 纯 helper（closed/total，0 findings → 1.0），修改 `run_rereview()` 在 DB 写入后计算收敛率，收敛判定增加 `convergence_rate >= convergence_threshold` 条件，structlog `convergent_loop_round_complete` 新增 `convergence_rate` 字段
+- ✅ Task 2: `run_loop()` 累积 `round_summaries`，新增 `_build_escalation_payload()` 组装 `final_convergence_rate / round_summaries / unresolved_findings / options`，`_create_escalation_approval()` 重写为复用 `create_approval()` 统一 API
+- ✅ Task 3: `models/db.py` 新增 `get_finding_trajectory()`，返回 `first_seen_round + current_status` 摘要（不做逐轮插值）
+- ✅ Task 4: 端到端 5-finding 集成测试（4 blocking + 1 suggestion），验证 ≤3 轮收敛、所有 findings closed、无 escalation
+- ✅ Task 5: 复用 `test_state_machine.py` 中已有 `test_fixing_rejects_review_pass`，新增 `test_fixing_rejects_review_pass_logs_warning` 验证完整 AC5 链路 + structlog
+- ✅ Task 6: 6 个收敛率单元测试（全 closed、全 open、partial、zero findings、threshold 判定 3 种场景、structlog 字段验证）
+- ✅ Task 7: escalation payload 含 round_summaries / unresolved_findings / options 验证，`get_finding_trajectory` 正常/空 story 测试
+
 ### File List
+
+- `src/ato/convergent_loop.py` — 新增 `_calculate_convergence_rate()`、`_build_escalation_payload()`；修改 `run_rereview()` 收敛评估；`run_loop()` 累积 `round_summaries`；`_create_escalation_approval()` 复用 `create_approval()`
+- `src/ato/models/db.py` — 新增 `get_finding_trajectory()` 函数、`Any` import
+- `tests/unit/test_convergent_loop.py` — 新增 13 个测试（7 个测试类）
+- `tests/unit/test_state_machine.py` — 新增 1 个测试 `test_fixing_rejects_review_pass_logs_warning`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — 状态更新
+- `_bmad-output/implementation-artifacts/3-3-convergence-trust-escalation.md` — story 文件更新

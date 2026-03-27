@@ -2742,9 +2742,9 @@ class TestRunLoopConvergesFirstRound:
 
         loop, _, _, _ = _make_loop(initialized_db_path)
         # Mock run_first_review to return converged
-        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
-        loop.run_fix_dispatch = AsyncMock()
-        loop.run_rereview = AsyncMock()
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))  # type: ignore[method-assign]
+        loop.run_fix_dispatch = AsyncMock()  # type: ignore[method-assign]
+        loop.run_rereview = AsyncMock()  # type: ignore[method-assign]
 
         result = await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -2769,13 +2769,13 @@ class TestRunLoopConvergesAfterFix:
             await db.close()
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_fix_dispatch = AsyncMock(
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_rereview = AsyncMock(
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_converged_result(story.story_id, round_num=2)
         )
 
@@ -2801,12 +2801,12 @@ class TestRunLoopMultipleRounds:
             await db.close()
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
         # rereview: round 2 not converged, round 3 converged
-        loop.run_rereview = AsyncMock(
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
                 _make_not_converged_result(story.story_id, round_num=2),
                 _make_converged_result(story.story_id, round_num=3),
@@ -2839,19 +2839,19 @@ class TestRunLoopMaxRoundsEscalation:
             await db.close()
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
         # All rereview rounds not converged (default max_rounds=3)
-        loop.run_rereview = AsyncMock(
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
                 _make_not_converged_result(story.story_id, round_num=2),
                 _make_not_converged_result(story.story_id, round_num=3),
             ]
         )
         # Mock DB query for accurate remaining blocking count
-        loop._get_remaining_blocking_count = AsyncMock(return_value=2)
+        loop._get_remaining_blocking_count = AsyncMock(return_value=2)  # type: ignore[method-assign]
 
         result = await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -2885,7 +2885,7 @@ class TestRunLoopMaxRoundsEscalation:
             await db.close()
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))  # type: ignore[method-assign]
 
         await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -2914,12 +2914,12 @@ class TestRunLoopMaxRoundsOneEdge:
         # Override config to max_rounds=1
         loop, _, _, _ = _make_loop(initialized_db_path)
         loop._config = ConvergentLoopConfig(max_rounds=1)
-        loop.run_first_review = AsyncMock(
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_fix_dispatch = AsyncMock()
-        loop.run_rereview = AsyncMock()
-        loop._get_remaining_blocking_count = AsyncMock(return_value=2)
+        loop.run_fix_dispatch = AsyncMock()  # type: ignore[method-assign]
+        loop.run_rereview = AsyncMock()  # type: ignore[method-assign]
+        loop._get_remaining_blocking_count = AsyncMock(return_value=2)  # type: ignore[method-assign]
 
         result = await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -2955,7 +2955,7 @@ class TestRunLoopMaxRoundsOneEdge:
 
         loop, _, _, _ = _make_loop(initialized_db_path)
         loop._config = ConvergentLoopConfig(max_rounds=1)
-        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))  # type: ignore[method-assign]
 
         result = await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -2996,7 +2996,7 @@ class TestRunLoopStructlogOutput:
             await db.close()
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))
+        loop.run_first_review = AsyncMock(return_value=_make_converged_result(story.story_id))  # type: ignore[method-assign]
 
         import unittest.mock
 
@@ -3039,17 +3039,17 @@ class TestRunLoopStructlogOutput:
             await db.close()
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
-        loop.run_rereview = AsyncMock(
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
                 _make_not_converged_result(story.story_id, round_num=2),
                 _make_not_converged_result(story.story_id, round_num=3),
             ]
         )
-        loop._get_remaining_blocking_count = AsyncMock(return_value=7)
+        loop._get_remaining_blocking_count = AsyncMock(return_value=7)  # type: ignore[method-assign]
 
         import unittest.mock
 
@@ -3175,9 +3175,9 @@ class TestRunLoopParseFailureShortCircuit:
         )
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(return_value=parse_fail_result)
-        loop.run_fix_dispatch = AsyncMock()
-        loop.run_rereview = AsyncMock()
+        loop.run_first_review = AsyncMock(return_value=parse_fail_result)  # type: ignore[method-assign]
+        loop.run_fix_dispatch = AsyncMock()  # type: ignore[method-assign]
+        loop.run_rereview = AsyncMock()  # type: ignore[method-assign]
 
         result = await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -3209,11 +3209,11 @@ class TestRunLoopParseFailureShortCircuit:
         )
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
-        loop.run_rereview = AsyncMock(return_value=rereview_parse_fail)
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
+        loop.run_rereview = AsyncMock(return_value=rereview_parse_fail)  # type: ignore[method-assign]
 
         result = await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -3251,7 +3251,7 @@ class TestRunLoopParseFailureShortCircuit:
         )
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop.run_first_review = AsyncMock(return_value=parse_fail_result)
+        loop.run_first_review = AsyncMock(return_value=parse_fail_result)  # type: ignore[method-assign]
 
         import unittest.mock
 
@@ -3280,18 +3280,18 @@ class TestRemainingBlockingFromDB:
 
         loop, _, _, _ = _make_loop(initialized_db_path)
         # rereview 结果：parser 只报了 1 个 blocking（raw count）
-        loop.run_first_review = AsyncMock(
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1, blocking_count=1)
         )
-        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))
-        loop.run_rereview = AsyncMock(
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
                 _make_not_converged_result(story.story_id, round_num=2, blocking_count=1),
                 _make_not_converged_result(story.story_id, round_num=3, blocking_count=1),
             ]
         )
         # DB 实际有 3 个 open blocking（dedup 后）
-        loop._get_remaining_blocking_count = AsyncMock(return_value=3)
+        loop._get_remaining_blocking_count = AsyncMock(return_value=3)  # type: ignore[method-assign]
 
         await loop.run_loop(story.story_id, "/tmp/wt")
 
@@ -3309,3 +3309,625 @@ class TestRemainingBlockingFromDB:
         payload = json.loads(escalations[0].payload or "{}")
         # 应该是 DB 的 3，不是 parser 的 1
         assert payload["open_blocking_count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3 — 收敛率计算与阈值判定
+# ---------------------------------------------------------------------------
+
+
+class TestConvergenceRateCalculation:
+    """Task 6.1: _calculate_convergence_rate 正确计算 closed / total。"""
+
+    def test_all_closed(self) -> None:
+        findings = [
+            _make_finding_record_for_rereview(
+                finding_id=f"f{i}", status="closed", rule_id=f"R{i:03d}"
+            )
+            for i in range(5)
+        ]
+        rate = ConvergentLoop._calculate_convergence_rate(findings)
+        assert rate == 1.0
+
+    def test_none_closed(self) -> None:
+        findings = [
+            _make_finding_record_for_rereview(
+                finding_id=f"f{i}", status="open", rule_id=f"R{i:03d}"
+            )
+            for i in range(3)
+        ]
+        rate = ConvergentLoop._calculate_convergence_rate(findings)
+        assert rate == 0.0
+
+    def test_partial_closed(self) -> None:
+        findings = [
+            _make_finding_record_for_rereview(finding_id="f1", status="closed", rule_id="R001"),
+            _make_finding_record_for_rereview(finding_id="f2", status="open", rule_id="R002"),
+            _make_finding_record_for_rereview(finding_id="f3", status="still_open", rule_id="R003"),
+            _make_finding_record_for_rereview(finding_id="f4", status="closed", rule_id="R004"),
+        ]
+        rate = ConvergentLoop._calculate_convergence_rate(findings)
+        assert rate == pytest.approx(0.5)
+
+    def test_zero_findings(self) -> None:
+        """Task 6.5: 0 findings → 收敛率 1.0。"""
+        rate = ConvergentLoop._calculate_convergence_rate([])
+        assert rate == 1.0
+
+
+class TestConvergenceRateThreshold:
+    """Tasks 6.2-6.4: 收敛率阈值判定。"""
+
+    @pytest.mark.asyncio
+    async def test_threshold_met_no_blocking(self, initialized_db_path: Any) -> None:
+        """Task 6.2: 收敛率 ≥ threshold 且无 blocking → converged。"""
+        story = _make_story(story_id="story-thresh")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            from ato.models.db import insert_findings_batch
+
+            prev = _make_finding_record_for_rereview(
+                story_id=story.story_id,
+                finding_id="f-sug-open",
+                severity="suggestion",
+                status="open",
+                rule_id="R001",
+                description="sug open",
+            )
+            await insert_findings_batch(db, [prev])
+        finally:
+            await db.close()
+
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, _sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
+
+        # Seed DB with additional closed findings for rate calculation
+        db = await get_connection(initialized_db_path)
+        try:
+            from ato.models.db import insert_findings_batch
+
+            closed_findings = [
+                _make_finding_record_for_rereview(
+                    story_id=story.story_id,
+                    finding_id=f"f-closed-{i}",
+                    severity="blocking",
+                    status="closed",
+                    rule_id=f"R10{i}",
+                    description=f"closed issue {i}",
+                )
+                for i in range(3)
+            ]
+            await insert_findings_batch(db, closed_findings)
+        finally:
+            await db.close()
+
+        result = await loop.run_rereview(story.story_id, 2, "/tmp/wt")
+        # rate = 3 closed / 4 total = 0.75 ≥ 0.5, no blocking open → converged
+        assert result.converged is True
+
+    @pytest.mark.asyncio
+    async def test_threshold_not_met(self, initialized_db_path: Any) -> None:
+        """Task 6.3: 收敛率 < threshold 即使无 blocking → 不收敛。"""
+        story = _make_story(story_id="story-below")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            from ato.models.db import insert_findings_batch
+
+            findings = [
+                _make_finding_record_for_rereview(
+                    story_id=story.story_id,
+                    finding_id="f-cl",
+                    severity="suggestion",
+                    status="closed",
+                    rule_id="R001",
+                    description="closed sug",
+                ),
+            ] + [
+                _make_finding_record_for_rereview(
+                    story_id=story.story_id,
+                    finding_id=f"f-open-{i}",
+                    severity="suggestion",
+                    status="open",
+                    rule_id=f"R10{i}",
+                    description=f"open sug {i}",
+                )
+                for i in range(4)
+            ]
+            await insert_findings_batch(db, findings)
+        finally:
+            await db.close()
+
+        rereview_findings = [
+            _make_finding(
+                severity="suggestion",
+                description=f"open sug {i}",
+                rule_id=f"R10{i}",
+            )
+            for i in range(4)
+        ]
+        parse_result = _make_parse_result(verdict="changes_requested", findings=rereview_findings)
+        loop, _sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
+
+        result = await loop.run_rereview(story.story_id, 2, "/tmp/wt")
+        # rate = 1/5 = 0.2 < 0.5, even though no blocking → not converged
+        assert result.converged is False
+
+    @pytest.mark.asyncio
+    async def test_threshold_met_but_open_blocking(self, initialized_db_path: Any) -> None:
+        """Task 6.4: 收敛率 ≥ threshold 但有 open blocking → 不收敛。"""
+        story = _make_story(story_id="story-block")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            from ato.models.db import insert_findings_batch
+
+            findings = [
+                _make_finding_record_for_rereview(
+                    story_id=story.story_id,
+                    finding_id=f"f-closed-{i}",
+                    severity="blocking",
+                    status="closed",
+                    rule_id=f"R00{i}",
+                    description=f"closed {i}",
+                )
+                for i in range(3)
+            ] + [
+                _make_finding_record_for_rereview(
+                    story_id=story.story_id,
+                    finding_id="f-open-block",
+                    severity="blocking",
+                    status="open",
+                    rule_id="R010",
+                    description="still blocking",
+                ),
+            ]
+            await insert_findings_batch(db, findings)
+        finally:
+            await db.close()
+
+        rereview_findings = [
+            _make_finding(severity="blocking", description="still blocking", rule_id="R010"),
+        ]
+        parse_result = _make_parse_result(verdict="changes_requested", findings=rereview_findings)
+        loop, _sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
+
+        result = await loop.run_rereview(story.story_id, 2, "/tmp/wt")
+        # rate = 3/4 = 0.75 ≥ 0.5 but blocking still open → not converged
+        assert result.converged is False
+
+
+class TestConvergenceRateStructlog:
+    """Task 6.6: structlog convergent_loop_round_complete 含 convergence_rate。"""
+
+    @pytest.mark.asyncio
+    async def test_convergence_rate_in_round_complete(self, initialized_db_path: Any) -> None:
+        captured: list[dict[str, Any]] = []
+        original_info = logger.info
+
+        def capture_info(event: str, **kw: Any) -> Any:
+            captured.append({"event": event, **kw})
+            return original_info(event, **kw)
+
+        story = _make_story(story_id="story-log-rate")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            from ato.models.db import insert_findings_batch
+
+            prev = _make_finding_record_for_rereview(
+                story_id=story.story_id,
+                finding_id="f-log1",
+                severity="blocking",
+                status="open",
+                rule_id="R001",
+                description="log issue",
+            )
+            await insert_findings_batch(db, [prev])
+        finally:
+            await db.close()
+
+        parse_result = _make_parse_result(
+            verdict="changes_requested",
+            findings=[_make_finding(severity="blocking", description="log issue", rule_id="R001")],
+        )
+        loop, _sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
+
+        import unittest.mock
+
+        with unittest.mock.patch.object(logger, "info", side_effect=capture_info):
+            await loop.run_rereview(story.story_id, 2, "/tmp/wt")
+
+        round_complete = [e for e in captured if e["event"] == "convergent_loop_round_complete"]
+        assert len(round_complete) == 1
+        assert "convergence_rate" in round_complete[0]
+        assert isinstance(round_complete[0]["convergence_rate"], float)
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3 — Escalation Payload / Finding Trajectory
+# ---------------------------------------------------------------------------
+
+
+class TestEscalationPayloadRoundSummaries:
+    """Task 7.1: escalation approval payload 含 round_summaries。"""
+
+    @pytest.mark.asyncio
+    async def test_payload_has_round_summaries(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+            ]
+        )
+        loop._get_remaining_blocking_count = AsyncMock(return_value=1)  # type: ignore[method-assign]
+
+        await loop.run_loop(story.story_id, "/tmp/wt")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 1
+
+        import json
+
+        payload = json.loads(escalations[0].payload or "{}")
+        assert "round_summaries" in payload
+        assert len(payload["round_summaries"]) == 3  # 3 rounds
+        assert payload["round_summaries"][0]["round"] == 1
+        assert payload["round_summaries"][1]["round"] == 2
+        assert payload["round_summaries"][2]["round"] == 3
+
+
+class TestEscalationPayloadUnresolvedFindings:
+    """Task 7.2: escalation approval payload 含 unresolved_findings 与 options。"""
+
+    @pytest.mark.asyncio
+    async def test_payload_has_unresolved_and_options(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            from ato.models.db import insert_findings_batch
+
+            finding = _make_finding_record_for_rereview(
+                story_id=story.story_id,
+                finding_id="f-unresolved",
+                severity="blocking",
+                status="open",
+                rule_id="R001",
+                description="unresolved issue",
+            )
+            await insert_findings_batch(db, [finding])
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        await loop._create_escalation_approval(story.story_id, 3, 1, round_summaries=[{"round": 1}])
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 1
+
+        import json
+
+        payload = json.loads(escalations[0].payload or "{}")
+        assert "unresolved_findings" in payload
+        assert len(payload["unresolved_findings"]) == 1
+        assert payload["unresolved_findings"][0]["finding_id"] == "f-unresolved"
+        assert payload["unresolved_findings"][0]["severity"] == "blocking"
+        assert payload["options"] == ["retry", "skip", "escalate"]
+        assert "final_convergence_rate" in payload
+
+
+class TestGetFindingTrajectory:
+    """Tasks 7.3-7.4: get_finding_trajectory 返回 first_seen_round / current_status。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_trajectory(self, initialized_db_path: Any) -> None:
+        """Task 7.3: 查询结果含 first_seen_round / current_status。"""
+        from ato.models.db import get_finding_trajectory, insert_findings_batch
+
+        story = _make_story(story_id="story-traj")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            findings = [
+                _make_finding_record_for_rereview(
+                    story_id=story.story_id,
+                    finding_id="f1",
+                    severity="blocking",
+                    status="closed",
+                    rule_id="R001",
+                    round_num=1,
+                    description="first issue",
+                ),
+                _make_finding_record_for_rereview(
+                    story_id=story.story_id,
+                    finding_id="f2",
+                    severity="suggestion",
+                    status="open",
+                    rule_id="R002",
+                    round_num=2,
+                    description="second issue",
+                ),
+            ]
+            await insert_findings_batch(db, findings)
+
+            trajectory = await get_finding_trajectory(db, story.story_id)
+        finally:
+            await db.close()
+
+        assert len(trajectory) == 2
+        assert trajectory[0]["finding_id"] == "f1"
+        assert trajectory[0]["first_seen_round"] == 1
+        assert trajectory[0]["current_status"] == "closed"
+        assert trajectory[1]["finding_id"] == "f2"
+        assert trajectory[1]["first_seen_round"] == 2
+        assert trajectory[1]["current_status"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_empty_story(self, initialized_db_path: Any) -> None:
+        """Task 7.4: 无 findings 时返回空列表。"""
+        from ato.models.db import get_finding_trajectory
+
+        story = _make_story(story_id="story-empty")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            trajectory = await get_finding_trajectory(db, story.story_id)
+        finally:
+            await db.close()
+
+        assert trajectory == []
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3 — 端到端集成测试: 5-finding 场景
+# ---------------------------------------------------------------------------
+
+
+class TestIntegrationFiveFindingConvergence:
+    """Task 4: 端到端 5-finding 场景 — ≤3 轮内收敛。
+
+    Round 1: F1-F4(blocking), F5(suggestion) → 5 findings → not converged
+    Round 2: F1-F3 closed, F4 still_open → rate=3/5=0.6≥0.5 but blocking → not converged
+    Round 3: F4 closed → rate=4/5=0.8≥0.5, no blocking → converged
+    """
+
+    @pytest.mark.asyncio
+    async def test_converges_in_3_rounds(self, initialized_db_path: Any) -> None:
+        story = _make_story(story_id="story-e2e-5f")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        # --- Round 1 findings (first review) ---
+        round1_findings = [
+            _make_finding(
+                severity="blocking",
+                description="F1 issue",
+                rule_id="F001",
+                file_path="src/a.py",
+            ),
+            _make_finding(
+                severity="blocking",
+                description="F2 issue",
+                rule_id="F002",
+                file_path="src/b.py",
+            ),
+            _make_finding(
+                severity="blocking",
+                description="F3 issue",
+                rule_id="F003",
+                file_path="src/c.py",
+            ),
+            _make_finding(
+                severity="blocking",
+                description="F4 issue",
+                rule_id="F004",
+                file_path="src/d.py",
+            ),
+            _make_finding(
+                severity="suggestion",
+                description="F5 issue",
+                rule_id="F005",
+                file_path="src/e.py",
+            ),
+        ]
+
+        # --- Round 2 re-review: only F4 reported ---
+        round2_findings = [
+            _make_finding(
+                severity="blocking",
+                description="F4 issue",
+                rule_id="F004",
+                file_path="src/d.py",
+            ),
+        ]
+
+        # --- Round 3 re-review: 0 findings ---
+        round3_findings: list[BmadFinding] = []
+
+        parse_results = [
+            _make_parse_result(verdict="changes_requested", findings=round1_findings),
+            _make_parse_result(verdict="changes_requested", findings=round2_findings),
+            _make_parse_result(verdict="approved", findings=round3_findings),
+        ]
+
+        loop, _sub, mock_bmad, _tq = _make_loop(initialized_db_path)
+        mock_bmad.parse = AsyncMock(side_effect=parse_results)
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        # Task 4.3: ≤3 轮内收敛
+        assert result.converged is True
+        assert result.round_num == 3
+
+        # Task 4.4: 所有 5 个 finding 最终 status=closed
+        db = await get_connection(initialized_db_path)
+        try:
+            all_findings = await get_findings_by_story(db, story.story_id)
+        finally:
+            await db.close()
+
+        assert len(all_findings) == 5
+        for f in all_findings:
+            assert f.status == "closed", f"Finding {f.finding_id} should be closed, got {f.status}"
+
+        # Task 4.5: escalation approval 未创建
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 0
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3 — Regression: duplicate dedup_hash must not inflate convergence rate
+# ---------------------------------------------------------------------------
+
+
+class TestConvergenceRateDedupRegression:
+    """重复 dedup_hash 不得膨胀收敛率分母/分子。"""
+
+    def test_duplicate_hash_does_not_inflate_rate(self) -> None:
+        """同一 dedup_hash 有 2 条 DB 行时，逻辑 finding 只算 1 个。"""
+        same_hash = compute_dedup_hash("src/foo.py", "R001", "blocking", "dup issue")
+        findings = [
+            _make_finding_record_for_rereview(
+                story_id="s-dup",
+                finding_id="f-dup-1",
+                severity="blocking",
+                description="dup issue",
+                rule_id="R001",
+                status="closed",
+            ),
+            _make_finding_record_for_rereview(
+                story_id="s-dup",
+                finding_id="f-dup-2",
+                severity="blocking",
+                description="dup issue",
+                rule_id="R001",
+                status="closed",
+            ),
+        ]
+        # 两条记录的 dedup_hash 应相同
+        assert findings[0].dedup_hash == findings[1].dedup_hash == same_hash
+        rate = ConvergentLoop._calculate_convergence_rate(findings)
+        # 逻辑 finding 只有 1 个且已关闭 → 收敛率 = 1.0
+        assert rate == 1.0
+
+    def test_duplicate_hash_one_open_counts_as_open(self) -> None:
+        """同 hash 下一条 closed + 一条 open → 该逻辑 finding 视为未关闭。"""
+        findings = [
+            _make_finding_record_for_rereview(
+                story_id="s-dup2",
+                finding_id="f-dup-a",
+                severity="blocking",
+                description="dup issue 2",
+                rule_id="R002",
+                status="closed",
+            ),
+            _make_finding_record_for_rereview(
+                story_id="s-dup2",
+                finding_id="f-dup-b",
+                severity="blocking",
+                description="dup issue 2",
+                rule_id="R002",
+                status="open",
+            ),
+        ]
+        assert findings[0].dedup_hash == findings[1].dedup_hash
+        rate = ConvergentLoop._calculate_convergence_rate(findings)
+        # 该逻辑 finding 仍有 open → 收敛率 = 0.0
+        assert rate == 0.0
+
+    def test_mixed_hashes_with_duplicates(self) -> None:
+        """2 个不同逻辑 finding，其中一个有重复行。"""
+        findings = [
+            # 逻辑 finding A: 2 条 DB 行，均 closed
+            _make_finding_record_for_rereview(
+                story_id="s-mix",
+                finding_id="f-a1",
+                severity="blocking",
+                description="issue A",
+                rule_id="RA",
+                status="closed",
+            ),
+            _make_finding_record_for_rereview(
+                story_id="s-mix",
+                finding_id="f-a2",
+                severity="blocking",
+                description="issue A",
+                rule_id="RA",
+                status="closed",
+            ),
+            # 逻辑 finding B: 1 条 DB 行，open
+            _make_finding_record_for_rereview(
+                story_id="s-mix",
+                finding_id="f-b1",
+                severity="suggestion",
+                description="issue B",
+                rule_id="RB",
+                status="open",
+            ),
+        ]
+        rate = ConvergentLoop._calculate_convergence_rate(findings)
+        # 2 个逻辑 finding：A closed, B open → 1/2 = 0.5
+        assert rate == 0.5
+
+    @pytest.mark.asyncio
+    async def test_first_review_dedup_on_persist(self, initialized_db_path: Any) -> None:
+        """首轮 review parser 返回重复 finding 时只入库一条。"""
+        story = _make_story(story_id="story-dedup-persist")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        # Parser 返回 2 条相同 finding（同 file_path + rule_id + severity + description）
+        dup_finding = _make_finding(severity="blocking", description="same desc", rule_id="R-DUP")
+        parse_result = _make_parse_result(
+            verdict="changes_requested",
+            findings=[dup_finding, dup_finding],
+        )
+        loop, _sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
+        await loop.run_first_review(story.story_id, "/tmp/wt")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            all_findings = await get_findings_by_story(db, story.story_id)
+        finally:
+            await db.close()
+
+        # 只应入库 1 条
+        assert len(all_findings) == 1

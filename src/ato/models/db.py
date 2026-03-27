@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 import structlog
@@ -1020,6 +1021,30 @@ async def get_open_findings(
     )
     rows = await cursor.fetchall()
     return [_row_to_finding(r) for r in rows]
+
+
+async def get_finding_trajectory(
+    db: aiosqlite.Connection,
+    story_id: str,
+) -> list[dict[str, Any]]:
+    """返回每个 finding 的 first_seen_round + current_status 摘要。
+
+    Story 3.3: MVP 合同——不做逐轮插值，只返回当前 schema 能可靠表达的摘要。
+    排序：round_num ASC, file_path ASC, rule_id ASC。
+    """
+    findings = await get_findings_by_story(db, story_id)
+    return [
+        {
+            "finding_id": f.finding_id,
+            "file_path": f.file_path,
+            "rule_id": f.rule_id,
+            "severity": f.severity,
+            "description": f.description,
+            "first_seen_round": f.round_num,
+            "current_status": f.status,
+        }
+        for f in sorted(findings, key=lambda f: (f.round_num, f.file_path, f.rule_id))
+    ]
 
 
 async def update_finding_status(

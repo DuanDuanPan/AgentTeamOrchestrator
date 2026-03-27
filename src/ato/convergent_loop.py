@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -20,7 +21,6 @@ import structlog
 from ato.adapters.bmad_adapter import record_parse_failure
 from ato.config import ConvergentLoopConfig
 from ato.models.schemas import (
-    ApprovalRecord,
     BmadFinding,
     BmadSkillType,
     ConvergentLoopResult,
@@ -107,10 +107,28 @@ class ConvergentLoop:
         """
         max_rounds = self._config.max_rounds
 
+        # Story 3.3: 累积每轮摘要供 escalation payload 使用
+        round_summaries: list[dict[str, Any]] = []
+
+        def _append_summary(r: ConvergentLoopResult) -> None:
+            round_summaries.append(
+                {
+                    "round": r.round_num,
+                    "findings_total": r.findings_total,
+                    "open_count": r.open_count,
+                    "closed_count": r.closed_count,
+                    "new_count": r.new_count,
+                    "blocking_count": r.blocking_count,
+                    "suggestion_count": r.suggestion_count,
+                }
+            )
+
         # 第 1 轮：全量 review
         result = await self.run_first_review(
             story_id, worktree_path, artifact_payload=artifact_payload
         )
+        _append_summary(result)
+
         if result.converged:
             self._log_termination_summary(
                 story_id=story_id,
@@ -137,7 +155,12 @@ class ConvergentLoop:
         # max_rounds=1：首轮 review 未收敛时直接 escalation（不再进入 fix / rereview）
         if max_rounds == 1:
             remaining = await self._get_remaining_blocking_count(story_id)
-            await self._create_escalation_approval(story_id, 1, remaining)
+            await self._create_escalation_approval(
+                story_id,
+                1,
+                remaining,
+                round_summaries=round_summaries,
+            )
             self._log_termination_summary(
                 story_id=story_id,
                 total_rounds=1,
@@ -152,6 +175,8 @@ class ConvergentLoop:
             fix_round = rereview_round - 1
             await self.run_fix_dispatch(story_id, fix_round, worktree_path)
             result = await self.run_rereview(story_id, rereview_round, worktree_path)
+            _append_summary(result)
+
             if result.converged:
                 self._log_termination_summary(
                     story_id=story_id,
@@ -174,7 +199,12 @@ class ConvergentLoop:
         # 达到 max_rounds 仍未收敛 → 强制终止 + escalation
         # --- Finding 2 fix: 从 DB 获取准确的 open blocking count ---
         remaining = await self._get_remaining_blocking_count(story_id)
-        await self._create_escalation_approval(story_id, max_rounds, remaining)
+        await self._create_escalation_approval(
+            story_id,
+            max_rounds,
+            remaining,
+            round_summaries=round_summaries,
+        )
         self._log_termination_summary(
             story_id=story_id,
             total_rounds=max_rounds,
@@ -193,6 +223,31 @@ class ConvergentLoop:
         """
         return not result.converged and result.findings_total == 0
 
+    @staticmethod
+    def _calculate_convergence_rate(findings: Sequence[FindingRecord]) -> float:
+        """基于当前已持久化的 findings snapshot 计算 closed / total。
+
+        按 dedup_hash 逻辑去重：同一 dedup_hash 可能对应多条 DB 行
+        （首轮 parser 返回重复 finding 或跨轮次 new finding），
+        只要该 hash 下**任一**记录仍为 open/still_open 就视为未关闭。
+
+        当 findings 为空时返回 1.0（无 finding = 自然收敛）。
+        """
+        if not findings:
+            return 1.0
+        # 按 dedup_hash 分组，取每组的"最差"状态
+        by_hash: dict[str, bool] = {}  # hash → is_closed
+        for f in findings:
+            if f.dedup_hash not in by_hash:
+                by_hash[f.dedup_hash] = f.status == "closed"
+            else:
+                # 任一行未关闭 → 该逻辑 finding 未关闭
+                if f.status != "closed":
+                    by_hash[f.dedup_hash] = False
+        total = len(by_hash)
+        closed = sum(1 for is_closed in by_hash.values() if is_closed)
+        return closed / total
+
     async def _get_remaining_blocking_count(self, story_id: str) -> int:
         """从 DB 查询当前实际 open blocking findings 数量。
 
@@ -208,22 +263,62 @@ class ConvergentLoop:
         finally:
             await db.close()
 
+    async def _build_escalation_payload(
+        self,
+        db: Any,
+        *,
+        story_id: str,
+        rounds_completed: int,
+        remaining_blocking: int,
+        round_summaries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """组装 escalation payload：round_summaries + unresolved_findings + options。"""
+        from ato.models.db import get_findings_by_story, get_open_findings
+
+        all_findings = await get_findings_by_story(db, story_id)
+        unresolved = await get_open_findings(db, story_id)
+        convergence_rate = self._calculate_convergence_rate(all_findings)
+        unresolved_findings = [
+            {
+                "finding_id": f.finding_id,
+                "file_path": f.file_path,
+                "rule_id": f.rule_id,
+                "severity": f.severity,
+                "description": f.description,
+                "first_seen_round": f.round_num,
+                "current_status": f.status,
+            }
+            for f in unresolved
+        ]
+        return {
+            "rounds_completed": rounds_completed,
+            "open_blocking_count": remaining_blocking,
+            "final_convergence_rate": convergence_rate,
+            "round_summaries": round_summaries,
+            "unresolved_findings": unresolved_findings,
+            "options": ["retry", "skip", "escalate"],
+        }
+
     async def _create_escalation_approval(
         self,
         story_id: str,
         rounds_completed: int,
         remaining_blocking: int,
+        *,
+        round_summaries: list[dict[str, Any]] | None = None,
     ) -> None:
         """创建 convergent_loop_escalation approval 并通知操作者。
 
-        内部通过 get_connection(self._db_path) 获取 db 连接，
-        与其他方法一致。幂等：同一 story 若已有 pending escalation 则跳过。
+        Story 3.3: 复用 create_approval() 统一 API，payload 包含
+        round_summaries / unresolved_findings / options。
+        幂等：同一 story 若已有 pending escalation 则跳过。
         """
-        from ato.models.db import get_connection, insert_approval
+        from ato.approval_helpers import create_approval
+        from ato.models.db import get_connection
 
         db = await get_connection(self._db_path)
         try:
-            # --- Finding 3 fix: 幂等检查 ---
+            # --- 幂等检查 ---
             cursor = await db.execute(
                 "SELECT 1 FROM approvals WHERE story_id = ? AND approval_type = ? AND status = ?",
                 (story_id, "convergent_loop_escalation", "pending"),
@@ -236,20 +331,22 @@ class ConvergentLoop:
                 )
                 return
 
-            approval = ApprovalRecord(
-                approval_id=str(uuid.uuid4()),
+            # --- 构建增强 payload ---
+            payload_dict = await self._build_escalation_payload(
+                db,
+                story_id=story_id,
+                rounds_completed=rounds_completed,
+                remaining_blocking=remaining_blocking,
+                round_summaries=round_summaries or [],
+            )
+
+            approval = await create_approval(
+                db,
                 story_id=story_id,
                 approval_type="convergent_loop_escalation",
-                status="pending",
-                payload=json.dumps(
-                    {
-                        "rounds_completed": rounds_completed,
-                        "open_blocking_count": remaining_blocking,
-                    }
-                ),
-                created_at=datetime.now(tz=UTC),
+                payload_dict=payload_dict,
+                nudge=self._nudge,
             )
-            await insert_approval(db, approval)
         finally:
             await db.close()
 
@@ -260,9 +357,6 @@ class ConvergentLoop:
             open_blocking_count=remaining_blocking,
             approval_id=approval.approval_id,
         )
-
-        if self._nudge is not None:
-            self._nudge.notify()
 
     def _log_termination_summary(
         self,
@@ -399,24 +493,33 @@ class ConvergentLoop:
             )
 
         # --- Convert BmadFinding → FindingRecord and persist ---
+        # 按 dedup_hash 去重：首轮 parser 可能返回同一逻辑 finding 的多条
+        # 输出，只入库第一条（与 re-review 的 seen_new_hashes 去重对齐）。
         now = datetime.now(tz=UTC)
-        records = [
-            FindingRecord(
-                finding_id=str(uuid.uuid4()),
-                story_id=story_id,
-                round_num=round_num,
-                severity=f.severity,
-                description=f.description,
-                status="open",
-                file_path=f.file_path,
-                rule_id=f.rule_id,
-                dedup_hash=f.dedup_hash
-                or compute_dedup_hash(f.file_path, f.rule_id, f.severity, f.description),
-                line_number=f.line,
-                created_at=now,
+        seen_hashes: set[str] = set()
+        records: list[FindingRecord] = []
+        for f in parse_result.findings:
+            h = f.dedup_hash or compute_dedup_hash(
+                f.file_path, f.rule_id, f.severity, f.description
             )
-            for f in parse_result.findings
-        ]
+            if h in seen_hashes:
+                continue
+            seen_hashes.add(h)
+            records.append(
+                FindingRecord(
+                    finding_id=str(uuid.uuid4()),
+                    story_id=story_id,
+                    round_num=round_num,
+                    severity=f.severity,
+                    description=f.description,
+                    status="open",
+                    file_path=f.file_path,
+                    rule_id=f.rule_id,
+                    dedup_hash=h,
+                    line_number=f.line,
+                    created_at=now,
+                )
+            )
 
         db = await get_connection(self._db_path)
         try:
@@ -811,6 +914,7 @@ class ConvergentLoop:
         """
         from ato.models.db import (
             get_connection,
+            get_findings_by_story,
             get_open_findings,
             insert_findings_batch,
             update_finding_status,
@@ -908,6 +1012,10 @@ class ConvergentLoop:
             if match_result.new_findings:
                 await insert_findings_batch(db, match_result.new_findings)
 
+            # --- Story 3.3: 收敛率计算（在本轮写入后） ---
+            all_findings = await get_findings_by_story(db, story_id)
+            convergence_rate = self._calculate_convergence_rate(all_findings)
+
             # --- Blocking threshold escalation ---
             # 传入实际 open blocking 总数，因为 still_open findings
             # 保留原 round_num，按当前轮次查 DB 会漏算它们。
@@ -932,7 +1040,7 @@ class ConvergentLoop:
         # Current open = still_open + new
         current_open_count = len(match_result.still_open_ids) + len(match_result.new_findings)
 
-        # --- structlog: round complete ---
+        # --- structlog: round complete (Story 3.3: +convergence_rate) ---
         logger.info(
             "convergent_loop_round_complete",
             story_id=story_id,
@@ -944,17 +1052,20 @@ class ConvergentLoop:
             still_open_count=len(match_result.still_open_ids),
             blocking_count=blocking_count,
             suggestion_count=suggestion_count,
+            convergence_rate=convergence_rate,
         )
 
-        # --- Convergence evaluation ---
+        # --- Convergence evaluation (Story 3.3: +convergence_threshold) ---
         # Converged when: no open/still_open blocking findings remain
+        # AND convergence_rate >= threshold
         has_blocking_still_open = any(
             f.severity == "blocking"
             for f in previous_findings
             if f.finding_id in match_result.still_open_ids
         )
         has_blocking_new = any(f.severity == "blocking" for f in match_result.new_findings)
-        converged = not has_blocking_still_open and not has_blocking_new
+        no_open_blocking = not has_blocking_still_open and not has_blocking_new
+        converged = no_open_blocking and convergence_rate >= self._config.convergence_threshold
 
         if converged:
             logger.info(
