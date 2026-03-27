@@ -303,9 +303,18 @@ class Orchestrator:
         # 恢复检测
         db = await get_connection(self._db_path)
         try:
-            await self._detect_recovery_mode(db)
+            recovery_result = await self._detect_recovery_mode(db)
         finally:
             await db.close()
+
+        # 渲染恢复摘要（stderr，不阻塞后续启动）
+        if recovery_result is not None:
+            from ato.recovery_summary import render_recovery_summary
+
+            try:
+                await render_recovery_summary(recovery_result, self._db_path)
+            except Exception:
+                logger.warning("recovery_summary_render_failed", exc_info=True)
 
         logger.info("orchestrator_started", polling_interval=self._settings.polling_interval)
 

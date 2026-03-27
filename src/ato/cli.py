@@ -1943,3 +1943,415 @@ async def _uat_async(
         typer.echo(
             f"✅ Story '{story_id}' UAT 未通过，退回 fix 阶段重新进入质量门控。原因: {reason}"
         )
+
+
+# ---------------------------------------------------------------------------
+# ato history — 执行历史查看 (Story 5.2)
+# ---------------------------------------------------------------------------
+
+
+@app.command("history")
+def history_command(
+    story_id: str = typer.Argument(help="要查看历史的 Story ID"),
+    db_path: Path = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite 数据库路径（默认 .ato/state.db）",
+    ),
+) -> None:
+    """查看某个 Story 的完整执行历史时间轴。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            _format_cli_error(
+                "数据库文件不存在",
+                "运行 `ato init` 初始化项目",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
+
+    try:
+        asyncio.run(_history_async(story_id, resolved_db))
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        logger.error("history_command_failed", error=str(exc))
+        typer.echo(
+            _format_cli_error(str(exc), "检查数据库状态或联系管理员"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR) from exc
+
+
+async def _history_async(story_id: str, db_path: Path) -> None:
+    """ato history 的异步实现。"""
+    from datetime import UTC, datetime
+
+    from rich.table import Table
+
+    from ato.models.db import get_connection, get_story, get_tasks_by_story
+
+    db = await get_connection(db_path)
+    try:
+        story = await get_story(db, story_id)
+        if story is None:
+            typer.echo(
+                _format_cli_error(
+                    f"Story 不存在: {story_id}",
+                    "运行 `ato batch status` 查看可用 stories",
+                ),
+                err=True,
+            )
+            raise typer.Exit(code=EXIT_ERROR)
+
+        tasks = await get_tasks_by_story(db, story_id)
+    finally:
+        await db.close()
+
+    con = Console()
+
+    if not tasks:
+        con.print(f"Story {story_id} 暂无执行记录。")
+        return
+
+    con.print()
+    con.print(Text(f"Story {story_id} 执行历史", style="bold"))
+    con.rule()
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("时间")
+    table.add_column("Phase")
+    table.add_column("Role")
+    table.add_column("Tool")
+    table.add_column("状态")
+    table.add_column("Artifact")
+    table.add_column("耗时")
+    table.add_column("成本")
+
+    now = datetime.now(tz=UTC)
+    total_duration_ms = 0
+    total_cost = 0.0
+    task_count = 0
+
+    for task in tasks:
+        task_count += 1
+
+        # 时间格式化
+        time_str = _format_task_time(task.started_at, now)
+
+        # 状态颜色图标
+        status_display = _format_task_status(task.status)
+
+        # artifact 提取
+        artifact = _extract_artifact(task)
+
+        # 耗时
+        duration_str = "-"
+        if task.duration_ms is not None:
+            total_duration_ms += task.duration_ms
+            duration_str = _format_duration(task.duration_ms)
+
+        # 成本
+        cost_str = "-"
+        if task.cost_usd is not None:
+            total_cost += task.cost_usd
+            cost_str = f"${task.cost_usd:.2f}"
+
+        table.add_row(
+            time_str,
+            task.phase,
+            task.role,
+            task.cli_tool,
+            status_display,
+            artifact,
+            duration_str,
+            cost_str,
+        )
+
+    # 汇总行
+    table.add_section()
+    table.add_row(
+        "汇总",
+        f"{task_count} 个任务",
+        "",
+        "",
+        "",
+        "",
+        _format_duration(total_duration_ms) if total_duration_ms > 0 else "-",
+        f"${total_cost:.2f}" if total_cost > 0 else "-",
+    )
+
+    con.print(table)
+
+
+def _format_task_time(started_at: datetime | None, now: datetime) -> str:
+    """格式化任务时间：同日 HH:MM:SS，跨日 MM-DD HH:MM。"""
+    if started_at is None:
+        return "-"
+    if started_at.date() == now.date():
+        return started_at.strftime("%H:%M:%S")
+    return started_at.strftime("%m-%d %H:%M")
+
+
+def _format_task_status(status: str) -> str:
+    """任务状态带颜色图标。"""
+    status_map = {
+        "completed": "[green]✔[/green]",
+        "failed": "[red]✖[/red]",
+        "running": "[cyan]●[/cyan]",
+        "pending": "○",
+        "paused": "⏸",
+    }
+    return status_map.get(status, status)
+
+
+def _extract_artifact(task: object) -> str:
+    """从 task 提取 artifact 展示字符串。
+
+    优先读取 context_briefing.artifacts_produced，fallback 到 expected_artifact。
+    """
+    # 使用 getattr 以支持 TaskRecord 和测试 mock
+    context_briefing = getattr(task, "context_briefing", None)
+    if context_briefing:
+        try:
+            data = json.loads(context_briefing)
+            artifacts = data.get("artifacts_produced", [])
+            if artifacts:
+                return ", ".join(artifacts)
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass
+
+    expected = getattr(task, "expected_artifact", None)
+    return expected or "-"
+
+
+def _format_duration(ms: int) -> str:
+    """将毫秒格式化为人可读的耗时字符串。"""
+    if ms < 1000:
+        return f"{ms}ms"
+    seconds = ms // 1000
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    remaining_seconds = seconds % 60
+    return f"{minutes}m{remaining_seconds:02d}s"
+
+
+# ---------------------------------------------------------------------------
+# ato cost report — 成本报告 (Story 5.2)
+# ---------------------------------------------------------------------------
+
+cost_app = typer.Typer(help="成本管理")
+app.add_typer(cost_app, name="cost")
+
+
+@cost_app.command("report")
+def cost_report_command(
+    story: str | None = typer.Option(
+        None,
+        "--story",
+        help="按 Story 过滤，查看该 Story 的详细成本明细",
+    ),
+    db_path: Path = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite 数据库路径（默认 .ato/state.db）",
+    ),
+) -> None:
+    """生成成本报告：总览或按 Story 详情。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            _format_cli_error(
+                "数据库文件不存在",
+                "运行 `ato init` 初始化项目",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
+
+    try:
+        asyncio.run(_cost_report_async(story, resolved_db))
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        logger.error("cost_report_failed", error=str(exc))
+        typer.echo(
+            _format_cli_error(str(exc), "检查数据库状态或联系管理员"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR) from exc
+
+
+async def _cost_report_async(story_id: str | None, db_path: Path) -> None:
+    """ato cost report 的异步实现。"""
+    from ato.models.db import get_connection
+
+    db = await get_connection(db_path)
+    try:
+        if story_id is not None:
+            # Story 详情模式
+            await _render_cost_story_detail(db, story_id)
+        else:
+            # 总览模式
+            await _render_cost_overview(db)
+    finally:
+        await db.close()
+
+
+async def _render_cost_overview(db: object) -> None:
+    """渲染成本报告总览：时间范围汇总 + 按 Story 明细。"""
+    from datetime import UTC, datetime, timedelta
+
+    import aiosqlite
+    from rich.table import Table
+
+    from ato.models.db import get_cost_by_period, get_cost_by_story, get_cost_summary
+
+    assert isinstance(db, aiosqlite.Connection)
+
+    now = datetime.now(tz=UTC)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # 本周起始（周一）
+    week_start = today_start - timedelta(days=today_start.weekday())
+
+    today_summary = await get_cost_by_period(db, today_start)
+    week_summary = await get_cost_by_period(db, week_start)
+    total_summary = await get_cost_summary(db)
+
+    con = Console()
+
+    # 检查是否有数据
+    if total_summary["call_count"] == 0:
+        con.print("暂无成本数据。运行 story 后将自动记录。")
+        return
+
+    con.print()
+    con.print(Text("成本报告", style="bold"))
+    con.rule()
+    con.print()
+
+    # 表 1：时间范围汇总
+    con.print(Text("时间范围汇总", style="bold"))
+    period_table = Table(show_header=True, header_style="bold")
+    period_table.add_column("时间范围")
+    period_table.add_column("总成本", justify="right")
+    period_table.add_column("输入 Tokens", justify="right")
+    period_table.add_column("输出 Tokens", justify="right")
+    period_table.add_column("调用次数", justify="right")
+
+    for label, summary in [
+        ("今日", today_summary),
+        ("本周", week_summary),
+        ("全部", total_summary),
+    ]:
+        period_table.add_row(
+            label,
+            f"${summary['total_cost_usd']:.2f}",
+            str(summary["total_input_tokens"]),
+            str(summary["total_output_tokens"]),
+            str(summary["call_count"]),
+        )
+
+    con.print(period_table)
+    con.print()
+
+    # 表 2：按 Story 明细
+    story_costs = await get_cost_by_story(db)
+    if story_costs:
+        con.print(Text("按 Story 明细", style="bold"))
+        story_table = Table(show_header=True, header_style="bold")
+        story_table.add_column("Story")
+        story_table.add_column("总成本", justify="right")
+        story_table.add_column("调用次数", justify="right")
+
+        for entry in story_costs:
+            story_table.add_row(
+                str(entry["story_id"]),
+                f"${entry['total_cost_usd']:.2f}",
+                str(entry["call_count"]),
+            )
+
+        con.print(story_table)
+
+
+async def _render_cost_story_detail(db: object, story_id: str) -> None:
+    """渲染单个 Story 的详细成本明细。"""
+    import aiosqlite
+    from rich.table import Table
+
+    from ato.models.db import get_cost_logs_by_story
+
+    assert isinstance(db, aiosqlite.Connection)
+
+    records = await get_cost_logs_by_story(db, story_id)
+    con = Console()
+
+    if not records:
+        con.print(f"Story '{story_id}' 暂无成本数据。运行 story 后将自动记录。")
+        return
+
+    con.print()
+    con.print(Text(f"Story {story_id} 成本明细", style="bold"))
+    con.rule()
+
+    # 检测是否有 cache_read_input_tokens 数据
+    has_cache_tokens = any(r.cache_read_input_tokens > 0 for r in records)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("时间")
+    table.add_column("Phase")
+    table.add_column("Role")
+    table.add_column("Tool")
+    table.add_column("Model")
+    table.add_column("Input Tokens", justify="right")
+    table.add_column("Output Tokens", justify="right")
+    if has_cache_tokens:
+        table.add_column("Cache Read", justify="right")
+    table.add_column("Cost USD", justify="right")
+
+    total_cost = 0.0
+    total_input = 0
+    total_output = 0
+    total_cache_read = 0
+
+    for record in records:
+        total_cost += record.cost_usd
+        total_input += record.input_tokens
+        total_output += record.output_tokens
+        total_cache_read += record.cache_read_input_tokens
+
+        time_str = record.created_at.strftime("%m-%d %H:%M")
+
+        row: list[str] = [
+            time_str,
+            record.phase,
+            record.role or "-",
+            record.cli_tool,
+            record.model or "-",
+            str(record.input_tokens),
+            str(record.output_tokens),
+        ]
+        if has_cache_tokens:
+            row.append(str(record.cache_read_input_tokens))
+        row.append(f"${record.cost_usd:.2f}")
+        table.add_row(*row)
+
+    # 汇总行
+    summary_row: list[str] = [
+        "汇总",
+        f"{len(records)} 条记录",
+        "",
+        "",
+        "",
+        str(total_input),
+        str(total_output),
+    ]
+    if has_cache_tokens:
+        summary_row.append(str(total_cache_read))
+    summary_row.append(f"${total_cost:.2f}")
+    table.add_section()
+    table.add_row(*summary_row)
+
+    con.print(table)

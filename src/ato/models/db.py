@@ -376,9 +376,12 @@ async def get_tasks_by_story(
     db: aiosqlite.Connection,
     story_id: str,
 ) -> list[TaskRecord]:
-    """查询某个 story 下的所有 tasks。"""
+    """查询某个 story 下的所有 tasks，按 started_at 稳定排序。
+
+    排序策略：started_at 非 NULL 的按时间正序，NULL 的放最后，tie-breaker 用 rowid。
+    """
     cursor = await db.execute(
-        "SELECT * FROM tasks WHERE story_id = ? ORDER BY rowid",
+        "SELECT * FROM tasks WHERE story_id = ? ORDER BY started_at IS NULL, started_at, rowid",
         (story_id,),
     )
     rows = await cursor.fetchall()
@@ -928,6 +931,89 @@ async def get_cost_summary(
         "total_output_tokens": int(row[2]),
         "call_count": int(row[3]),
     }
+
+
+async def get_cost_by_period(
+    db: aiosqlite.Connection,
+    since: datetime,
+) -> dict[str, float | int]:
+    """按时间段聚合成本（since 之后的所有 cost_log）。
+
+    Returns:
+        包含 total_cost_usd, total_input_tokens, total_output_tokens, call_count 的字典。
+    """
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(cost_usd), 0), "
+        "COALESCE(SUM(input_tokens), 0), "
+        "COALESCE(SUM(output_tokens), 0), "
+        "COUNT(*) "
+        "FROM cost_log WHERE created_at >= ?",
+        (_dt_to_iso(since),),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    return {
+        "total_cost_usd": float(row[0]),
+        "total_input_tokens": int(row[1]),
+        "total_output_tokens": int(row[2]),
+        "call_count": int(row[3]),
+    }
+
+
+async def get_cost_by_story(
+    db: aiosqlite.Connection,
+    since: datetime | None = None,
+) -> list[dict[str, object]]:
+    """按 story 聚合成本。
+
+    Args:
+        db: 活跃的 aiosqlite 连接。
+        since: 可选时间下界，仅聚合该时间之后的记录。
+
+    Returns:
+        每个 story 一条 dict: {story_id, total_cost_usd, call_count}。
+    """
+    if since is not None:
+        cursor = await db.execute(
+            "SELECT story_id, COALESCE(SUM(cost_usd), 0), COUNT(*) "
+            "FROM cost_log WHERE created_at >= ? "
+            "GROUP BY story_id ORDER BY SUM(cost_usd) DESC",
+            (_dt_to_iso(since),),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT story_id, COALESCE(SUM(cost_usd), 0), COUNT(*) "
+            "FROM cost_log GROUP BY story_id ORDER BY SUM(cost_usd) DESC",
+        )
+    rows = await cursor.fetchall()
+    return [
+        {
+            "story_id": row[0],
+            "total_cost_usd": float(row[1]),
+            "call_count": int(row[2]),
+        }
+        for row in rows
+    ]
+
+
+async def get_cost_logs_by_story(
+    db: aiosqlite.Connection,
+    story_id: str,
+) -> list[CostLogRecord]:
+    """获取某个 story 的全部 cost_log 记录，按创建时间排序。"""
+    cursor = await db.execute(
+        "SELECT * FROM cost_log WHERE story_id = ? ORDER BY created_at",
+        (story_id,),
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_cost_log(r) for r in rows]
+
+
+def _row_to_cost_log(row: aiosqlite.Row) -> CostLogRecord:
+    """SQLite Row → CostLogRecord。"""
+    data = dict(row)
+    data["created_at"] = _iso_to_dt(data["created_at"])
+    return CostLogRecord.model_validate(data)
 
 
 # ---------------------------------------------------------------------------
