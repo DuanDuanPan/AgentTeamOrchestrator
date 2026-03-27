@@ -161,6 +161,39 @@ ApprovalCard {
     text-style: italic;
 }
 
+/* ===== ExceptionApprovalPanel (Story 6.3b) ===== */
+
+ExceptionApprovalPanel {
+    min-height: 8;
+    padding: 1;
+    border: solid $surface;
+}
+
+.exception-approval-high {
+    border: solid $error;
+}
+
+.exception-approval-medium {
+    border: solid $warning;
+}
+
+/* 左面板异常审批行样式 (AC4) */
+
+.approval-exception-row {
+    height: 1;
+}
+
+.approval-exception-high {
+    background: $error 15%;
+}
+
+/* 数字键选项高亮 */
+
+.exception-approval-option {
+    color: $info;
+    text-style: bold;
+}
+
 /* ===== 空状态 (Story 6.2b) ===== */
 
 .empty-state {

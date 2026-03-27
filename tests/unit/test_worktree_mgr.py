@@ -877,7 +877,7 @@ class TestContinueRebase:
 
         proc = _make_proc_mock(returncode=0)
         with patch("ato.worktree_mgr.asyncio.create_subprocess_exec", return_value=proc):
-            success, stderr = await mgr.continue_rebase("story-1")
+            success, _stderr = await mgr.continue_rebase("story-1")
 
         assert success is True
 
