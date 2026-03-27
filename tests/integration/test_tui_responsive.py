@@ -294,7 +294,6 @@ async def test_number_keys_switch_tabs_active_pane(tui_db_path: Path) -> None:
 async def test_tab_mode_shows_data(tui_db_with_data: Path) -> None:
     """Tab 模式下数据正确显示在各 TabPane 中。"""
     from textual.containers import VerticalScroll
-    from textual.widgets import Static
 
     app = ATOApp(db_path=tui_db_with_data)
     async with app.run_test(size=(120, 40)):
@@ -302,8 +301,9 @@ async def test_tab_mode_shows_data(tui_db_with_data: Path) -> None:
         assert app.pending_approvals == 1
 
         dashboard = app.query_one(DashboardScreen)
-        approvals = dashboard.query_one("#tab-approvals-content", Static)
-        assert "1" in str(approvals.render())
+        # [1]审批 Tab 现在用 VerticalScroll + ApprovalCard / Static
+        tab_approvals = dashboard.query_one("#tab-approvals-container", VerticalScroll)
+        assert len(tab_approvals.children) >= 1
 
         # [2]Stories Tab 现在用 VerticalScroll + StoryStatusLine，验证有子 widget
         tab_list = dashboard.query_one("#tab-story-list-container", VerticalScroll)

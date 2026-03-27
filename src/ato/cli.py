@@ -22,7 +22,7 @@ from ato.models.db import get_connection, get_story
 from ato.models.schemas import (
     APPROVAL_DEFAULT_VALID_OPTIONS as _DEFAULT_VALID_OPTIONS,
 )
-from ato.models.schemas import CheckResult, ContextBriefing, StoryRecord
+from ato.models.schemas import APPROVAL_TYPE_ICONS, CheckResult, ContextBriefing, StoryRecord
 from ato.preflight import run_preflight
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
@@ -1299,66 +1299,17 @@ async def _submit_async(
 # ato approvals — 审批队列查看
 # ---------------------------------------------------------------------------
 
-# 审批类型图标映射
-_APPROVAL_TYPE_ICONS: dict[str, str] = {
-    "merge_authorization": "🔀",
-    "session_timeout": "⏱",
-    "crash_recovery": "↩",
-    "blocking_abnormal": "⚠",
-    "budget_exceeded": "💰",
-    "regression_failure": "✖",
-    "convergent_loop_escalation": "🔄",
-    "batch_confirmation": "📦",
-    "timeout": "⏳",
-    "precommit_failure": "🔧",
-    "rebase_conflict": "⚡",
-    "needs_human_review": "👁",
-}
+_APPROVAL_TYPE_ICONS = APPROVAL_TYPE_ICONS
 
 
 def _approval_summary(approval_type: str, payload: str | None) -> str:
-    """从 approval_type + payload 生成确定性摘要。"""
-    payload_dict: dict[str, object] = {}
-    if payload:
-        with contextlib.suppress(json.JSONDecodeError, TypeError):
-            payload_dict = json.loads(payload)
+    """从 approval_type + payload 生成确定性摘要。
 
-    templates: dict[str, str] = {
-        "merge_authorization": "Merge 授权请求",
-        "session_timeout": "Interactive session 超时",
-        "crash_recovery": "崩溃恢复决策",
-        "blocking_abnormal": "Blocking 异常数量超阈值",
-        "budget_exceeded": "预算超限",
-        "regression_failure": "回归测试失败",
-        "convergent_loop_escalation": "Convergent Loop 需人工介入",
-        "batch_confirmation": "Batch 确认",
-        "timeout": "任务超时",
-        "precommit_failure": "Pre-commit 检查失败",
-        "rebase_conflict": "Rebase 冲突需处理",
-        "needs_human_review": "需要人工审阅",
-    }
-    summary = templates.get(approval_type, approval_type)
+    委托到 approval_helpers.format_approval_summary() 共享实现。
+    """
+    from ato.approval_helpers import format_approval_summary
 
-    # 附加关键 payload 信息
-    if approval_type == "session_timeout" and "elapsed_seconds" in payload_dict:
-        elapsed = payload_dict["elapsed_seconds"]
-        summary += f" ({elapsed}s)"
-    elif approval_type == "blocking_abnormal" and "blocking_count" in payload_dict:
-        count = payload_dict["blocking_count"]
-        threshold = payload_dict.get("threshold", "?")
-        summary += f" ({count}/{threshold})"
-    elif approval_type == "crash_recovery" and "phase" in payload_dict:
-        summary += f" (phase: {payload_dict['phase']})"
-    elif approval_type == "convergent_loop_escalation" and "final_convergence_rate" in payload_dict:
-        rate = payload_dict["final_convergence_rate"]
-        rounds = payload_dict.get("rounds_completed", "?")
-        blocking = payload_dict.get("open_blocking_count", "?")
-        if isinstance(rate, (int, float)):
-            summary += f" (rate={rate:.0%}, rounds={rounds}, blocking={blocking})"
-        else:
-            summary += f" (rounds={rounds})"
-
-    return summary
+    return format_approval_summary(approval_type, payload)
 
 
 @app.command("approvals")

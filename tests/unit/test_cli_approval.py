@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -57,11 +59,11 @@ def _setup_story_and_approval_sync(
                     approval_id=approval_id,
                     story_id=story_id,
                     approval_type=approval_type,
-                    status=status,
+                    status=status,  # type: ignore[arg-type]
                     payload='{"task_id": "t1", "options": ["restart", "resume"]}',
                     created_at=_NOW,
                     recommended_action=recommended_action,
-                    risk_level=risk_level,
+                    risk_level=risk_level,  # type: ignore[arg-type]
                 ),
             )
         finally:
@@ -304,3 +306,12 @@ class TestApprovalMetadataStory42:
         from ato.cli import _APPROVAL_TYPE_ICONS
 
         assert "rebase_conflict" in _APPROVAL_TYPE_ICONS
+
+    def test_cli_import_does_not_load_tui_theme(self) -> None:
+        sys.modules.pop("ato.tui.theme", None)
+        sys.modules.pop("ato.cli", None)
+
+        module = importlib.import_module("ato.cli")
+
+        assert "rebase_conflict" in module._APPROVAL_TYPE_ICONS
+        assert "ato.tui.theme" not in sys.modules

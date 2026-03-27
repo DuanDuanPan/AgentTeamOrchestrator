@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 from datetime import UTC, datetime
@@ -1185,6 +1186,66 @@ class TestMergeAuthorizationCreation:
             pending = await get_pending_approvals(db)
             merge_auths = [a for a in pending if a.approval_type == "merge_authorization"]
             assert len(merge_auths) == 1  # still just 1
+        finally:
+            await db.close()
+
+    async def test_merge_authorization_handles_naive_started_at(
+        self, initialized_db_path: Path
+    ) -> None:
+        """naive started_at 不应导致 elapsed_seconds 计算崩溃。"""
+        from ato.models.db import (
+            get_connection,
+            get_pending_approvals,
+            insert_story,
+        )
+        from ato.models.schemas import StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-naive",
+                    title="Naive Task Story",
+                    status="in_progress",
+                    current_phase="merging",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await db.execute(
+                "INSERT INTO tasks "
+                "(task_id, story_id, phase, role, cli_tool, status, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "t-naive",
+                    "s-naive",
+                    "developing",
+                    "developer",
+                    "claude",
+                    "completed",
+                    "2020-01-01T00:00:00",
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = MagicMock()
+        orchestrator._nudge = MagicMock()
+
+        await orchestrator._create_merge_authorizations()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            merge_auths = [a for a in pending if a.approval_type == "merge_authorization"]
+            assert len(merge_auths) == 1
+            payload = json.loads(merge_auths[0].payload or "{}")
+            assert int(payload["elapsed_seconds"]) > 0
         finally:
             await db.close()
 

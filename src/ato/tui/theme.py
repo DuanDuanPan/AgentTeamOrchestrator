@@ -146,3 +146,20 @@ def _invert_str(s: str) -> str:
     """反转字符串用于降序排列——对 ISO 时间戳有效。"""
     # 用 chr 补码实现字符串反转排序
     return "".join(chr(0xFFFF - ord(c)) for c in s)
+
+
+# ---------------------------------------------------------------------------
+# Risk level → 颜色变量映射 (Story 6.3a)
+# ---------------------------------------------------------------------------
+
+
+_RISK_COLOR_MAP: dict[str, str] = {
+    "high": "$error",
+    "medium": "$warning",
+    "low": "$success",
+}
+
+
+def map_risk_to_color(risk_level: str | None) -> str:
+    """将 risk_level 映射到 TCSS 颜色变量名。"""
+    return _RISK_COLOR_MAP.get(risk_level or "", "$muted")

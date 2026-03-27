@@ -91,6 +91,22 @@ APPROVAL_DEFAULT_VALID_OPTIONS: dict[str, list[str]] = {
 }
 """无 payload.options 时各 approval_type 的默认合法选项。"""
 
+APPROVAL_TYPE_ICONS: dict[str, str] = {
+    "merge_authorization": "🔀",
+    "session_timeout": "⏱",
+    "crash_recovery": "↩",
+    "blocking_abnormal": "⚠",
+    "budget_exceeded": "💰",
+    "regression_failure": "✖",
+    "convergent_loop_escalation": "🔄",
+    "batch_confirmation": "📦",
+    "timeout": "⏳",
+    "precommit_failure": "🔧",
+    "rebase_conflict": "⚡",
+    "needs_human_review": "👁",
+}
+"""approval_type → 展示图标映射。CLI 与 TUI 共享，避免 TUI 模块耦合。"""
+
 # ---------------------------------------------------------------------------
 # 错误分类枚举
 # ---------------------------------------------------------------------------

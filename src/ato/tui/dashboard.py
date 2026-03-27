@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 import time
 from datetime import UTC, datetime
 from typing import ClassVar
@@ -19,12 +21,21 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static, TabbedContent, TabPane
 
+from ato.approval_helpers import (
+    format_approval_summary,
+    get_binary_approval_labels,
+    is_binary_approval,
+    resolve_binary_decision,
+)
+from ato.models.schemas import APPROVAL_TYPE_ICONS
 from ato.tui.theme import (
     RICH_COLORS,
     format_status,
+    map_risk_to_color,
     map_story_to_visual_status,
     sort_stories_by_status,
 )
+from ato.tui.widgets.approval_card import ApprovalCard
 from ato.tui.widgets.heartbeat_indicator import HeartbeatIndicator
 from ato.tui.widgets.story_status_line import StoryStatusLine, _format_elapsed
 
@@ -53,6 +64,9 @@ class DashboardScreen(Widget):
     BINDINGS: ClassVar[list[BindingType]] = [
         ("up", "select_prev", "上移"),
         ("down", "select_next", "下移"),
+        ("d", "toggle_detail", "展开/折叠"),
+        ("y", "approve", "批准"),
+        ("n", "reject", "拒绝"),
     ]
 
     def __init__(self) -> None:
@@ -68,13 +82,30 @@ class DashboardScreen(Widget):
         self._story_started_at: dict[str, str] = {}
         self._story_cl_rounds: dict[str, int] = {}
         self._convergent_loop_max_rounds = 3
-        # 选中状态
-        self._selected_story_id: str | None = None
+        # Approval 数据（Story 6.3a）
+        self._approval_records: list[object] = []
+        self._approvals_by_id: dict[str, object] = {}
+        # Findings 摘要（Story 6.3a AC2 — QA 结果）
+        self._story_findings_summary: dict[str, dict[str, int]] = {}
+        # 统一选中状态（审批在前 + story 在后）
+        self._selected_item_id: str | None = None
         self._selected_index: int = 0
+        self._sorted_item_ids: list[str] = []
+        # 向后兼容属性（测试用）
+        self._selected_story_id: str | None = None
         self._sorted_story_ids: list[str] = []
-        # 当前已渲染的 story 快照（用于增量更新判断）——每个容器独立
+        # 审批展开态
+        self._expanded_approval_id: str | None = None
+        # 审批已提交中间状态（approval_id → True）
+        self._submitted_approvals: set[str] = set()
+        # 当前已渲染的快照（用于增量更新判断）——每个容器独立
         self._rendered_snapshot: list[tuple[str, str, str]] = []
         self._rendered_snapshot_tab: list[tuple[str, str, str]] = []
+        self._rendered_approvals_snapshot_tab: list[tuple[str, str, str, str]] = []
+        # 重建代数计数器（避免 Textual async remove + mount 时 DuplicateIds）
+        self._rebuild_gen: int = 0
+        self._rebuild_gen_tab: int = 0
+        self._rebuild_gen_approvals_tab: int = 0
         # 每个模式最近聚焦的 widget id，用于切换时恢复焦点
         self._saved_focus: dict[str, str | None] = {}
 
@@ -92,14 +123,16 @@ class DashboardScreen(Widget):
                         id="right-top-content",
                     )
                     yield Static(
-                        "操作区域（占位）",
+                        "",
                         id="right-bottom-content",
                     )
 
             # Tab 模式
             with Vertical(id="tabbed", classes="tabbed-container"), TabbedContent():
                 with TabPane("[1]审批", id="tab-approvals"):
-                    yield Static("审批面板（占位）", id="tab-approvals-content")
+                    tab_approval_scroll = VerticalScroll(id="tab-approvals-container")
+                    tab_approval_scroll.can_focus = False
+                    yield tab_approval_scroll
                 with TabPane("[2]Stories", id="tab-stories"):
                     tab_scroll = VerticalScroll(id="tab-story-list-container")
                     tab_scroll.can_focus = False
@@ -210,28 +243,127 @@ class DashboardScreen(Widget):
                         return
 
     # ------------------------------------------------------------------
-    # ↑↓ 选择导航
+    # ↑↓ 选择导航（统一管理审批 + story）
     # ------------------------------------------------------------------
 
     def action_select_prev(self) -> None:
-        """左面板获焦时上移选中 story。"""
+        """左面板获焦时上移选中项。"""
         if not self._is_left_panel_focused():
             return
-        if self._sorted_story_ids and self._selected_index > 0:
+        if self._sorted_item_ids and self._selected_index > 0:
             self._selected_index -= 1
-            self._selected_story_id = self._sorted_story_ids[self._selected_index]
+            self._selected_item_id = self._sorted_item_ids[self._selected_index]
+            self._sync_selected_story_id()
             self._highlight_selected()
             self._update_detail_panel()
+            self._update_action_panel()
 
     def action_select_next(self) -> None:
-        """左面板获焦时下移选中 story。"""
+        """左面板获焦时下移选中项。"""
         if not self._is_left_panel_focused():
             return
-        if self._sorted_story_ids and self._selected_index < len(self._sorted_story_ids) - 1:
+        if self._sorted_item_ids and self._selected_index < len(self._sorted_item_ids) - 1:
             self._selected_index += 1
-            self._selected_story_id = self._sorted_story_ids[self._selected_index]
+            self._selected_item_id = self._sorted_item_ids[self._selected_index]
+            self._sync_selected_story_id()
             self._highlight_selected()
             self._update_detail_panel()
+            self._update_action_panel()
+
+    def _sync_selected_story_id(self) -> None:
+        """同步 _selected_story_id 以保持向后兼容。"""
+        if self._selected_item_id and self._selected_item_id.startswith("story:"):
+            self._selected_story_id = self._selected_item_id.removeprefix("story:")
+        else:
+            self._selected_story_id = None
+
+    # ------------------------------------------------------------------
+    # y/n/d 审批操作 (Story 6.3a)
+    # ------------------------------------------------------------------
+
+    def action_approve(self) -> None:
+        """y 键：对当前选中的二选一审批提交 approve 方向决策。"""
+        self._submit_decision("y")
+
+    def action_reject(self) -> None:
+        """n 键：对当前选中的二选一审批提交 reject 方向决策。"""
+        self._submit_decision("n")
+
+    def _submit_decision(self, key: str) -> None:
+        """统一处理 y/n 键按下。"""
+        if not self._selected_item_id or not self._selected_item_id.startswith("approval:"):
+            # 选中的不是审批项——忽略
+            return
+
+        aid = self._selected_item_id.removeprefix("approval:")
+
+        # 已提交的审批不允许二次提交
+        if aid in self._submitted_approvals:
+            return
+
+        approval = self._approvals_by_id.get(aid)
+        if approval is None:
+            return
+
+        approval_type = getattr(approval, "approval_type", "")
+        payload = getattr(approval, "payload", None)
+
+        # 多选审批降级 — 不执行写入
+        if not is_binary_approval(approval_type, payload):
+            self._update_static(
+                "#right-bottom-content",
+                Text("此审批需多选，请使用 CLI 或等待 6.3b", style=RICH_COLORS["$warning"]),
+            )
+            return
+
+        result = resolve_binary_decision(approval_type, key)  # type: ignore[arg-type]
+        if result is None:
+            return
+
+        decision, status = result
+        decision_reason = f"tui:{key} -> {decision}"
+
+        # 标记已提交中间状态
+        self._submitted_approvals.add(aid)
+        self._update_action_panel()
+
+        # 异步写入 SQLite + nudge
+        from ato.tui.app import ATOApp
+
+        app = self.app
+        if isinstance(app, ATOApp):
+
+            async def _do_submit() -> None:
+                try:
+                    ok = await app.submit_approval_decision(
+                        approval_id=aid,
+                        status=status,
+                        decision=decision,
+                        decision_reason=decision_reason,
+                    )
+                    if not ok:
+                        self._rollback_submitted(aid)
+                except Exception:
+                    self._rollback_submitted(aid)
+
+            self.run_worker(_do_submit(), exclusive=False)
+
+    def _rollback_submitted(self, aid: str) -> None:
+        """写库失败时回退已提交状态，允许用户重试。"""
+        self._submitted_approvals.discard(aid)
+        self._update_action_panel()
+
+    def action_toggle_detail(self) -> None:
+        """d 键：切换审批展开/折叠态。"""
+        if not self._selected_item_id or not self._selected_item_id.startswith("approval:"):
+            return
+        aid = self._selected_item_id.removeprefix("approval:")
+        if self._expanded_approval_id == aid:
+            self._expanded_approval_id = None
+        else:
+            self._expanded_approval_id = aid
+        self._update_detail_panel()
+        self._update_action_panel()
 
     def _is_left_panel_focused(self) -> bool:
         """检查左面板是否获焦。"""
@@ -270,6 +402,8 @@ class DashboardScreen(Widget):
         story_started_at: dict[str, str] | None = None,
         story_cl_rounds: dict[str, int] | None = None,
         convergent_loop_max_rounds: int | None = None,
+        pending_approval_records: list[object] | None = None,
+        story_findings_summary: dict[str, dict[str, int]] | None = None,
     ) -> None:
         """更新仪表盘数据（所有模式同步）。保持向后兼容。"""
         self._story_count = story_count
@@ -288,6 +422,16 @@ class DashboardScreen(Widget):
             self._story_cl_rounds = story_cl_rounds
         if convergent_loop_max_rounds is not None:
             self._convergent_loop_max_rounds = convergent_loop_max_rounds
+        if pending_approval_records is not None:
+            self._approval_records = pending_approval_records
+            self._approvals_by_id = {
+                getattr(a, "approval_id", ""): a for a in pending_approval_records
+            }
+            # 清除已消失的已提交审批
+            current_ids = set(self._approvals_by_id.keys())
+            self._submitted_approvals &= current_ids
+        if story_findings_summary is not None:
+            self._story_findings_summary = story_findings_summary
 
         self._refresh_placeholders()
 
@@ -304,20 +448,22 @@ class DashboardScreen(Widget):
             f"更新: {self._last_updated}"
         )
 
-        # 三面板模式 — Story 列表
+        # 三面板模式 — 审批 + Story 列表
         self._update_story_list("#story-list-container")
 
         # 右上面板 — 联动详情
         self._update_detail_panel()
 
+        # 右下面板 — 操作提示
+        self._update_action_panel()
+
         # Tab 模式 — [2]Stories Tab
         self._update_story_list("#tab-story-list-container")
 
+        # Tab 模式 — [1]审批 Tab
+        self._update_approvals_tab()
+
         # Tab 模式 — 其他 Tab
-        self._update_static(
-            "#tab-approvals-content",
-            f"待审批: {self._pending_approvals}",
-        )
         self._update_static(
             "#tab-cost-content",
             f"今日成本: ${self._today_cost_usd:.2f}",
@@ -334,7 +480,11 @@ class DashboardScreen(Widget):
         )
 
     def _update_story_list(self, container_selector: str) -> None:
-        """更新指定容器中的 story 列表。"""
+        """更新指定容器中的审批 + story 列表。
+
+        三面板模式（primary）：审批在前 + story 在后
+        Tab 模式：仅 story（审批在独立 [1]审批 Tab 中）
+        """
         try:
             container = self.query_one(container_selector, VerticalScroll)
         except Exception:
@@ -342,32 +492,56 @@ class DashboardScreen(Widget):
 
         is_primary = container_selector == "#story-list-container"
         sorted_stories = sort_stories_by_status(self._stories)
-        sorted_ids = [str(s.get("story_id", "")) for s in sorted_stories]
+        sorted_story_ids = [str(s.get("story_id", "")) for s in sorted_stories]
 
-        # 构建快照用于增量判断：(story_id, status, current_phase)
-        new_snapshot = [
+        # 构建统一的 item ID 列表
+        new_item_ids: list[str] = []
+        # 仅主面板包含审批项（Tab 模式审批在独立 Tab）
+        if is_primary:
+            for a in self._approval_records:
+                new_item_ids.append(f"approval:{getattr(a, 'approval_id', '')}")
+        for sid in sorted_story_ids:
+            new_item_ids.append(f"story:{sid}")
+
+        # 构建快照用于增量判断
+        story_snapshot = [
             (str(s.get("story_id", "")), str(s.get("status", "")), str(s.get("current_phase", "")))
             for s in sorted_stories
         ]
+        if is_primary:
+            approval_snapshot: list[tuple[str, str, str]] = [
+                (
+                    getattr(a, "approval_id", ""),
+                    getattr(a, "approval_type", ""),
+                    getattr(a, "story_id", ""),
+                )
+                for a in self._approval_records
+            ]
+            new_snapshot: list[tuple[str, str, str]] = approval_snapshot + story_snapshot
+        else:
+            new_snapshot = story_snapshot
 
         # 清除旧的空状态 widget（如果有）
         for empty_w in list(container.query(".empty-state")):
             empty_w.remove()
 
-        # 空状态处理
-        if not sorted_stories:
+        # 空状态处理（tab 容器不含审批，检查条件简化）
+        has_content = bool(sorted_stories) or (is_primary and bool(self._approval_records))
+        if not has_content:
             if is_primary:
+                self._sorted_item_ids = []
                 self._sorted_story_ids = []
+                self._selected_item_id = None
                 self._selected_story_id = None
                 self._selected_index = 0
                 self._rendered_snapshot = []
             else:
                 self._rendered_snapshot_tab = []
+                self._rendered_approvals_snapshot_tab = []
             # 已经在空状态则跳过（刚清理完不需要再挂载）
             if not list(container.query(".empty-state")):
-                # 清除所有 story widgets
-                for child in list(container.children):
-                    child.remove()
+                # 清除所有 widgets
+                container.remove_children()
                 empty_id = "empty-state" if is_primary else "tab-empty-state"
                 container.mount(
                     Static(
@@ -379,21 +553,56 @@ class DashboardScreen(Widget):
             return
 
         if is_primary:
-            self._sorted_story_ids = sorted_ids
-            # 保持选中 story（refresh 后恢复焦点）
-            if self._selected_story_id and self._selected_story_id in sorted_ids:
-                self._selected_index = sorted_ids.index(self._selected_story_id)
+            self._sorted_item_ids = new_item_ids
+            self._sorted_story_ids = sorted_story_ids
+
+            # 向后兼容：外部直接设置 _selected_story_id 时同步到 _selected_item_id
+            if self._selected_story_id:
+                expected_item = f"story:{self._selected_story_id}"
+                if self._selected_item_id != expected_item and expected_item in new_item_ids:
+                    self._selected_item_id = expected_item
+
+            # 保持选中项（refresh 后恢复焦点）
+            if self._selected_item_id and self._selected_item_id in new_item_ids:
+                self._selected_index = new_item_ids.index(self._selected_item_id)
             else:
                 self._selected_index = 0
-                self._selected_story_id = sorted_ids[0] if sorted_ids else None
+                self._selected_item_id = new_item_ids[0] if new_item_ids else None
+            self._sync_selected_story_id()
 
-        # 判断是否需要重建——story 列表结构变化时才重建
+        # 判断是否需要重建
         snapshot_ref = self._rendered_snapshot if is_primary else self._rendered_snapshot_tab
         needs_rebuild = new_snapshot != snapshot_ref
 
         if needs_rebuild:
-            for child in list(container.children):
-                child.remove()
+            container.remove_children()
+
+            # 更新代数计数器（避免 async removal 时 DuplicateIds）
+            if is_primary:
+                self._rebuild_gen += 1
+                gen = self._rebuild_gen
+            else:
+                self._rebuild_gen_tab += 1
+                gen = self._rebuild_gen_tab
+
+            # 先渲染审批卡片（仅主面板）
+            if is_primary:
+                for a_record in self._approval_records:
+                    aid = getattr(a_record, "approval_id", "")
+                    ac_w = ApprovalCard(id=f"ac{gen}-{aid}", classes="approval-row")
+                    container.mount(ac_w)
+                    ac_w.update_data(
+                        approval_id=aid,
+                        story_id=getattr(a_record, "story_id", ""),
+                        approval_type=getattr(a_record, "approval_type", ""),
+                        payload=getattr(a_record, "payload", None),
+                        recommended_action=getattr(a_record, "recommended_action", None),
+                        risk_level=getattr(a_record, "risk_level", None),
+                    )
+
+            # 再渲染 story
+            prefix_hb = f"hb{gen}" if is_primary else f"thb{gen}"
+            prefix_ssl = f"ssl{gen}" if is_primary else f"tssl{gen}"
             for story in sorted_stories:
                 sid = str(story.get("story_id", ""))
                 status = str(story.get("status", ""))
@@ -401,11 +610,9 @@ class DashboardScreen(Widget):
                 cost = self._story_costs.get(sid, 0.0)
                 cl_round = self._story_cl_rounds.get(sid, 0)
                 elapsed = self._compute_elapsed(sid)
-                prefix = "hb" if is_primary else "thb"
-                ssl_prefix = "ssl" if is_primary else "tssl"
 
                 if status == "in_progress" and sid in self._story_started_at:
-                    hb_w = HeartbeatIndicator(id=f"{prefix}-{sid}", classes="story-row")
+                    hb_w = HeartbeatIndicator(id=f"{prefix_hb}-{sid}", classes="story-row")
                     container.mount(hb_w)
                     started_mono = self._iso_to_monotonic(self._story_started_at[sid])
                     hb_w.update_heartbeat(
@@ -417,7 +624,7 @@ class DashboardScreen(Widget):
                         started_at=started_mono,
                     )
                 else:
-                    ssl_w = StoryStatusLine(id=f"{ssl_prefix}-{sid}", classes="story-row")
+                    ssl_w = StoryStatusLine(id=f"{prefix_ssl}-{sid}", classes="story-row")
                     container.mount(ssl_w)
                     ssl_w.update_data(
                         story_id=sid,
@@ -435,8 +642,26 @@ class DashboardScreen(Widget):
                 self._rendered_snapshot_tab = new_snapshot
         else:
             # 仅更新数据，不重建 widgets
-            prefix = "hb" if is_primary else "thb"
-            ssl_prefix = "ssl" if is_primary else "tssl"
+            gen = self._rebuild_gen if is_primary else self._rebuild_gen_tab
+
+            if is_primary:
+                for a_record in self._approval_records:
+                    aid = getattr(a_record, "approval_id", "")
+                    try:
+                        ac = container.query_one(f"#ac{gen}-{aid}", ApprovalCard)
+                        ac.update_data(
+                            approval_id=aid,
+                            story_id=getattr(a_record, "story_id", ""),
+                            approval_type=getattr(a_record, "approval_type", ""),
+                            payload=getattr(a_record, "payload", None),
+                            recommended_action=getattr(a_record, "recommended_action", None),
+                            risk_level=getattr(a_record, "risk_level", None),
+                        )
+                    except Exception:
+                        pass
+
+            prefix = f"hb{gen}" if is_primary else f"thb{gen}"
+            ssl_prefix = f"ssl{gen}" if is_primary else f"tssl{gen}"
             for story in sorted_stories:
                 sid = str(story.get("story_id", ""))
                 status = str(story.get("status", ""))
@@ -478,29 +703,176 @@ class DashboardScreen(Widget):
             self._highlight_selected()
 
     def _highlight_selected(self) -> None:
-        """更新选中 story 的高亮样式。"""
+        """更新选中项的高亮样式。"""
         try:
             container = self.query_one("#story-list-container", VerticalScroll)
         except Exception:
             return
 
+        gen = self._rebuild_gen
         for child in container.children:
-            if hasattr(child, "remove_class"):
-                child.remove_class("selected-story")
-                if (
-                    self._selected_story_id
-                    and child.id
-                    and child.id.endswith(f"-{self._selected_story_id}")
-                ):
+            if not hasattr(child, "remove_class"):
+                continue
+            child.remove_class("selected-story")
+            child.remove_class("selected-approval")
+
+            if not self._selected_item_id or not child.id:
+                continue
+
+            if self._selected_item_id.startswith("approval:"):
+                aid = self._selected_item_id.removeprefix("approval:")
+                if child.id == f"ac{gen}-{aid}":
+                    child.add_class("selected-approval")
+            elif self._selected_item_id.startswith("story:"):
+                sid = self._selected_item_id.removeprefix("story:")
+                if child.id == f"ssl{gen}-{sid}" or child.id == f"hb{gen}-{sid}":
                     child.add_class("selected-story")
 
     def _update_detail_panel(self) -> None:
-        """右上面板联动显示选中 story 详情。"""
-        if not self._selected_story_id:
+        """右上面板联动——区分审批和 story。"""
+        if not self._selected_item_id:
             self._update_static("#right-top-content", "选择左面板的 story 查看详情")
             return
 
-        story = self._stories_by_id.get(self._selected_story_id)
+        if self._selected_item_id.startswith("approval:"):
+            aid = self._selected_item_id.removeprefix("approval:")
+            approval = self._approvals_by_id.get(aid)
+            if approval:
+                self._render_approval_context(approval)
+            else:
+                self._update_static("#right-top-content", "选择左面板的 story 查看详情")
+        else:
+            sid = self._selected_item_id.removeprefix("story:")
+            self._render_story_detail(sid)
+
+    def _render_approval_context(self, approval: object) -> None:
+        """渲染审批上下文详情到右上面板。"""
+        aid = getattr(approval, "approval_id", "")
+        approval_type = getattr(approval, "approval_type", "")
+        story_id = getattr(approval, "story_id", "")
+        payload_str = getattr(approval, "payload", None)
+        recommended = getattr(approval, "recommended_action", "") or ""
+        risk = getattr(approval, "risk_level", "") or ""
+        icon = APPROVAL_TYPE_ICONS.get(approval_type, "?")
+        risk_color = RICH_COLORS.get(map_risk_to_color(risk or None), RICH_COLORS["$muted"])
+
+        # 展开态或折叠态显示不同详情
+        detail = Text()
+        detail.append(f"{icon} ", style=RICH_COLORS["$warning"])
+        detail.append(f"{story_id}", style=f"bold {RICH_COLORS['$accent']}")
+        detail.append(f" — {approval_type}\n", style=RICH_COLORS["$text"])
+
+        if self._expanded_approval_id == aid:
+            # 展开态 — 完整审批上下文
+            summary = format_approval_summary(approval_type, payload_str)
+            detail.append(f"\n{summary}\n\n", style=RICH_COLORS["$text"])
+
+            # 解析 payload 详情
+            pd: dict[str, object] = {}
+            if payload_str:
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    pd = json.loads(payload_str)
+
+            # 阶段转换（payload 或 story 当前阶段）
+            if "from_phase" in pd or "to_phase" in pd:
+                detail.append("阶段: ", style=RICH_COLORS["$muted"])
+                detail.append(
+                    f"{pd.get('from_phase', '?')} → {pd.get('to_phase', '?')}\n",
+                    style=RICH_COLORS["$info"],
+                )
+            elif story_id in self._stories_by_id:
+                phase = str(self._stories_by_id[story_id].get("current_phase", ""))
+                if phase:
+                    detail.append("当前阶段: ", style=RICH_COLORS["$muted"])
+                    detail.append(f"{phase}\n", style=RICH_COLORS["$info"])
+
+            # 成本（payload 优先，回退到 dashboard story 级数据）
+            if "cost_usd" in pd:
+                detail.append("成本: ", style=RICH_COLORS["$muted"])
+                detail.append(f"${pd['cost_usd']:.2f}\n", style=RICH_COLORS["$text"])
+            elif story_id in self._story_costs:
+                cost = self._story_costs[story_id]
+                detail.append("累计成本: ", style=RICH_COLORS["$muted"])
+                detail.append(f"${cost:.2f}\n", style=RICH_COLORS["$text"])
+
+            # 耗时（payload 优先，回退到 dashboard story 级数据）
+            if "elapsed_seconds" in pd:
+                detail.append("耗时: ", style=RICH_COLORS["$muted"])
+                detail.append(
+                    f"{_format_elapsed(int(str(pd['elapsed_seconds'])))}\n",
+                    style=RICH_COLORS["$text"],
+                )
+            elif story_id in self._story_started_at:
+                elapsed = self._compute_elapsed(story_id)
+                detail.append("耗时: ", style=RICH_COLORS["$muted"])
+                detail.append(f"{_format_elapsed(elapsed)}\n", style=RICH_COLORS["$text"])
+
+            # CL 轮次（payload 优先，回退到 dashboard story 级数据）
+            if "cl_round" in pd:
+                detail.append("CL 轮次: ", style=RICH_COLORS["$muted"])
+                detail.append(f"R{pd['cl_round']}\n", style=RICH_COLORS["$info"])
+            elif story_id in self._story_cl_rounds:
+                cl_round = self._story_cl_rounds[story_id]
+                if cl_round > 0:
+                    detail.append("CL 轮次: ", style=RICH_COLORS["$muted"])
+                    detail.append(
+                        f"R{cl_round}/{self._convergent_loop_max_rounds}\n",
+                        style=RICH_COLORS["$info"],
+                    )
+
+            if "blocking_count" in pd:
+                detail.append("Blocking: ", style=RICH_COLORS["$muted"])
+                threshold = pd.get("threshold", "?")
+                detail.append(
+                    f"{pd['blocking_count']}/{threshold}\n",
+                    style=RICH_COLORS["$error"],
+                )
+
+            # Review Findings 摘要（AC2 — QA 结果）
+            fs = self._story_findings_summary.get(story_id)
+            if fs:
+                detail.append("\nReview Findings:\n", style=RICH_COLORS["$muted"])
+                b_open = fs.get("blocking_open", 0)
+                b_closed = fs.get("blocking_closed", 0)
+                s_open = fs.get("suggestion_open", 0)
+                s_closed = fs.get("suggestion_closed", 0)
+                if b_closed or b_open:
+                    icon = "✔" if b_open == 0 else "✖"
+                    style = RICH_COLORS["$success"] if b_open == 0 else RICH_COLORS["$error"]
+                    detail.append(f"  {icon} ", style=style)
+                    detail.append(f"{b_closed + b_open} blocking", style=RICH_COLORS["$text"])
+                    if b_open > 0:
+                        detail.append(f" ({b_open} open)", style=RICH_COLORS["$error"])
+                    else:
+                        detail.append(" (closed)", style=RICH_COLORS["$success"])
+                    detail.append("\n")
+                if s_closed or s_open:
+                    icon = "✔" if s_open == 0 else "!"
+                    style = RICH_COLORS["$success"] if s_open == 0 else RICH_COLORS["$warning"]
+                    detail.append(f"  {icon} ", style=style)
+                    detail.append(f"{s_closed + s_open} suggestions", style=RICH_COLORS["$text"])
+                    if s_open > 0:
+                        detail.append(f" ({s_open} open)", style=RICH_COLORS["$warning"])
+                    else:
+                        detail.append(" (closed)", style=RICH_COLORS["$success"])
+                    detail.append("\n")
+
+            detail.append("\n推荐: ", style=RICH_COLORS["$muted"])
+            detail.append(f"{recommended}", style=RICH_COLORS["$info"])
+            detail.append(f" [{risk or '-'}风险]", style=risk_color)
+        else:
+            # 折叠态 — 简要信息
+            summary = format_approval_summary(approval_type, payload_str)
+            detail.append(f"\n{summary}\n", style=RICH_COLORS["$text"])
+            detail.append("推荐: ", style=RICH_COLORS["$muted"])
+            detail.append(f"{recommended}", style=RICH_COLORS["$info"])
+            detail.append(f" [{risk or '-'}]", style=risk_color)
+
+        self._update_static("#right-top-content", detail)
+
+    def _render_story_detail(self, story_id: str) -> None:
+        """渲染 story 详情到右上面板。"""
+        story = self._stories_by_id.get(story_id)
         if not story:
             self._update_static("#right-top-content", "选择左面板的 story 查看详情")
             return
@@ -534,11 +906,145 @@ class DashboardScreen(Widget):
                 style=RICH_COLORS["$info"],
             )
 
+        self._update_static("#right-top-content", detail)
+
+    def _update_action_panel(self) -> None:
+        """右下面板——审批操作提示或通用提示。"""
+        if not self._selected_item_id:
+            self._update_static(
+                "#right-bottom-content",
+                Text("↑↓ 选择  y/n 审批  d 详情  q 退出", style=RICH_COLORS["$muted"]),
+            )
+            return
+
+        if self._selected_item_id.startswith("approval:"):
+            aid = self._selected_item_id.removeprefix("approval:")
+            approval = self._approvals_by_id.get(aid)
+
+            # 已提交中间状态
+            if aid in self._submitted_approvals:
+                self._update_static(
+                    "#right-bottom-content",
+                    Text("已提交，等待处理", style=RICH_COLORS["$muted"]),
+                )
+                return
+
+            if approval is None:
+                self._update_static("#right-bottom-content", "")
+                return
+
+            approval_type = getattr(approval, "approval_type", "")
+            payload = getattr(approval, "payload", None)
+
+            if not is_binary_approval(approval_type, payload):
+                # 多选审批 fallback
+                self._update_static(
+                    "#right-bottom-content",
+                    Text(
+                        "此审批需多选，请使用 CLI 或等待 6.3b",
+                        style=RICH_COLORS["$warning"],
+                    ),
+                )
+                return
+
+            # 二选一审批——显示动作标签 + 快捷键
+            labels = get_binary_approval_labels(approval_type)
+            if labels:
+                y_label, n_label = labels
+            else:
+                y_label, n_label = "批准", "拒绝"
+
+            action_text = Text()
+            action_text.append(f"[y] {y_label}  ", style=RICH_COLORS["$success"])
+            action_text.append(f"[n] {n_label}  ", style=RICH_COLORS["$error"])
+            if self._expanded_approval_id == aid:
+                action_text.append("[d] 收起详情", style=RICH_COLORS["$muted"])
+            else:
+                action_text.append("[d] 详情", style=RICH_COLORS["$muted"])
+            self._update_static("#right-bottom-content", action_text)
+        else:
+            # 选中 story 时——通用提示（d 仅对审批生效，不在此暴露）
+            self._update_static(
+                "#right-bottom-content",
+                Text("↑↓ 选择  q 退出", style=RICH_COLORS["$muted"]),
+            )
+
+    def _update_approvals_tab(self) -> None:
+        """Tab 模式 [1]审批 Tab 渲染。"""
         try:
-            widget = self.query_one("#right-top-content", Static)
-            widget.update(detail)
+            container = self.query_one("#tab-approvals-container", VerticalScroll)
         except Exception:
-            pass
+            return
+
+        approval_snapshot = [
+            (
+                getattr(a, "approval_id", ""),
+                getattr(a, "approval_type", ""),
+                getattr(a, "story_id", ""),
+                "binary"
+                if is_binary_approval(getattr(a, "approval_type", ""), getattr(a, "payload", None))
+                else "fallback",
+            )
+            for a in self._approval_records
+        ]
+
+        if not self._approval_records:
+            self._rendered_approvals_snapshot_tab = []
+            container.remove_children()
+            self._rebuild_gen_approvals_tab += 1
+            gen = self._rebuild_gen_approvals_tab
+            container.mount(Static("✔ 无待处理审批", id=f"atab-empty-{gen}", classes="empty-state"))
+            return
+
+        needs_rebuild = approval_snapshot != self._rendered_approvals_snapshot_tab
+        if needs_rebuild:
+            container.remove_children()
+            self._rebuild_gen_approvals_tab += 1
+            gen = self._rebuild_gen_approvals_tab
+
+            for a_record in self._approval_records:
+                aid = getattr(a_record, "approval_id", "")
+                approval_type = getattr(a_record, "approval_type", "")
+                payload = getattr(a_record, "payload", None)
+
+                ac_w = ApprovalCard(id=f"atab{gen}-{aid}", classes="approval-row")
+                container.mount(ac_w)
+                ac_w.update_data(
+                    approval_id=aid,
+                    story_id=getattr(a_record, "story_id", ""),
+                    approval_type=approval_type,
+                    payload=payload,
+                    recommended_action=getattr(a_record, "recommended_action", None),
+                    risk_level=getattr(a_record, "risk_level", None),
+                )
+
+                if not is_binary_approval(approval_type, payload):
+                    container.mount(
+                        Static(
+                            "  ↳ 此审批需多选，请使用 CLI 或等待 6.3b",
+                            id=f"atab-fb{gen}-{aid}",
+                            classes="approval-submitted",
+                        )
+                    )
+
+            self._rendered_approvals_snapshot_tab = approval_snapshot
+            return
+
+        gen = self._rebuild_gen_approvals_tab
+        for a_record in self._approval_records:
+            aid = getattr(a_record, "approval_id", "")
+            try:
+                ac = container.query_one(f"#atab{gen}-{aid}", ApprovalCard)
+                ac.update_data(
+                    approval_id=aid,
+                    story_id=getattr(a_record, "story_id", ""),
+                    approval_type=getattr(a_record, "approval_type", ""),
+                    payload=getattr(a_record, "payload", None),
+                    recommended_action=getattr(a_record, "recommended_action", None),
+                    risk_level=getattr(a_record, "risk_level", None),
+                )
+            except Exception:
+                pass
 
     def _compute_elapsed(self, story_id: str) -> int:
         """计算 story 的经过时间（秒）。"""
