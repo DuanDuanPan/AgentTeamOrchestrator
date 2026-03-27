@@ -95,7 +95,11 @@ class TestApprovalDetailRegressionFailure:
             db_path,
             approval_type="regression_failure",
             risk_level="high",
-            payload_dict={"blocked_stories": ["s1", "s2"]},
+            payload_dict={
+                "options": ["revert", "fix_forward", "pause"],
+                "story_id": "test-story-1",
+                "blocked_count": 2,
+            },
         )
 
         result = runner.invoke(app, ["approval-detail", "aaaa1111", "--db-path", str(db_path)])
@@ -103,6 +107,41 @@ class TestApprovalDetailRegressionFailure:
         assert "发生了什么" in result.output
         assert "影响范围" in result.output
         assert "你的选项" in result.output
+        # 有 blocked_count 时应显示具体数字
+        assert "2 个 merge 被阻塞" in result.output
+
+
+class TestApprovalDetailRegressionFailureWithSummary:
+    """regression_failure + test_output_summary 必须在 Panel 中可见。"""
+
+    def test_approval_detail_shows_test_output_summary(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".ato" / "state.db"
+        _init_db_sync(db_path)
+        _setup_approval_sync(
+            db_path,
+            approval_id="cccc3333-4444-5555-6666-777788889999",
+            approval_type="regression_failure",
+            risk_level="high",
+            payload_dict={
+                "options": ["revert", "fix_forward", "pause"],
+                "story_id": "test-story-1",
+                "test_output_summary": "FAILED tests/test_foo.py::test_bar - assert 1 == 2",
+            },
+        )
+
+        result = runner.invoke(
+            app, ["approval-detail", "cccc3333", "--db-path", str(db_path)]
+        )
+        assert result.exit_code == 0
+        assert "失败摘要" in result.output, (
+            "test_output_summary must be rendered in approval detail"
+        )
+        assert "FAILED" in result.output
+        assert "assert 1 == 2" in result.output
+        # 影响范围不能显示误导性的 "后续 0 个 merge 被阻塞"
+        assert "后续 0 个" not in result.output, (
+            "Impact must not show '0 blocked' when blocked_stories is absent from payload"
+        )
 
 
 class TestApprovalDetailBlockingAbnormal:

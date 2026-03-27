@@ -1510,3 +1510,276 @@ class TestMergeAuthorizationConsumption:
             assert frozen_row[0] == 1
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Story 4.5: regression_failure 决策分支端到端覆盖
+# ---------------------------------------------------------------------------
+
+
+class TestRegressionFailureDecisions:
+    """regression_failure approval 三种决策的端到端验证。"""
+
+    async def _setup_regression_scenario(
+        self, initialized_db_path: Path
+    ) -> None:
+        """创建 story + merge queue entry + 冻结 queue。"""
+        from ato.models.db import (
+            enqueue_merge,
+            get_connection,
+            insert_story,
+            set_merge_queue_frozen,
+            set_pre_merge_head,
+        )
+        from ato.models.schemas import StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s1",
+                    title="Test story",
+                    status="in_progress",
+                    current_phase="regression",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await enqueue_merge(db, "s1", "merge-appr-1", now, now)
+            # 模拟已 merge 且 regression 失败
+            await db.execute(
+                "UPDATE merge_queue SET status = 'failed' WHERE story_id = ?",
+                ("s1",),
+            )
+            await set_pre_merge_head(db, "s1", "abc123def")
+            await db.commit()
+            await set_merge_queue_frozen(
+                db,
+                frozen=True,
+                reason="regression failed for s1",
+            )
+        finally:
+            await db.close()
+
+    async def test_revert_success_unfreezes_and_cleans_worktree(
+        self, initialized_db_path: Path
+    ) -> None:
+        """revert 成功 → unfreeze + cleanup worktree（AC4 revert）。"""
+        from ato.models.schemas import ApprovalRecord
+
+        await self._setup_regression_scenario(initialized_db_path)
+
+        now = datetime.now(tz=UTC)
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._worktree_mgr = AsyncMock()
+        orchestrator._worktree_mgr.revert_merge_range = AsyncMock(return_value=(True, ""))
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="regression_failure",
+            status="approved",
+            decision="revert",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+
+        assert result is True
+        # revert 成功后才 unfreeze
+        orchestrator._merge_queue.unfreeze.assert_awaited_once()
+        assert "revert completed" in orchestrator._merge_queue.unfreeze.call_args[0][0]
+        # cleanup worktree
+        orchestrator._worktree_mgr.cleanup.assert_awaited_once_with("s1")
+
+    async def test_fix_forward_submits_regression_fail_and_keeps_frozen(
+        self, initialized_db_path: Path
+    ) -> None:
+        """fix_forward → regression_fail event + queue 保持冻结 + worktree 保留（AC4）。"""
+        from ato.models.db import get_connection, get_merge_queue_entry
+        from ato.models.schemas import ApprovalRecord
+
+        await self._setup_regression_scenario(initialized_db_path)
+
+        now = datetime.now(tz=UTC)
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._tq = AsyncMock()
+        orchestrator._worktree_mgr = AsyncMock()
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="regression_failure",
+            status="approved",
+            decision="fix_forward",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+
+        # regression_fail event submitted
+        orchestrator._tq.submit.assert_awaited_once()
+        event = orchestrator._tq.submit.call_args[0][0]
+        assert event.event_name == "regression_fail"
+
+        # queue 保持冻结
+        orchestrator._merge_queue.unfreeze.assert_not_awaited()
+
+        # worktree 保留（cleanup 不被调用）
+        orchestrator._worktree_mgr.cleanup.assert_not_awaited()
+
+        # merge_queue entry 被移除
+        db = await get_connection(initialized_db_path)
+        try:
+            entry = await get_merge_queue_entry(db, "s1")
+            assert entry is None, "merge_queue entry should be removed"
+            cursor = await db.execute(
+                "SELECT frozen FROM merge_queue_state WHERE id = 1",
+            )
+            frozen_row = await cursor.fetchone()
+            assert frozen_row is not None
+            assert frozen_row[0] == 1, "Queue must stay frozen"
+        finally:
+            await db.close()
+
+    async def test_pause_keeps_queue_frozen_without_fake_unblock(
+        self, initialized_db_path: Path
+    ) -> None:
+        """pause → queue 保持冻结，不伪造 unblock 路径（AC4）。"""
+        from ato.models.db import get_connection
+        from ato.models.schemas import ApprovalRecord
+
+        await self._setup_regression_scenario(initialized_db_path)
+
+        now = datetime.now(tz=UTC)
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._tq = AsyncMock()
+        orchestrator._worktree_mgr = AsyncMock()
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="regression_failure",
+            status="approved",
+            decision="pause",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+
+        # 不 unfreeze
+        orchestrator._merge_queue.unfreeze.assert_not_awaited()
+        # 不 submit 任何 transition
+        orchestrator._tq.submit.assert_not_awaited()
+        # 不 cleanup worktree
+        orchestrator._worktree_mgr.cleanup.assert_not_awaited()
+
+        # queue 仍然冻结
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT frozen FROM merge_queue_state WHERE id = 1",
+            )
+            frozen_row = await cursor.fetchone()
+            assert frozen_row is not None
+            assert frozen_row[0] == 1, "Queue must stay frozen on pause"
+        finally:
+            await db.close()
+
+
+class TestRebaseConflictDecisions:
+    """rebase_conflict approval 决策路由验证（AC5）。"""
+
+    async def _setup_rebase_scenario(self, initialized_db_path: Path) -> None:
+        from ato.models.db import enqueue_merge, get_connection, insert_story
+        from ato.models.schemas import StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s1",
+                    title="Test story",
+                    status="in_progress",
+                    current_phase="merging",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await enqueue_merge(db, "s1", "a1", now, now)
+        finally:
+            await db.close()
+
+    async def test_rebase_manual_resolve_removes_entry_and_releases_lock(
+        self, initialized_db_path: Path
+    ) -> None:
+        """manual_resolve: 移除 merge queue entry + 释放锁，保留 worktree。"""
+        from ato.models.schemas import ApprovalRecord
+
+        await self._setup_rebase_scenario(initialized_db_path)
+
+        now = datetime.now(tz=UTC)
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._worktree_mgr = AsyncMock()
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="rebase_conflict",
+            status="approved",
+            decision="manual_resolve",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+        # worktree 不清理
+        orchestrator._worktree_mgr.cleanup.assert_not_awaited()
+
+    async def test_rebase_abandon_escalates_story(
+        self, initialized_db_path: Path
+    ) -> None:
+        """abandon: 移除 entry + escalate story。"""
+        from ato.models.schemas import ApprovalRecord
+
+        await self._setup_rebase_scenario(initialized_db_path)
+
+        now = datetime.now(tz=UTC)
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        orchestrator._tq = AsyncMock()
+
+        approval = ApprovalRecord(
+            approval_id="appr-1",
+            story_id="s1",
+            approval_type="rebase_conflict",
+            status="approved",
+            decision="abandon",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+        orchestrator._tq.submit.assert_awaited_once()
+        event = orchestrator._tq.submit.call_args[0][0]
+        assert event.event_name == "escalate"
