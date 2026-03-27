@@ -1412,11 +1412,12 @@ _EXCEPTION_APPROVAL_TYPES = {
 def _extract_impact(approval_type: str, payload_dict: dict[str, object]) -> str:
     """从 approval_type + payload 提取影响范围描述。"""
     if approval_type == "regression_failure":
-        blocked = payload_dict.get("blocked_stories", [])
-        count = (
-            len(blocked) if isinstance(blocked, list) else payload_dict.get("blocked_count", "?")
-        )
-        return f"后续 {count} 个 merge 被阻塞"
+        # merge queue 已冻结——所有后续 merge 被阻塞
+        # blocked_count 由 _handle_regression_failure 写入（waiting entries 数量）
+        blocked_count = payload_dict.get("blocked_count")
+        if isinstance(blocked_count, (int, float)) and int(blocked_count) > 0:
+            return f"merge queue 已冻结，后续 {int(blocked_count)} 个 merge 被阻塞"
+        return "merge queue 已冻结，所有后续 merge 被阻塞"
     if approval_type == "blocking_abnormal":
         count = payload_dict.get("blocking_count", "?")
         threshold = payload_dict.get("threshold", "?")
@@ -1466,6 +1467,14 @@ def _render_exception_approval(approval: object) -> None:
 
     content.append("影响范围\n", style="bold")
     content.append(f"  {_extract_impact(approval_type, payload_dict)}\n\n")
+
+    # regression_failure: 显示测试失败摘要（AC3 — 操作者需要看到失败详情来决策）
+    test_summary = payload_dict.get("test_output_summary")
+    if isinstance(test_summary, str) and test_summary.strip():
+        content.append("失败摘要\n", style="bold")
+        # 截断显示，避免 Panel 过长
+        truncated = test_summary.strip()[:300]
+        content.append(f"  {truncated}\n\n")
 
     content.append("你的选项\n", style="bold")
     for i, opt in enumerate(options, 1):

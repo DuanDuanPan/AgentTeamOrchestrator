@@ -88,7 +88,7 @@ development_status:
   4-2-merge-queue-regression-safety: done
   4-3-uat-interactive-session-completion: done
   4-4-notification-cli-quality: done
-  4-5-regression-test-merge-integration: ready-for-dev
+  4-5-regression-test-merge-integration: done
   epic-4-retrospective: optional
 
   # ===== Epic 5: 崩溃恢复与可观测性 =====

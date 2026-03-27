@@ -906,3 +906,59 @@ class TestGetConflictFiles:
             files = await mgr.get_conflict_files("story-1")
 
         assert files == ["file1.py", "file2.py"]
+
+
+# ---------------------------------------------------------------------------
+# Story 4.5: revert_merge_range git 合同验证
+# ---------------------------------------------------------------------------
+
+
+class TestRevertMergeRangeContract:
+    """revert_merge_range() 使用正确的 git 命令语法。"""
+
+    async def test_revert_uses_no_edit_range(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """revert 使用 `git revert --no-edit <pre_merge_head>..HEAD`。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        proc = _make_proc_mock(returncode=0, stdout="", stderr="")
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ) as mock_exec:
+            success, _stderr = await mgr.revert_merge_range("abc123")
+
+        assert success is True
+        mock_exec.assert_awaited_once()
+        call_args = mock_exec.call_args
+        # 验证 git revert --no-edit abc123..HEAD
+        args = call_args[0]
+        assert args[0] == "git"
+        assert args[1] == "revert"
+        assert args[2] == "--no-edit"
+        assert args[3] == "abc123..HEAD"
+
+    async def test_revert_failure_returns_stderr(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """revert 失败返回 (False, stderr)。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        proc = _make_proc_mock(returncode=1, stderr="error: could not revert")
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            success, stderr = await mgr.revert_merge_range("abc123")
+
+        assert success is False
+        assert "could not revert" in stderr

@@ -166,14 +166,12 @@ class MergeQueue:
         - entry 在 regression_pending 且 task 仍未知/未完成 → 冻结 queue +
           创建 regression_failure approval + 释放锁（保持 freeze 安全语义）
         """
-        from ato.approval_helpers import create_approval
         from ato.models.db import (
             get_connection,
             get_merge_queue_entry,
             get_merge_queue_state,
             remove_from_merge_queue,
             set_current_merge_story,
-            set_merge_queue_frozen,
         )
 
         db = await get_connection(self._db_path)
@@ -226,7 +224,18 @@ class MergeQueue:
                         )
                         return
 
-                    await self._handle_regression_failure(sid)
+                    # 读取 task error_message
+                    err_cursor = await db.execute(
+                        "SELECT error_message FROM tasks WHERE task_id = ?",
+                        (task_id,),
+                    )
+                    err_row = await err_cursor.fetchone()
+                    test_output = err_row[0] if err_row and err_row[0] else None
+
+                    await self._handle_regression_failure(
+                        sid,
+                        test_output_summary=test_output,
+                    )
                     await set_current_merge_story(db, None)
                     logger.warning(
                         "merge_queue_crash_recovery_regression_completed",
@@ -237,20 +246,11 @@ class MergeQueue:
 
             # regression_pending — regression 测试中途崩溃且结果未知
             # 不能简单释放锁让后续 merge 继续，需要 freeze + 让操作者决策
-            await set_merge_queue_frozen(
-                db,
-                frozen=True,
-                reason=f"crash during regression for {sid}",
-            )
-            await create_approval(
-                db,
-                story_id=sid,
-                approval_type="regression_failure",
-                payload_dict={
-                    "options": ["revert", "fix_forward", "pause"],
-                    "reason": "Orchestrator crashed during regression test",
-                },
-                risk_level="high",
+            # 复用 _handle_regression_failure 保证 payload 合同一致（AC3）
+            # 注：_handle_regression_failure 内部会 complete_merge + freeze + create_approval
+            await self._handle_regression_failure(
+                sid,
+                test_output_summary="Orchestrator crashed during regression test",
             )
             await set_current_merge_story(db, None)
             logger.warning(
@@ -550,6 +550,20 @@ class MergeQueue:
                 await cleanup_process(proc)
 
             exit_code = proc.returncode or 0
+            # 失败时保留 stdout + stderr 摘要供 approval payload 使用（AC3）
+            # 很多测试框架（pytest 等）把失败详情输出到 stdout，不能只看 stderr
+            error_msg: str | None = None
+            if exit_code != 0:
+                stdout_text = _stdout_bytes.decode(errors="replace") if _stdout_bytes else ""
+                stderr_text = _stderr_bytes.decode(errors="replace") if _stderr_bytes else ""
+                combined = ""
+                if stderr_text.strip():
+                    combined += stderr_text.strip()
+                if stdout_text.strip():
+                    if combined:
+                        combined += "\n---\n"
+                    combined += stdout_text.strip()
+                error_msg = combined[:1000] or "Regression test failed"
             db = await get_connection(self._db_path)
             try:
                 await update_task_status(
@@ -557,6 +571,7 @@ class MergeQueue:
                     task_id,
                     "completed",
                     exit_code=exit_code,
+                    error_message=error_msg,
                     completed_at=datetime.now(tz=UTC),
                 )
             finally:
@@ -623,8 +638,19 @@ class MergeQueue:
                     await self._complete_regression_pass(db, story_id)
                     break
                 else:
+                    # 读取 task error_message 作为测试输出摘要（AC3）
+                    err_cursor = await db.execute(
+                        "SELECT error_message FROM tasks WHERE task_id = ?",
+                        (task_id,),
+                    )
+                    err_row = await err_cursor.fetchone()
+                    test_output = err_row[0] if err_row and err_row[0] else None
+
                     # Regression fail — 冻结 queue + 创建 approval
-                    await self._handle_regression_failure(story_id)
+                    await self._handle_regression_failure(
+                        story_id,
+                        test_output_summary=test_output,
+                    )
                     # 释放串行锁——后续由 approval 决策驱动
                     await set_current_merge_story(db, None)
                     logger.info("regression_completed", story_id=story_id, result="fail")
@@ -711,8 +737,18 @@ class MergeQueue:
 
         return False
 
-    async def _handle_regression_failure(self, story_id: str) -> None:
-        """处理 regression 测试失败：冻结 queue + 创建紧急 approval。"""
+    async def _handle_regression_failure(
+        self,
+        story_id: str,
+        *,
+        test_output_summary: str | None = None,
+    ) -> None:
+        """处理 regression 测试失败：冻结 queue + 创建紧急 approval。
+
+        Args:
+            story_id: 失败的 story ID。
+            test_output_summary: 失败的测试输出摘要（AC3 要求）。
+        """
         from ato.approval_helpers import create_approval
         from ato.models.db import (
             complete_merge,
@@ -720,8 +756,24 @@ class MergeQueue:
             set_merge_queue_frozen,
         )
 
+        payload: dict[str, object] = {
+            "options": ["revert", "fix_forward", "pause"],
+            "story_id": story_id,
+        }
+        if test_output_summary:
+            payload["test_output_summary"] = test_output_summary[:500]
+
         db = await get_connection(self._db_path)
         try:
+            # 查询被阻塞的 waiting entries 数量，写入影响范围
+            blocked_cursor = await db.execute(
+                "SELECT COUNT(*) FROM merge_queue WHERE status = 'waiting' AND story_id != ?",
+                (story_id,),
+            )
+            blocked_row = await blocked_cursor.fetchone()
+            if blocked_row and blocked_row[0] > 0:
+                payload["blocked_count"] = blocked_row[0]
+
             await set_merge_queue_frozen(
                 db,
                 frozen=True,
@@ -731,9 +783,7 @@ class MergeQueue:
                 db,
                 story_id=story_id,
                 approval_type="regression_failure",
-                payload_dict={
-                    "options": ["revert", "fix_forward", "pause"],
-                },
+                payload_dict=payload,
                 risk_level="high",
             )
             await complete_merge(db, story_id, success=False)

@@ -705,6 +705,182 @@ class TestStaleLockRecovery:
             await db.close()
 
 
+class TestCrashRecoveryScenarios:
+    """Story 4.5 / Task 5: 崩溃恢复场景验证。"""
+
+    def _make_queue(self, db_path: Path) -> Any:
+        from ato.merge_queue import MergeQueue
+
+        worktree_mgr = AsyncMock()
+        worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.cleanup = AsyncMock()
+
+        tq = AsyncMock()
+        settings = MagicMock()
+        settings.merge_rebase_timeout = 120
+        settings.merge_conflict_resolution_max_attempts = 1
+        settings.regression_test_command = "echo ok"
+        settings.timeout.structured_job = 1800
+
+        queue = MergeQueue(
+            db_path=db_path,
+            worktree_mgr=worktree_mgr,
+            transition_queue=tq,
+            settings=settings,
+        )
+        return queue
+
+    async def test_crash_during_regression_task_failed_recovers_with_freeze(
+        self, initialized_db_path: Path
+    ) -> None:
+        """crash 后 task completed + exit_code != 0 → 冻结 + regression_failure approval。"""
+        from ato.models.db import get_pending_approvals, insert_task
+        from ato.models.schemas import TaskRecord
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        task_id = "task-reg-crash-fail"
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            await dequeue_next_merge(db)
+            await mark_regression_dispatched(db, "s1", task_id)
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id="s1",
+                    phase="regression",
+                    role="qa",
+                    cli_tool="codex",
+                    status="completed",
+                    started_at=now,
+                    completed_at=now,
+                    exit_code=1,
+                    error_message="FAILED test_integration.py",
+                ),
+            )
+            await set_current_merge_story(db, "s1")
+        finally:
+            await db.close()
+
+        await queue.recover_stale_lock()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            state = await get_merge_queue_state(db)
+            assert state.current_merge_story_id is None, "Lock should be released"
+            assert state.frozen is True, "Queue should be frozen"
+            assert "regression failed" in (state.frozen_reason or "")
+
+            pending = await get_pending_approvals(db)
+            reg_approvals = [a for a in pending if a.approval_type == "regression_failure"]
+            assert len(reg_approvals) == 1
+        finally:
+            await db.close()
+
+    async def test_crash_during_regression_unknown_result_freezes_and_escalates(
+        self, initialized_db_path: Path
+    ) -> None:
+        """crash 后 task 仍在 running 且结果未知 → 冻结 + approval（安全语义）。"""
+        from ato.models.db import get_pending_approvals, insert_task
+        from ato.models.schemas import TaskRecord
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        task_id = "task-reg-unknown"
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            await dequeue_next_merge(db)
+            await mark_regression_dispatched(db, "s1", task_id)
+            # Task 仍在 running — 结果未知
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id="s1",
+                    phase="regression",
+                    role="qa",
+                    cli_tool="codex",
+                    status="running",
+                    started_at=now,
+                ),
+            )
+            await set_current_merge_story(db, "s1")
+        finally:
+            await db.close()
+
+        await queue.recover_stale_lock()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            state = await get_merge_queue_state(db)
+            assert state.current_merge_story_id is None
+            assert state.frozen is True
+            assert "regression failed for s1" in (state.frozen_reason or ""), (
+                "Crash recovery uses _handle_regression_failure, same frozen_reason format"
+            )
+
+            # entry 必须被标记为 failed（quarantine），防止 check_regression_completion
+            # 在 lingering task 写回结果后绕过人工决策 gate
+            entry = await get_merge_queue_entry(db, "s1")
+            assert entry is not None
+            assert entry.status == "failed", (
+                "Entry must be quarantined (failed) to prevent "
+                "check_regression_completion from auto-converging"
+            )
+
+            pending = await get_pending_approvals(db)
+            reg_approvals = [a for a in pending if a.approval_type == "regression_failure"]
+            assert len(reg_approvals) == 1
+
+            # payload 合同必须与正常失败路径一致（AC3）
+            import json
+
+            payload = json.loads(reg_approvals[0].payload)
+            assert payload["story_id"] == "s1", (
+                "crash recovery path must include story_id in payload"
+            )
+            assert set(payload["options"]) == {"revert", "fix_forward", "pause"}
+        finally:
+            await db.close()
+
+    async def test_crash_during_merge_removes_entry_allows_rebuild(
+        self, initialized_db_path: Path
+    ) -> None:
+        """crash 后 entry 在 merging → 移除 entry + 释放锁（poll cycle 重建 approval）。"""
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            await dequeue_next_merge(db)  # → merging
+            await set_current_merge_story(db, "s1")
+        finally:
+            await db.close()
+
+        await queue.recover_stale_lock()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            state = await get_merge_queue_state(db)
+            entry = await get_merge_queue_entry(db, "s1")
+            # 锁释放
+            assert state.current_merge_story_id is None
+            # Entry 被移除（不是标记 failed）
+            assert entry is None
+            # Queue 不冻结（仅 regression 失败才冻结）
+            assert state.frozen is False
+        finally:
+            await db.close()
+
+
 class TestRegressionTestExecution:
     """_run_regression_test 正确性验证。"""
 
@@ -1001,3 +1177,448 @@ class TestRegressionTestExecution:
 
         mock_clear_lock.assert_awaited_once_with(fake_db, None)
         fake_db.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Story 4.5: 端到端集成验证追加测试
+# ---------------------------------------------------------------------------
+
+
+class TestHappyPathMergeRegressionPassToDone:
+    """merge → regression pass → merged → done → cleanup 端到端流程（AC1, AC2）。"""
+
+    def _make_queue(self, db_path: Path) -> tuple[Any, Any, Any]:
+        from ato.merge_queue import MergeQueue
+
+        worktree_mgr = AsyncMock()
+        worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.cleanup = AsyncMock()
+
+        tq = AsyncMock()
+        settings = MagicMock()
+        settings.merge_rebase_timeout = 120
+        settings.merge_conflict_resolution_max_attempts = 1
+        settings.regression_test_command = "echo ok"
+        settings.timeout.structured_job = 1800
+
+        queue = MergeQueue(
+            db_path=db_path,
+            worktree_mgr=worktree_mgr,
+            transition_queue=tq,
+            settings=settings,
+        )
+        return queue, worktree_mgr, tq
+
+    async def test_complete_regression_pass_full_flow(
+        self, initialized_db_path: Path
+    ) -> None:
+        """_complete_regression_pass: transition + merge merged + lock released + cleanup。"""
+        from ato.models.db import insert_task
+        from ato.models.schemas import TaskRecord
+
+        queue, worktree_mgr, tq = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        task_id = "task-reg-happy"
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            await dequeue_next_merge(db)
+            await mark_regression_dispatched(db, "s1", task_id)
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id="s1",
+                    phase="regression",
+                    role="qa",
+                    cli_tool="codex",
+                    status="completed",
+                    started_at=now,
+                    completed_at=now,
+                    exit_code=0,
+                ),
+            )
+            await set_current_merge_story(db, "s1")
+        finally:
+            await db.close()
+
+        # 执行 check_regression_completion（模拟 poll cycle）
+        await queue.check_regression_completion()
+
+        # 验证完整闭环
+        db = await get_connection(initialized_db_path)
+        try:
+            entry = await get_merge_queue_entry(db, "s1")
+            state = await get_merge_queue_state(db)
+            assert entry is not None
+            assert entry.status == "merged", "Entry should be marked merged"
+            assert state.current_merge_story_id is None, "Lock should be released"
+            assert state.frozen is False, "Queue should not be frozen"
+        finally:
+            await db.close()
+
+        # 验证 regression_pass event 提交到 TQ
+        tq.submit.assert_awaited_once()
+        event = tq.submit.call_args[0][0]
+        assert event.event_name == "regression_pass"
+        assert event.story_id == "s1"
+
+        # 验证 worktree cleanup
+        worktree_mgr.cleanup.assert_awaited_once_with("s1")
+
+
+class TestRebaseConflictDoesNotFreezeQueue:
+    """AC5: rebase 冲突不触发 merge queue 冻结。"""
+
+    def _make_queue(self, db_path: Path) -> tuple[Any, Any, Any]:
+        from ato.merge_queue import MergeQueue
+
+        worktree_mgr = AsyncMock()
+        worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.get_conflict_files = AsyncMock(return_value=["a.py"])
+        worktree_mgr.abort_rebase = AsyncMock()
+
+        tq = AsyncMock()
+        settings = MagicMock()
+        settings.merge_rebase_timeout = 120
+        settings.merge_conflict_resolution_max_attempts = 0
+        settings.regression_test_command = "echo ok"
+        settings.timeout.structured_job = 1800
+
+        queue = MergeQueue(
+            db_path=db_path,
+            worktree_mgr=worktree_mgr,
+            transition_queue=tq,
+            settings=settings,
+        )
+        return queue, worktree_mgr, tq
+
+    async def test_rebase_conflict_creates_approval_without_freezing(
+        self, initialized_db_path: Path
+    ) -> None:
+        """rebase 冲突创建 approval 但不冻结 queue（AC5）。"""
+        queue, _, _ = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        result = await queue._handle_rebase_conflict("s1", "CONFLICT in a.py")
+        assert result is False  # 需要人工介入
+
+        from ato.models.db import get_pending_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            state = await get_merge_queue_state(db)
+            assert state.frozen is False, "Queue must NOT freeze on rebase conflict"
+
+            pending = await get_pending_approvals(db)
+            conflict_approvals = [a for a in pending if a.approval_type == "rebase_conflict"]
+            assert len(conflict_approvals) == 1
+        finally:
+            await db.close()
+
+
+class TestRegressionFailurePayloadContent:
+    """AC3: regression failure approval payload 内容验证。"""
+
+    def _make_queue(self, db_path: Path) -> Any:
+        from ato.merge_queue import MergeQueue
+
+        worktree_mgr = AsyncMock()
+        worktree_mgr.project_root = Path("/fake/repo")
+
+        tq = AsyncMock()
+        settings = MagicMock()
+        settings.merge_rebase_timeout = 120
+        settings.merge_conflict_resolution_max_attempts = 1
+        settings.regression_test_command = "echo ok"
+        settings.timeout.structured_job = 1800
+
+        queue = MergeQueue(
+            db_path=db_path,
+            worktree_mgr=worktree_mgr,
+            transition_queue=tq,
+            settings=settings,
+        )
+        return queue
+
+    async def test_regression_failure_payload_includes_story_id_and_options(
+        self, initialized_db_path: Path
+    ) -> None:
+        """approval payload 包含 story_id 和三个选项。"""
+        import json
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            _ = await dequeue_next_merge(db)
+        finally:
+            await db.close()
+
+        await queue._handle_regression_failure("s1")
+
+        from ato.models.db import get_pending_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            reg = [a for a in pending if a.approval_type == "regression_failure"]
+            assert len(reg) == 1
+            payload = json.loads(reg[0].payload)
+            assert payload["story_id"] == "s1"
+            assert set(payload["options"]) == {"revert", "fix_forward", "pause"}
+        finally:
+            await db.close()
+
+    async def test_regression_failure_payload_includes_test_output_summary(
+        self, initialized_db_path: Path
+    ) -> None:
+        """有 test_output_summary 时 payload 包含摘要。"""
+        import json
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            _ = await dequeue_next_merge(db)
+        finally:
+            await db.close()
+
+        await queue._handle_regression_failure(
+            "s1",
+            test_output_summary="FAILED tests/test_foo.py::test_bar - AssertionError",
+        )
+
+        from ato.models.db import get_pending_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            reg = [a for a in pending if a.approval_type == "regression_failure"]
+            assert len(reg) == 1
+            payload = json.loads(reg[0].payload)
+            assert "test_output_summary" in payload
+            assert "FAILED" in payload["test_output_summary"]
+        finally:
+            await db.close()
+
+    async def test_check_regression_completion_passes_error_message_to_payload(
+        self, initialized_db_path: Path
+    ) -> None:
+        """check_regression_completion 将 task.error_message 传入 approval payload。"""
+        import json
+
+        from ato.models.db import insert_task
+        from ato.models.schemas import TaskRecord
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        task_id = "task-reg-fail"
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            await dequeue_next_merge(db)
+            await mark_regression_dispatched(db, "s1", task_id)
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id="s1",
+                    phase="regression",
+                    role="qa",
+                    cli_tool="codex",
+                    status="completed",
+                    started_at=now,
+                    completed_at=now,
+                    exit_code=1,
+                    error_message="FAILED test_foo.py::test_bar",
+                ),
+            )
+            await set_current_merge_story(db, "s1")
+        finally:
+            await db.close()
+
+        await queue.check_regression_completion()
+
+        from ato.models.db import get_pending_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            reg = [a for a in pending if a.approval_type == "regression_failure"]
+            assert len(reg) == 1
+            payload = json.loads(reg[0].payload)
+            assert "test_output_summary" in payload
+            assert "FAILED" in payload["test_output_summary"]
+        finally:
+            await db.close()
+
+    async def test_run_regression_test_stores_stderr_on_failure(
+        self, initialized_db_path: Path
+    ) -> None:
+        """regression test 失败时 stderr 存入 task.error_message。"""
+        from ato.models.db import insert_task
+        from ato.models.schemas import TaskRecord
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        task_id = "task-reg-stderr"
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id="s1",
+                    phase="regression",
+                    role="qa",
+                    cli_tool="codex",
+                    status="running",
+                    expected_artifact="regression_test",
+                    started_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"", b"FAILED test_bar.py::test_x - AssertionError")
+        )
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
+            await queue._run_regression_test("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] is not None
+            assert "FAILED" in row[0]
+        finally:
+            await db.close()
+
+    async def test_run_regression_test_captures_stdout_on_failure(
+        self, initialized_db_path: Path
+    ) -> None:
+        """失败详情在 stdout 时（如 pytest）也应被捕获到 error_message。"""
+        from ato.models.db import insert_task
+        from ato.models.schemas import TaskRecord
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        task_id = "task-reg-stdout"
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id="s1",
+                    phase="regression",
+                    role="qa",
+                    cli_tool="codex",
+                    status="running",
+                    expected_artifact="regression_test",
+                    started_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        # pytest 把失败详情输出到 stdout，stderr 为空
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"FAILED tests/test_foo.py::test_bar - assert 1 == 2", b"")
+        )
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
+            await queue._run_regression_test("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] is not None
+            assert "FAILED" in row[0], (
+                "stdout failure details must be captured when stderr is empty"
+            )
+            assert "assert 1 == 2" in row[0]
+        finally:
+            await db.close()
+
+    async def test_run_regression_test_combines_stdout_and_stderr(
+        self, initialized_db_path: Path
+    ) -> None:
+        """stdout 和 stderr 都有内容时合并到 error_message。"""
+        from ato.models.db import insert_task
+        from ato.models.schemas import TaskRecord
+
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        task_id = "task-reg-combined"
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id="s1",
+                    phase="regression",
+                    role="qa",
+                    cli_tool="codex",
+                    status="running",
+                    expected_artifact="regression_test",
+                    started_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate = AsyncMock(
+            return_value=(b"FAILED test_bar", b"ERROR: coverage below threshold")
+        )
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
+            await queue._run_regression_test("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] is not None
+            # 两个来源都应该出现
+            assert "coverage below threshold" in row[0]
+            assert "FAILED test_bar" in row[0]
+        finally:
+            await db.close()

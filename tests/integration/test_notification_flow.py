@@ -246,3 +246,90 @@ class TestNormalNotificationOnApprovalCreation:
                 assert mock_notify.call_args.args[0] == "normal"
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Story 4.5: 通知单一出口验证 + post-commit 一致性
+# ---------------------------------------------------------------------------
+
+
+class TestMilestoneOnlyFromPostCommitHook:
+    """里程碑通知单一出口：只来自 TransitionQueue._on_story_done()。"""
+
+    async def test_milestone_fires_exactly_once_on_regression_pass(
+        self, initialized_db_path: Path
+    ) -> None:
+        """regression_pass → done 时，milestone 通知恰好一次且来自 TQ。"""
+        await _seed_story(initialized_db_path, "s-single-notify", phase="regression")
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        try:
+            with patch("ato.transition_queue.send_user_notification") as mock_notify:
+                event = TransitionEvent(
+                    story_id="s-single-notify",
+                    event_name="regression_pass",
+                    source="agent",
+                    submitted_at=_NOW,
+                )
+                await tq.submit(event)
+                await asyncio.wait_for(tq._queue.join(), timeout=10.0)
+
+                milestone_calls = [
+                    c for c in mock_notify.call_args_list if c.args[0] == "milestone"
+                ]
+                story_milestone = [
+                    c
+                    for c in milestone_calls
+                    if "s-single-notify" in c.args[1] and "Batch" not in c.args[1]
+                ]
+                assert len(story_milestone) == 1, (
+                    f"Expected exactly 1 story milestone, got {len(story_milestone)}"
+                )
+        finally:
+            await tq.stop()
+
+
+class TestRegressionFailureUrgentBellSelfContained:
+    """regression_failure approval 的 URGENT bell 通知自包含在 create_approval 中。"""
+
+    async def test_urgent_bell_includes_short_id_and_command(
+        self, initialized_db_path: Path
+    ) -> None:
+        """URGENT bell 消息包含 approval 短 ID 和快捷命令。"""
+        from ato.approval_helpers import create_approval
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-bell",
+                    title="Bell Test",
+                    status="in_progress",
+                    current_phase="regression",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                ),
+            )
+
+            with patch("ato.approval_helpers.send_user_notification") as mock_notify:
+                approval = await create_approval(
+                    db,
+                    story_id="s-bell",
+                    approval_type="regression_failure",
+                    payload_dict={
+                        "options": ["revert", "fix_forward", "pause"],
+                        "story_id": "s-bell",
+                    },
+                    risk_level="high",
+                )
+
+                mock_notify.assert_called_once()
+                level, msg = mock_notify.call_args.args
+                assert level == "urgent"
+                assert approval.approval_id[:8] in msg
+                assert "regression_failure" in msg
+        finally:
+            await db.close()
