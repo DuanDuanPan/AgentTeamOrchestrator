@@ -36,6 +36,7 @@
 
 generated: 2026-03-24
 last_updated: 2026-03-27
+# Stories 3-3, 4-4, 6-3a created: 2026-03-27
 # Story 4.2 completed: 2026-03-26
 project: AgentTeamOrchestrator
 project_key: NOKEY
@@ -77,7 +78,7 @@ development_status:
   3-2b-fix-dispatch-artifact-verification: done
   3-2c-re-review-scope-narrowing: done
   3-2d-convergence-termination: done
-  3-3-convergence-trust-escalation: backlog
+  3-3-convergence-trust-escalation: ready-for-dev
   epic-3-retrospective: optional
 
   # ===== Epic 4: 人机协作与审批队列 =====
@@ -85,7 +86,7 @@ development_status:
   4-1-approval-queue-nudge: done
   4-2-merge-queue-regression-safety: done
   4-3-uat-interactive-session-completion: done
-  4-4-notification-cli-quality: backlog
+  4-4-notification-cli-quality: ready-for-dev
   4-5-regression-test-merge-integration: backlog
   epic-4-retrospective: optional
 
@@ -102,7 +103,7 @@ development_status:
   6-1b-dark-theme-responsive-layout: done
   6-2a-three-question-header: done
   6-2b-dashboard-story-list: done
-  6-3a-standard-approval-interaction: backlog
+  6-3a-standard-approval-interaction: ready-for-dev
   6-3b-exception-approval-multi-select: backlog
   6-4-story-detail-drill-navigation: backlog
   6-5-search-panel-responsive: backlog
