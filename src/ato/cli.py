@@ -1224,6 +1224,14 @@ def _approval_summary(approval_type: str, payload: str | None) -> str:
         summary += f" ({count}/{threshold})"
     elif approval_type == "crash_recovery" and "phase" in payload_dict:
         summary += f" (phase: {payload_dict['phase']})"
+    elif approval_type == "convergent_loop_escalation" and "final_convergence_rate" in payload_dict:
+        rate = payload_dict["final_convergence_rate"]
+        rounds = payload_dict.get("rounds_completed", "?")
+        blocking = payload_dict.get("open_blocking_count", "?")
+        if isinstance(rate, (int, float)):
+            summary += f" (rate={rate:.0%}, rounds={rounds}, blocking={blocking})"
+        else:
+            summary += f" (rounds={rounds})"
 
     return summary
 
@@ -1276,6 +1284,7 @@ async def _approvals_async(db_path: Path, output_json: bool) -> None:
                     "story_id": a.story_id,
                     "approval_type": a.approval_type,
                     "summary": _approval_summary(a.approval_type, a.payload),
+                    "payload": json.loads(a.payload) if a.payload else None,
                     "recommended_action": a.recommended_action,
                     "risk_level": a.risk_level,
                     "created_at": a.created_at.isoformat(),
@@ -1352,6 +1361,71 @@ def _extract_valid_options(approval: object) -> list[str]:
                 return options
 
     return _DEFAULT_VALID_OPTIONS.get(approval_type, [])
+
+
+@app.command("findings")
+def findings_cmd(
+    story_id: str = typer.Argument(..., help="Story ID"),
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    output_json: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+) -> None:
+    """查看 story 的 finding 跨轮次状态摘要（first_seen_round + current_status）。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            f"数据库不存在: {resolved_db}\n请先执行 'ato init' 初始化项目。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    asyncio.run(_findings_impl(resolved_db, story_id, output_json))
+
+
+async def _findings_impl(db_path: Path, story_id: str, output_json: bool) -> None:
+    """findings 命令的异步实现。"""
+    from ato.models.db import get_connection, get_finding_trajectory
+
+    db = await get_connection(db_path)
+    try:
+        trajectory = await get_finding_trajectory(db, story_id)
+    finally:
+        await db.close()
+
+    if not trajectory:
+        if output_json:
+            typer.echo(json.dumps({"story_id": story_id, "findings": []}))
+        else:
+            typer.echo(f"Story {story_id} 无 findings 记录")
+        return
+
+    if output_json:
+        typer.echo(json.dumps({"story_id": story_id, "findings": trajectory}, ensure_ascii=False))
+        return
+
+    from rich.table import Table
+
+    table = Table(title=f"Finding Trajectory — {story_id}")
+    table.add_column("ID", width=8)
+    table.add_column("Severity", width=10)
+    table.add_column("File", width=30)
+    table.add_column("Rule", width=12)
+    table.add_column("First Seen", width=10)
+    table.add_column("Status", width=12)
+    table.add_column("Description", width=40)
+
+    for f in trajectory:
+        table.add_row(
+            f["finding_id"][:8],
+            f["severity"],
+            f["file_path"],
+            f["rule_id"],
+            str(f["first_seen_round"]),
+            f["current_status"],
+            f["description"][:40],
+        )
+
+    from rich.console import Console
+
+    Console().print(table)
 
 
 @app.command("approve")
@@ -1525,8 +1599,7 @@ async def _uat_async(
     # 2. 验证 story 在 uat 阶段
     if story.current_phase != "uat":
         typer.echo(
-            f"错误：Story '{story_id}' 不在 UAT 阶段"
-            f"（当前: {story.current_phase}）",
+            f"错误：Story '{story_id}' 不在 UAT 阶段（当前: {story.current_phase}）",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1605,6 +1678,5 @@ async def _uat_async(
         pid_path = ato_dir / "orchestrator.pid"
         _send_nudge_safe(pid_path)
         typer.echo(
-            f"✅ Story '{story_id}' UAT 未通过，退回 fix 阶段重新进入质量门控。"
-            f"原因: {reason}"
+            f"✅ Story '{story_id}' UAT 未通过，退回 fix 阶段重新进入质量门控。原因: {reason}"
         )

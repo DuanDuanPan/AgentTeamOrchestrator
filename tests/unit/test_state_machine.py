@@ -332,6 +332,23 @@ class TestIllegalTransitions:
         assert "rejected_event=dev_done" in output
         assert "current_state=queued" in output
 
+    async def test_fixing_rejects_review_pass_logs_warning(
+        self, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """Story 3.3 AC5: fixing 中跳过 fix_done 直接 review_pass → 拒绝 + structlog。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "reviewing")
+        await sm.send("review_fail")
+        assert sm.current_state_value == "fixing"
+        with pytest.raises(TransitionNotAllowed):
+            await sm.send("review_pass")
+        assert sm.current_state_value == "fixing"
+        captured = capfd.readouterr()
+        output = captured.out + captured.err
+        assert "transition_rejected" in output
+        assert "rejected_event=review_pass" in output
+        assert "current_state=fixing" in output
+
 
 # ---------------------------------------------------------------------------
 # Happy Path 完整流程
@@ -660,11 +677,11 @@ class TestRegressionFail:
         await sm.send("uat_pass")
         await sm.send("merge_done")
 
-        assert sm.current_state.id == "regression"
+        assert sm.current_state.id == "regression"  # type: ignore[union-attr]
 
         # regression_fail → fixing
         await sm.send("regression_fail")
-        assert sm.current_state.id == "fixing"
+        assert sm.current_state.id == "fixing"  # type: ignore[union-attr]
 
     async def test_canonical_transitions_regression_has_failure(self) -> None:
         """CANONICAL_TRANSITIONS 中 regression 应该有 fixing 作为 failure 目标。"""
