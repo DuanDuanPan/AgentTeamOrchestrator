@@ -1,6 +1,7 @@
 """widgets — 自定义 TUI 组件。"""
 
 from ato.tui.widgets.approval_card import ApprovalCard
+from ato.tui.widgets.convergent_loop_progress import ConvergentLoopProgress
 from ato.tui.widgets.exception_approval_panel import ExceptionApprovalPanel
 from ato.tui.widgets.heartbeat_indicator import HeartbeatIndicator
 from ato.tui.widgets.search_panel import SearchPanel
@@ -9,6 +10,7 @@ from ato.tui.widgets.three_question_header import ThreeQuestionHeader
 
 __all__ = [
     "ApprovalCard",
+    "ConvergentLoopProgress",
     "ExceptionApprovalPanel",
     "HeartbeatIndicator",
     "SearchPanel",

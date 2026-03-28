@@ -234,6 +234,47 @@ ExceptionApprovalPanel {
     height: auto;
 }
 
+/* ===== StoryDetailView (Story 6.4) ===== */
+
+StoryDetailView {
+    height: 1fr;
+    padding: 1;
+}
+
+#story-detail-scroll {
+    height: 1fr;
+}
+
+#detail-phase-flow {
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    color: $text;
+}
+
+#detail-summary {
+    height: auto;
+    padding: 0 1;
+}
+
+#detail-cl-progress {
+    height: auto;
+    padding: 0 1;
+}
+
+#detail-expanded {
+    height: auto;
+    padding: 0 1;
+    margin: 1 0 0 0;
+}
+
+/* ===== ConvergentLoopProgress (Story 6.4) ===== */
+
+ConvergentLoopProgress {
+    height: 1;
+    padding: 0 1;
+}
+
 /* ===== 空状态 (Story 6.2b) ===== */
 
 .empty-state {
