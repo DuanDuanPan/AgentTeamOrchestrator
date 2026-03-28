@@ -1988,7 +1988,21 @@ class TestPreWorktreeSerialControl:
 
 
 class TestDesignGate:
-    """check_design_gate 通过/失败路径 + 已知工件名匹配。"""
+    """check_design_gate 通过/失败路径 + 持久化证据链强制校验。
+
+    Gate 通过条件（AC#3, AC#4）:
+    - story spec 存在
+    - prototype.pen 存在且 JSON 合法 + 含必需顶层字段
+    - prototype.save-report.json 存在且 json_parse_verified=true + reopen_verified=true
+    """
+
+    _VALID_PEN = '{"version": "1.0.0", "children": [], "variables": {}}'
+    _VALID_SAVE_REPORT = (
+        '{"story_id": "s1", "saved_at": "2026-03-28T00:00:00+00:00",'
+        ' "pen_file": "prototype.pen", "snapshot_file": "prototype.snapshot.json",'
+        ' "children_count": 0, "json_parse_verified": true,'
+        ' "reopen_verified": true, "exported_png_count": 0}'
+    )
 
     @staticmethod
     def _setup_project(tmp_path: Path, story_id: str) -> tuple[Path, Path, Path]:
@@ -2001,8 +2015,240 @@ class TestDesignGate:
         ux_dir = artifacts_dir / f"{story_id}-ux"
         return project_root, artifacts_dir, ux_dir
 
-    async def test_gate_pass_with_ux_spec(self, tmp_path: Path) -> None:
-        """story spec + ux-spec.md（已知工件名）时 gate 通过。"""
+    def _setup_full_prerequisites(
+        self, tmp_path: Path, story_id: str = "s1"
+    ) -> tuple[Path, Path, Path]:
+        """构建完整通过条件：story spec + valid .pen + valid snapshot + valid save-report。"""
+        root, arts, ux = self._setup_project(tmp_path, story_id)
+        (arts / f"{story_id}.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.snapshot.json").write_text('{"version":"1.0.0","children":[]}')
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+        return root, arts, ux
+
+    # --- Happy path ---
+
+    async def test_gate_pass_minimal(self, tmp_path: Path) -> None:
+        """最小通过场景：story spec + valid .pen + valid save-report。"""
+        from ato.core import check_design_gate
+
+        root, _arts, _ux = self._setup_full_prerequisites(tmp_path)
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is True
+        assert result.pen_integrity_ok is True
+        assert result.save_report_valid is True
+
+    async def test_gate_pass_with_extra_artifacts(self, tmp_path: Path) -> None:
+        """完整通过场景 + 额外工件（ux-spec, snapshot, exports）。"""
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        (ux / "ux-spec.md").touch()
+        (ux / "prototype.snapshot.json").touch()
+        exports = ux / "exports"
+        exports.mkdir()
+        (exports / "screen.png").touch()
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is True
+        # .pen + save-report + ux-spec + snapshot + 1 png = 5
+        assert result.artifact_count == 5
+
+    # --- Story spec 缺失 ---
+
+    async def test_gate_fail_no_story_spec(self, tmp_path: Path) -> None:
+        """story spec 不存在时 gate 失败。"""
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_project(tmp_path, "s1")
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.story_spec_exists is False
+        assert "Story spec missing" in result.reason
+
+    # --- .pen 缺失或无效 ---
+
+    async def test_gate_fail_pen_missing(self, tmp_path: Path) -> None:
+        """prototype.pen 不存在时 gate 失败 (AC#4)。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.pen_integrity_ok is False
+        assert "not found" in result.reason.lower()
+
+    async def test_gate_fail_pen_invalid_json(self, tmp_path: Path) -> None:
+        """prototype.pen 存在但 JSON 无效时 gate 失败 (AC#4)。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text("not valid json {{{")
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.pen_integrity_ok is False
+        assert "integrity" in result.reason.lower()
+
+    async def test_gate_fail_pen_missing_required_keys(self, tmp_path: Path) -> None:
+        """prototype.pen 缺少必需顶层字段时 gate 失败 (AC#4)。"""
+        import json
+
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(json.dumps({"version": "1.0.0"}))
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.pen_integrity_ok is False
+
+    # --- snapshot 缺失或无效 ---
+
+    async def test_gate_fail_snapshot_missing(self, tmp_path: Path) -> None:
+        """prototype.snapshot.json 不存在时 gate 失败 (AC#3)。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.snapshot_valid is False
+        assert "snapshot" in result.reason.lower()
+
+    async def test_gate_fail_snapshot_invalid_json(self, tmp_path: Path) -> None:
+        """prototype.snapshot.json 存在但 JSON 无效时 gate 失败 (AC#3)。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.snapshot.json").write_text("not json {{{")
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.snapshot_valid is False
+
+    async def test_gate_fail_snapshot_wrong_shape(self, tmp_path: Path) -> None:
+        """prototype.snapshot.json 为合法 JSON 但非结构化快照时 gate 失败 (AC#3)。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.snapshot.json").write_text('{"foo":1}')
+        (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.snapshot_valid is False
+        assert "snapshot" in result.reason.lower()
+
+    # --- save-report 缺失或无效 ---
+
+    async def test_gate_fail_save_report_missing(self, tmp_path: Path) -> None:
+        """prototype.save-report.json 不存在时 gate 失败 (AC#3)。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.save_report_valid is False
+        assert "not found" in result.reason.lower()
+
+    async def test_gate_fail_save_report_json_parse_false(self, tmp_path: Path) -> None:
+        """save-report 中 json_parse_verified=false 时 gate 失败 (AC#4)。"""
+        import json
+
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+        (ux / "prototype.save-report.json").write_text(
+            json.dumps(
+                {
+                    "story_id": "s1",
+                    "saved_at": "2026-03-28T00:00:00+00:00",
+                    "pen_file": "prototype.pen",
+                    "snapshot_file": "prototype.snapshot.json",
+                    "children_count": 0,
+                    "json_parse_verified": False,
+                    "reopen_verified": True,
+                    "exported_png_count": 0,
+                }
+            )
+        )
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.save_report_valid is False
+        assert "save-report" in result.reason.lower()
+
+    async def test_gate_fail_save_report_reopen_false(self, tmp_path: Path) -> None:
+        """save-report 中 reopen_verified=false 时 gate 失败 (AC#4)。"""
+        import json
+
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").write_text(self._VALID_PEN)
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+        (ux / "prototype.save-report.json").write_text(
+            json.dumps(
+                {
+                    "story_id": "s1",
+                    "saved_at": "2026-03-28T00:00:00+00:00",
+                    "pen_file": "prototype.pen",
+                    "snapshot_file": "prototype.snapshot.json",
+                    "children_count": 0,
+                    "json_parse_verified": True,
+                    "reopen_verified": False,
+                    "exported_png_count": 0,
+                }
+            )
+        )
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.save_report_valid is False
+
+    # --- 只有部分工件不足以通过 gate ---
+
+    async def test_gate_fail_only_ux_spec(self, tmp_path: Path) -> None:
+        """只有 ux-spec.md 无 .pen/save-report 时 gate 失败。"""
         from ato.core import check_design_gate
 
         root, arts, ux = self._setup_project(tmp_path, "s1")
@@ -2011,35 +2257,36 @@ class TestDesignGate:
         (ux / "ux-spec.md").touch()
 
         result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
-        assert result.passed is True
-        assert result.story_spec_exists is True
-        assert result.artifact_count == 1
+        assert result.passed is False
+        assert result.pen_integrity_ok is False
 
-    async def test_gate_pass_with_pen_file(self, tmp_path: Path) -> None:
-        """prototype.pen（已知工件名）时 gate 通过。"""
+    async def test_gate_fail_only_snapshot(self, tmp_path: Path) -> None:
+        """只有 snapshot.json 无 .pen/save-report 时 gate 失败。"""
         from ato.core import check_design_gate
 
         root, arts, ux = self._setup_project(tmp_path, "s1")
         (arts / "s1.md").touch()
         ux.mkdir()
-        (ux / "prototype.pen").touch()
-
-        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
-        assert result.passed is True
-
-    async def test_gate_fail_no_story_spec(self, tmp_path: Path) -> None:
-        """story spec 不存在时 gate 失败。"""
-        from ato.core import check_design_gate
-
-        root, _arts, ux = self._setup_project(tmp_path, "s1")
-        ux.mkdir()
-        (ux / "prototype.pen").touch()
+        (ux / "prototype.snapshot.json").touch()
 
         result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
         assert result.passed is False
-        assert result.story_spec_exists is False
-        assert result.artifact_count == 1
-        assert "Story spec missing" in result.reason
+        assert result.pen_integrity_ok is False
+
+    async def test_gate_fail_only_exports(self, tmp_path: Path) -> None:
+        """只有 exports/*.png 无 .pen/save-report 时 gate 失败。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+        (exports / "screen.png").touch()
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+
+    # --- 无 UX 目录 / 无工件 ---
 
     async def test_gate_fail_no_ux_dir(self, tmp_path: Path) -> None:
         """UX 目录不存在时 gate 失败。"""
@@ -2052,7 +2299,6 @@ class TestDesignGate:
         assert result.passed is False
         assert result.story_spec_exists is True
         assert result.artifact_count == 0
-        assert "No design artifacts" in result.reason
 
     async def test_gate_fail_empty_ux_dir(self, tmp_path: Path) -> None:
         """UX 目录存在但没有已知工件时 gate 失败。"""
@@ -2068,7 +2314,7 @@ class TestDesignGate:
         assert result.artifact_count == 0
 
     async def test_gate_fail_unknown_json(self, tmp_path: Path) -> None:
-        """非核心工件的 .json（如 debug.json）不应被计为有效工件。"""
+        """非核心工件的 .json（如 debug.json）不被计为有效工件。"""
         from ato.core import check_design_gate
 
         root, arts, ux = self._setup_project(tmp_path, "s1")
@@ -2080,44 +2326,21 @@ class TestDesignGate:
         assert result.passed is False
         assert result.artifact_count == 0
 
-    async def test_gate_pass_exports_subdir_png(self, tmp_path: Path) -> None:
-        """exports/ 子目录下的 .png 应被 gate 识别。"""
+    # --- artifact_count 计数验证 ---
+
+    async def test_artifact_count_includes_all_known_names(self, tmp_path: Path) -> None:
+        """artifact_count 正确计数所有已知核心工件类型。"""
         from ato.core import check_design_gate
 
-        root, arts, ux = self._setup_project(tmp_path, "s1")
-        (arts / "s1.md").touch()
-        exports = ux / "exports"
-        exports.mkdir(parents=True)
-        (exports / "screen.png").touch()
-
-        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
-        assert result.passed is True
-        assert result.artifact_count >= 1
-
-    async def test_gate_pass_snapshot_json(self, tmp_path: Path) -> None:
-        """prototype.snapshot.json（已知工件名）应被 gate 识别。"""
-        from ato.core import check_design_gate
-
-        root, arts, ux = self._setup_project(tmp_path, "s1")
-        (arts / "s1.md").touch()
-        ux.mkdir()
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        (ux / "ux-spec.md").touch()
         (ux / "prototype.snapshot.json").touch()
 
         result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
-        assert result.passed is True
-        assert result.artifact_count >= 1
+        # .pen + save-report + ux-spec + snapshot = 4
+        assert result.artifact_count == 4
 
-    async def test_gate_pass_save_report_json(self, tmp_path: Path) -> None:
-        """prototype.save-report.json（已知工件名）应被 gate 识别。"""
-        from ato.core import check_design_gate
-
-        root, arts, ux = self._setup_project(tmp_path, "s1")
-        (arts / "s1.md").touch()
-        ux.mkdir()
-        (ux / "prototype.save-report.json").touch()
-
-        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
-        assert result.passed is True
+    # --- 日志 ---
 
     async def test_gate_logs_event(
         self,

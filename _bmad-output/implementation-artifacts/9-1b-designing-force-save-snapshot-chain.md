@@ -1,6 +1,6 @@
 # Story 9.1b: Designing 阶段强制落盘与设计快照链路
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- Depends on: Story 9.1a -->
@@ -76,25 +76,25 @@ And 单元测试覆盖原子写入、回读失败和字段保留三类场景
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 实现 `.pen` 结构化回写 helper (AC: #1, #2)
-  - [ ] 1.1 在 `src/ato/design_artifacts.py` 中实现 `.pen` 读取与回写 helper
-  - [ ] 1.2 实现“保留顶层字段，只替换 `children`”逻辑
-  - [ ] 1.3 使用临时文件 + rename 的原子写入策略
+- [x] Task 1: 实现 `.pen` 结构化回写 helper (AC: #1, #2)
+  - [x] 1.1 在 `src/ato/design_artifacts.py` 中实现 `.pen` 读取与回写 helper
+  - [x] 1.2 实现”保留顶层字段，只替换 `children`”逻辑
+  - [x] 1.3 使用临时文件 + rename 的原子写入策略
 
-- [ ] Task 2: 实现 snapshot / save-report 生成 (AC: #3)
-  - [ ] 2.1 写入 `prototype.snapshot.json`
-  - [ ] 2.2 写入 `prototype.save-report.json`
-  - [ ] 2.3 约定 save-report 字段结构
+- [x] Task 2: 实现 snapshot / save-report 生成 (AC: #3)
+  - [x] 2.1 写入 `prototype.snapshot.json`
+  - [x] 2.2 写入 `prototype.save-report.json`
+  - [x] 2.3 约定 save-report 字段结构
 
-- [ ] Task 3: 集成 designing 保存后校验 (AC: #4)
-  - [ ] 3.1 在 designing 流程中接入 `batch_get(readDepth=99, includePathGeometry=true)`
-  - [ ] 3.2 接入 JSON parse 验证
-  - [ ] 3.3 接入 MCP reopen / 回读验证
+- [x] Task 3: 集成 designing 保存后校验 (AC: #4)
+  - [x] 3.1 在 designing 流程中接入 `batch_get(readDepth=99, includePathGeometry=true)`
+  - [x] 3.2 接入 JSON parse 验证
+  - [x] 3.3 接入 MCP reopen / 回读验证
 
-- [ ] Task 4: 测试失败恢复与字段保留 (AC: #5)
-  - [ ] 4.1 扩展 `tests/unit/test_design_artifacts.py`（由 Story 9.1a 创建）
-  - [ ] 4.2 覆盖顶层字段保留
-  - [ ] 4.3 覆盖写入失败与回读失败
+- [x] Task 4: 测试失败恢复与字段保留 (AC: #5)
+  - [x] 4.1 扩展 `tests/unit/test_design_artifacts.py`（由 Story 9.1a 创建）
+  - [x] 4.2 覆盖顶层字段保留
+  - [x] 4.3 覆盖写入失败与回读失败
 
 ## Dev Notes
 
@@ -133,10 +133,30 @@ And 单元测试覆盖原子写入、回读失败和字段保留三类场景
 
 ### Agent Model Used
 
-待 dev-story 填写
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- 全部 1391 单元测试通过（0 回归）
+- ruff check + ruff format + mypy strict 全部通过
+
 ### Completion Notes List
 
+- Task 1: 在 `design_artifacts.py` 新增 `read_pen_file()`、`_atomic_write_json()`、`force_persist_pen()` 三个函数，实现结构化回写（保留顶层字段，只替换 children），使用 `tempfile.mkstemp` + `os.replace` 原子写入策略。新增 `PenPersistResult` / `PenVerifyResult` frozen dataclass。
+- Task 2: 新增 `write_design_snapshot()` 和 `write_save_report()` 函数，快照为全量 JSON 输出，save-report 包含 AC#3 规定的全部 8 个字段（story_id, saved_at, pen_file, snapshot_file, children_count, json_parse_verified, reopen_verified, exported_png_count）。新增 `SAVE_REPORT_REQUIRED_KEYS` 常量。
+- Task 3: 新增 `verify_pen_integrity()` 和 `verify_save_report()` 校验函数。更新 `recovery.py` 中的 designing prompt，将步骤 5（强制落盘）扩展为详细的"抓树 → 回写 → 验证"链路，新增步骤 6（落盘验证：本地 json.load + MCP batch_get 回读），明确禁止直接覆盖 .pen 文件。
+- Task 4: 在 `test_design_artifacts.py` 新增 8 个测试类、28 个测试用例，覆盖：读取成功/失败/无效 JSON、结构化回写保留顶层字段/未知字段/原子写入失败不损坏原文件、快照写入/父目录自动创建、save-report 全字段/ISO 时间戳/默认值/语义校验（json_parse_verified=false / reopen_verified=false 拒绝）、校验通过/失败/缺失键、端到端集成链路。
+- Review Fix (AC#3/AC#4 gate 三轮迭代): gate 通过条件最终为 `story_spec + pen_integrity_ok + snapshot_valid + save_report_valid`。三个核心产出物（.pen / snapshot / save-report）均为强制前置，默认 False。`verify_save_report()` 验证 boolean 语义。新增 `verify_snapshot()` 验证 JSON 合法性。`DesignGateResult` 含 `pen_integrity_ok` / `snapshot_valid` / `save_report_valid` 字段。TestDesignGate 共 19 个测试。
+
+### Change Log
+
+- 2026-03-28: Story 9.1b 实现完成 — 强制落盘链、快照/报告生成、保存后校验、designing prompt 更新
+- 2026-03-28: Review Fix — gate 强制要求 .pen + snapshot + save-report 三件产出物全部存在且通过验证
+
 ### File List
+
+- `src/ato/design_artifacts.py` — 新增强制落盘/校验函数 + verify_snapshot + verify_save_report 语义校验（modified）
+- `src/ato/core.py` — check_design_gate 强制三件持久化证据链（modified）
+- `src/ato/recovery.py` — 更新 designing prompt 步骤 5-7（modified）
+- `tests/unit/test_design_artifacts.py` — 新增 28 个测试（modified）
+- `tests/unit/test_core.py` — 重写 TestDesignGate 19 个测试（modified）

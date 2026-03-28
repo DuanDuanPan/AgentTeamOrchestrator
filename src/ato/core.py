@@ -92,6 +92,9 @@ class DesignGateResult:
     artifact_count: int
     artifact_dir: str
     reason: str
+    pen_integrity_ok: bool = False
+    snapshot_valid: bool = False
+    save_report_valid: bool = False
 
 
 async def check_design_gate(
@@ -99,14 +102,18 @@ async def check_design_gate(
     task_id: str,
     project_root: Path,
 ) -> DesignGateResult:
-    """验证 designing 阶段产出物是否存在。
+    """验证 designing 阶段产出物的存在性与完整性。
 
     使用 ``design_artifacts`` helper 推导路径，按已知核心工件名匹配。
 
     检查条件（全部满足才 pass）:
     1. Story spec 仍位于 ``{ARTIFACTS_REL}/{story_id}.md``
-    2. UX 设计目录存在
-    3. 该目录下存在至少 1 个已知核心工件（按 ``DESIGN_ARTIFACT_NAMES`` 匹配）
+    2. ``prototype.pen`` 必须存在且 JSON 合法、含必需顶层字段 (AC#1, AC#4)
+    3. ``prototype.snapshot.json`` 必须存在且为合法 JSON (AC#3)
+    4. ``prototype.save-report.json`` 必须存在且验证标志均为 True (AC#3, AC#4)
+
+    ``artifact_count`` 为信息性统计（含 ux-spec.md / exports 等），
+    不作为独立通过条件。
 
     Returns:
         DesignGateResult 包含 passed 状态和具体失败原因。
@@ -115,6 +122,9 @@ async def check_design_gate(
         ARTIFACTS_REL,
         DESIGN_ARTIFACT_NAMES,
         derive_design_artifact_paths,
+        verify_pen_integrity,
+        verify_save_report,
+        verify_snapshot,
     )
 
     paths = derive_design_artifact_paths(story_id, project_root)
@@ -138,16 +148,43 @@ async def check_design_gate(
                 if (ux_dir / name).is_file():
                     artifact_count += 1
 
-    passed = story_spec_exists and artifact_count > 0
+    # --- 强制持久化校验 (Story 9.1b AC#1, AC#3, AC#4) ---
+    # 三个核心产出物均为强制前置条件，不存在 = 校验未通过。
+    pen_path = paths["prototype_pen"]
+    pen_integrity_ok = False
+    if pen_path.is_file():
+        pen_result = verify_pen_integrity(pen_path)
+        pen_integrity_ok = pen_result.json_parse_ok and pen_result.required_keys_present
 
+    snapshot_path = paths["snapshot_json"]
+    snapshot_valid = verify_snapshot(snapshot_path)
+
+    save_report_path = paths["save_report_json"]
+    save_report_valid = False
+    if save_report_path.is_file():
+        save_report_valid = verify_save_report(save_report_path)
+
+    passed = (
+        story_spec_exists and pen_integrity_ok and snapshot_valid and save_report_valid
+    )
+
+    # Reason: 按优先级报告最重要的失败原因
     if passed:
         reason = "all checks passed"
-    elif not story_spec_exists and artifact_count == 0:
-        reason = "Story spec missing AND no design artifacts"
     elif not story_spec_exists:
         reason = f"Story spec missing: {story_spec}"
+    elif not pen_path.is_file():
+        reason = f"prototype.pen not found: {pen_path}"
+    elif not pen_integrity_ok:
+        reason = f"prototype.pen JSON integrity check failed: {pen_path}"
+    elif not snapshot_valid:
+        reason = f"prototype.snapshot.json missing or invalid: {snapshot_path}"
+    elif not save_report_path.is_file():
+        reason = f"prototype.save-report.json not found: {save_report_path}"
+    elif not save_report_valid:
+        reason = f"save-report verification flags indicate failure: {save_report_path}"
     else:
-        reason = f"No design artifacts in {ux_dir}"
+        reason = "unknown failure"
 
     logger.info(
         "design_gate_check",
@@ -157,6 +194,9 @@ async def check_design_gate(
         story_spec_exists=story_spec_exists,
         artifact_dir=str(ux_dir),
         artifact_count=artifact_count,
+        pen_integrity_ok=pen_integrity_ok,
+        snapshot_valid=snapshot_valid,
+        save_report_valid=save_report_valid,
         result="pass" if passed else "fail",
     )
 
@@ -166,6 +206,9 @@ async def check_design_gate(
         artifact_count=artifact_count,
         artifact_dir=str(ux_dir),
         reason=reason,
+        pen_integrity_ok=pen_integrity_ok,
+        snapshot_valid=snapshot_valid,
+        save_report_valid=save_report_valid,
     )
 
 
