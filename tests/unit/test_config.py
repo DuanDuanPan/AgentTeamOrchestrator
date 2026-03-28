@@ -10,7 +10,6 @@ import pytest
 from ato.config import (
     ATOSettings,
     ConvergentLoopConfig,
-    CostConfig,
     PhaseDefinition,
     TimeoutConfig,
     build_phase_definitions,
@@ -75,7 +74,7 @@ class TestValidConfigLoad:
         assert isinstance(config.phases, list)
         assert isinstance(config.convergent_loop, ConvergentLoopConfig)
         assert isinstance(config.timeout, TimeoutConfig)
-        assert isinstance(config.cost, CostConfig)
+        assert config.cost is None
         assert isinstance(config.model_map, dict)
         assert config.max_concurrent_agents == 4
 
@@ -87,8 +86,7 @@ class TestValidConfigLoad:
         assert config.convergent_loop.convergence_threshold == 0.5
         assert config.timeout.structured_job == 1800
         assert config.timeout.interactive_session == 7200
-        assert config.cost.budget_per_story == 5.0
-        assert config.cost.blocking_threshold == 10
+        assert config.cost is None
         assert config.model_map == {}
 
     def test_custom_values_override_defaults(self, tmp_path: Path) -> None:
@@ -131,6 +129,106 @@ cost:
         load_config(p)
         elapsed = time.monotonic() - start
         assert elapsed <= 3.0, f"配置解析耗时 {elapsed:.2f}s，超过 3s 限制"
+
+
+# ---------------------------------------------------------------------------
+# AC1/AC2/AC4: cost 配置段可选
+# ---------------------------------------------------------------------------
+
+
+class TestCostOptional:
+    """Story 8.3: cost 配置段可省略。"""
+
+    def test_no_cost_section_loads_successfully(self, tmp_path: Path) -> None:
+        """AC1: 完全没有 cost 配置段时 load_config 成功且 cost 为 None。"""
+        p = _write_yaml(tmp_path, _MINIMAL_VALID_YAML)
+        config = load_config(p)
+        assert config.cost is None
+
+    def test_cost_null_equivalent_to_omitted(self, tmp_path: Path) -> None:
+        """AC1: cost: null 与完全省略 cost 行为一致。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+cost: null
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.cost is None
+
+    def test_explicit_cost_still_works(self, tmp_path: Path) -> None:
+        """AC4: 显式 cost 配置仍生效。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+cost:
+  budget_per_story: 5.0
+  blocking_threshold: 7
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.cost is not None
+        assert config.cost.budget_per_story == 5.0
+        assert config.cost.blocking_threshold == 7
+
+    def test_no_cost_skips_numeric_validation(self, tmp_path: Path) -> None:
+        """AC2: cost=None 时跳过 cost 数值校验，其他字段仍校验。"""
+        p = _write_yaml(tmp_path, _MINIMAL_VALID_YAML)
+        config = load_config(p)
+        assert config.cost is None
+        # 其他字段正常校验（通过加载成功即可证明）
+
+    def test_explicit_cost_invalid_budget_still_rejected(self, tmp_path: Path) -> None:
+        """AC2: 当 cost 显式存在时，非法值仍按现有规则报错。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+cost:
+  budget_per_story: 0
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match=r"budget_per_story.*> 0"):
+            load_config(p)
+
+    def test_explicit_cost_invalid_threshold_still_rejected(self, tmp_path: Path) -> None:
+        """AC2: 当 cost 显式存在时，非法 blocking_threshold 仍按现有规则报错。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+cost:
+  blocking_threshold: -1
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match=r"blocking_threshold.*>= 0"):
+            load_config(p)
 
 
 # ---------------------------------------------------------------------------
