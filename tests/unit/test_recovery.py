@@ -1957,3 +1957,99 @@ class TestDesigningPhaseRecovery:
         from ato.recovery import _PHASE_SUCCESS_EVENT
 
         assert _PHASE_SUCCESS_EVENT["designing"] == "design_done"
+
+
+# ---------------------------------------------------------------------------
+# Story 9.1a: designing prompt 合同修正测试
+# ---------------------------------------------------------------------------
+
+
+class TestDesigningPromptContract:
+    """验证 designing prompt 不再含错误的"自动保存/加密格式"假设。"""
+
+    def test_prompt_no_auto_create_save(self) -> None:
+        """designing prompt 不再声明 batch_design 会自动创建/保存 .pen 文件。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        assert "自动创建" not in prompt
+        assert "自动保存" not in prompt
+        assert "文件会自动" not in prompt
+
+    def test_prompt_no_encrypted_format(self) -> None:
+        """designing prompt 不再声明 .pen 是"加密格式"。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        assert "加密格式" not in prompt
+        assert "加密" not in prompt
+
+    def test_prompt_requires_template_prepare(self) -> None:
+        """designing prompt 要求先准备现有 .pen 模板。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        assert "模板" in prompt
+        assert "open_document" in prompt
+
+    def test_prompt_requires_force_save(self) -> None:
+        """designing prompt 要求设计完成后进入"强制落盘"步骤。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        assert "强制落盘" in prompt
+
+    def test_prompt_execution_order(self) -> None:
+        """designing prompt 明确模板→MCP编辑→强制落盘→导出PNG的执行顺序。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        # 确认关键步骤的出现顺序
+        idx_template = prompt.index("模板")
+        idx_open = prompt.index("open_document")
+        idx_batch = prompt.index("batch_design")
+        idx_save = prompt.index("强制落盘")
+        idx_export = prompt.index("export_nodes")
+        assert idx_template < idx_open < idx_batch < idx_save < idx_export
+
+    def test_format_prompt_includes_template_path(self) -> None:
+        """_format_structured_job_prompt 结果包含模板路径占位符。"""
+        from ato.recovery import (
+            _STRUCTURED_JOB_PROMPTS,
+            _format_structured_job_prompt,
+        )
+
+        prompt = _format_structured_job_prompt(
+            _STRUCTURED_JOB_PROMPTS["designing"],
+            "test-story-1",
+        )
+        assert "prototype-template.pen" in prompt
+        assert "test-story-1-ux/prototype.pen" in prompt
+        assert "save-report.json" in prompt
+
+
+class TestPenTemplateBaseline:
+    """验证仓库中存在可解析 JSON 的 .pen 模板文件 (AC2)。"""
+
+    def test_template_file_exists(self) -> None:
+        """schemas/prototype-template.pen 文件存在。"""
+        template = Path(__file__).resolve().parents[2] / "schemas" / "prototype-template.pen"
+        assert template.is_file(), f"Template not found: {template}"
+
+    def test_template_is_valid_json(self) -> None:
+        """模板文件可解析为 JSON。"""
+        import json
+
+        template = Path(__file__).resolve().parents[2] / "schemas" / "prototype-template.pen"
+        data = json.loads(template.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+
+    def test_template_has_required_top_level_fields(self) -> None:
+        """模板包含 version / children / variables 顶层字段。"""
+        import json
+
+        template = Path(__file__).resolve().parents[2] / "schemas" / "prototype-template.pen"
+        data = json.loads(template.read_text(encoding="utf-8"))
+        assert "version" in data
+        assert "children" in data
+        assert "variables" in data

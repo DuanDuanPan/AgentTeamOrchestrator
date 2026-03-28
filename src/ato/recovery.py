@@ -109,41 +109,59 @@ _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
         "## 工作流程\n\n"
         "1. **读取 story 规格** — 理解功能需求和 Acceptance Criteria\n"
         "2. **运行 /bmad-create-ux-design** — 生成 UX 设计规格（交互模式、信息架构、页面流）\n"
-        "   - 将 UX 规格保存为 {ux_dir}/ux-spec.md\n"
-        "3. **使用 Pencil MCP 创建视觉设计**\n"
-        "   a. 调用 get_guidelines(topic) 获取设计指南（web-app / mobile-app 按需选择）\n"
-        "   b. 调用 get_style_guide_tags → get_style_guide(tags) 获取风格灵感\n"
-        "   c. 调用 batch_design(filePath=\"{ux_dir}/prototype.pen\", operations=...) "
-        "创建线框图/高保真原型\n"
-        "   d. 调用 get_screenshot 验证设计结果是否正确\n"
-        "   e. 调用 export_nodes(filePath=..., outputDir=\"{ux_dir}\", nodeIds=[...], "
-        "format=\"png\") 导出截图\n"
-        "4. **可选: 使用 /frontend-design** — 如果 story 需要可交互的代码级 UI 原型\n\n"
+        "   - 将 UX 规格保存为 {ux_spec}\n"
+        "3. **准备 .pen 模板** — 从仓库模板 `{template_pen}` 复制到 "
+        "`{prototype_pen}`\n"
+        "4. **使用 Pencil MCP 编辑设计**\n"
+        '   a. 调用 open_document(filePath="{prototype_pen}") 打开已有模板\n'
+        "   b. 调用 get_guidelines(topic) 获取设计指南（web-app / mobile-app 按需选择）\n"
+        "   c. 调用 get_style_guide_tags → get_style_guide(tags) 获取风格灵感\n"
+        "   d. 调用 batch_design(operations=...) 在已打开文件上创建线框图/高保真原型\n"
+        "   e. 调用 get_screenshot 验证设计结果是否正确\n"
+        "5. **强制落盘** — 设计完成后执行持久化步骤：\n"
+        "   a. 调用 snapshot_layout 获取布局快照，保存为 {snapshot_json}\n"
+        "   b. 生成落盘报告 {save_report_json}（完整流程由 Story 9.1b 实现）\n"
+        "   c. 验证 {prototype_pen} 文件已落盘\n"
+        '6. **导出 PNG** — 调用 export_nodes(outputDir="{exports_dir}", '
+        'nodeIds=[...], format="png") 导出设计截图\n'
+        "7. **可选: 使用 /frontend-design** — 如果 story 需要可交互的代码级 UI 原型\n\n"
         "## 产出物要求\n\n"
-        "所有文件保存到 {ux_dir}/ 目录下，至少包含:\n"
+        "所有文件保存到 {ux_dir}/ 目录下，核心工件：\n"
         "- ux-spec.md（UX 设计规格文档）\n"
-        "- prototype.pen（Pencil 设计文件）\n"
-        "- 至少 1 个 .png 截图（设计预览）\n\n"
+        "- prototype.pen（从模板派生的 Pencil 设计文件）\n"
+        "- prototype.snapshot.json（布局快照）\n"
+        "- prototype.save-report.json（落盘报告）\n"
+        "- exports/*.png（至少 1 个设计预览截图）\n\n"
         "## 重要约束\n\n"
-        "- batch_design 的 filePath 参数直接指向目标路径，文件会自动创建/保存\n"
-        "- .pen 文件是加密格式，只能通过 Pencil MCP 工具读写，不要用 Read/Write 工具\n"
-        "- 设计完成后必须用 get_screenshot 验证视觉效果\n"
+        "- .pen 模板必须先复制到目标路径，再通过 open_document 打开编辑\n"
+        "- batch_design 在已打开的文件上操作，不具备新建文件能力\n"
+        "- 设计完成后必须执行强制落盘步骤，确保文件持久化\n"
         "- 不要跳过 export_nodes 步骤，.png 截图是 design gate 验证的一部分"
     ),
 }
+
 
 def _format_structured_job_prompt(template: str, story_id: str) -> str:
     """Format a structured_job prompt template with story-specific variables.
 
     Paths are project-root-relative (agent cwd = project_root for pre-worktree phases).
+    Uses design_artifacts helper for designing phase path derivation.
     """
-    artifacts_dir = "_bmad-output/implementation-artifacts"
+    from ato.design_artifacts import ARTIFACTS_REL, derive_design_artifact_paths_relative
+
+    artifacts_dir = ARTIFACTS_REL
     story_file = f"{artifacts_dir}/{story_id}.md"
-    ux_dir = f"{artifacts_dir}/{story_id}-ux"
+    rel = derive_design_artifact_paths_relative(story_id)
     return template.format(
         story_id=story_id,
         story_file=story_file,
-        ux_dir=ux_dir,
+        ux_dir=rel["ux_dir"],
+        ux_spec=rel["ux_spec"],
+        template_pen=rel["template_pen"],
+        prototype_pen=rel["prototype_pen"],
+        snapshot_json=rel["snapshot_json"],
+        save_report_json=rel["save_report_json"],
+        exports_dir=rel["exports_dir"],
     )
 
 
@@ -824,9 +842,7 @@ class RecoveryEngine:
 
             prompt_template = _STRUCTURED_JOB_PROMPTS.get(task.phase)
             if prompt_template is not None:
-                prompt = _format_structured_job_prompt(
-                    prompt_template, task.story_id
-                )
+                prompt = _format_structured_job_prompt(prompt_template, task.story_id)
             else:
                 prompt = (
                     f"Recovery re-dispatch for story {task.story_id}, "
@@ -899,14 +915,12 @@ class RecoveryEngine:
         """
         from ato.core import check_design_gate, derive_project_root
 
-        # 从 db_path 推导项目根目录（支持自定义 db 布局）
         project_root = derive_project_root(self._db_path)
-        artifacts_dir = project_root / "_bmad-output" / "implementation-artifacts"
 
         result = await check_design_gate(
             story_id=task.story_id,
             task_id=task.task_id,
-            artifacts_dir=artifacts_dir,
+            project_root=project_root,
         )
 
         if not result.passed:

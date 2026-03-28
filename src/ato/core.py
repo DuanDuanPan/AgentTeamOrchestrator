@@ -97,39 +97,57 @@ class DesignGateResult:
 async def check_design_gate(
     story_id: str,
     task_id: str,
-    artifacts_dir: Path,
+    project_root: Path,
 ) -> DesignGateResult:
     """验证 designing 阶段产出物是否存在。
 
+    使用 ``design_artifacts`` helper 推导路径，按已知核心工件名匹配。
+
     检查条件（全部满足才 pass）:
-    1. Story spec 仍位于 ``artifacts_dir/{story_id}.md``
-    2. UX 设计目录 ``artifacts_dir/{story_id}-ux/`` 存在
-    3. 该目录下至少有 1 个设计 artifact（.md / .pen / .png）
+    1. Story spec 仍位于 ``{ARTIFACTS_REL}/{story_id}.md``
+    2. UX 设计目录存在
+    3. 该目录下存在至少 1 个已知核心工件（按 ``DESIGN_ARTIFACT_NAMES`` 匹配）
 
     Returns:
         DesignGateResult 包含 passed 状态和具体失败原因。
     """
+    from ato.design_artifacts import (
+        ARTIFACTS_REL,
+        DESIGN_ARTIFACT_NAMES,
+        derive_design_artifact_paths,
+    )
+
+    paths = derive_design_artifact_paths(story_id, project_root)
+    artifacts_dir = project_root / ARTIFACTS_REL
+
     story_spec = artifacts_dir / f"{story_id}.md"
     story_spec_exists = story_spec.is_file()
 
-    artifact_dir = artifacts_dir / f"{story_id}-ux"
+    ux_dir = paths["ux_dir"]
     artifact_count = 0
 
-    if artifact_dir.is_dir():
-        for p in artifact_dir.iterdir():
-            if p.suffix in (".md", ".pen", ".png"):
-                artifact_count += 1
+    if ux_dir.is_dir():
+        for name in DESIGN_ARTIFACT_NAMES:
+            if name == "exports":
+                exports_dir = paths["exports_dir"]
+                if exports_dir.is_dir():
+                    for p in exports_dir.iterdir():
+                        if p.is_file() and p.suffix == ".png":
+                            artifact_count += 1
+            else:
+                if (ux_dir / name).is_file():
+                    artifact_count += 1
 
     passed = story_spec_exists and artifact_count > 0
 
     if passed:
         reason = "all checks passed"
     elif not story_spec_exists and artifact_count == 0:
-        reason = "Story spec missing AND no UX artifacts"
+        reason = "Story spec missing AND no design artifacts"
     elif not story_spec_exists:
         reason = f"Story spec missing: {story_spec}"
     else:
-        reason = f"No UX artifacts (.md/.pen/.png) in {artifact_dir}"
+        reason = f"No design artifacts in {ux_dir}"
 
     logger.info(
         "design_gate_check",
@@ -137,7 +155,7 @@ async def check_design_gate(
         task_id=task_id,
         story_spec=str(story_spec),
         story_spec_exists=story_spec_exists,
-        artifact_dir=str(artifact_dir),
+        artifact_dir=str(ux_dir),
         artifact_count=artifact_count,
         result="pass" if passed else "fail",
     )
@@ -146,7 +164,7 @@ async def check_design_gate(
         passed=passed,
         story_spec_exists=story_spec_exists,
         artifact_count=artifact_count,
-        artifact_dir=str(artifact_dir),
+        artifact_dir=str(ux_dir),
         reason=reason,
     )
 
@@ -213,9 +231,7 @@ _INTERACTIVE_PHASE_PROMPTS: dict[str, str] = {
 }
 
 
-def _build_interactive_prompt(
-    task: TaskRecord, worktree_path: str, story_ctx: str = ""
-) -> str:
+def _build_interactive_prompt(task: TaskRecord, worktree_path: str, story_ctx: str = "") -> str:
     """按 phase 构造 interactive session prompt。
 
     developing 阶段使用专用模板触发 bmad-dev-story skill；
@@ -1022,9 +1038,7 @@ class Orchestrator:
 
             prompt_template = _STRUCTURED_JOB_PROMPTS.get(task.phase)
             if prompt_template is not None:
-                prompt = _format_structured_job_prompt(
-                    prompt_template, task.story_id
-                )
+                prompt = _format_structured_job_prompt(prompt_template, task.story_id)
             else:
                 story_ctx = ""
                 if task.context_briefing:
@@ -1038,9 +1052,7 @@ class Orchestrator:
             # 从 phase config 获取 model / sandbox，确保 restart 路径也透传
             from ato.recovery import RecoveryEngine
 
-            phase_cfg = RecoveryEngine._resolve_phase_config_static(
-                self._settings, task.phase
-            )
+            phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, task.phase)
             options: dict[str, object] = {}
             if worktree_path:
                 options["cwd"] = worktree_path
@@ -1074,13 +1086,10 @@ class Orchestrator:
                     # Design gate: designing phase 需要验证 UX 产出物
                     if event_name == "design_done":
                         project_root = derive_project_root(self._db_path)
-                        artifacts_dir = (
-                            project_root / "_bmad-output" / "implementation-artifacts"
-                        )
                         gate_result = await check_design_gate(
                             story_id=task.story_id,
                             task_id=task.task_id,
-                            artifacts_dir=artifacts_dir,
+                            project_root=project_root,
                         )
                         if not gate_result.passed:
                             from ato.approval_helpers import create_approval as _ca
@@ -1097,9 +1106,7 @@ class Orchestrator:
                                         "artifact_dir": gate_result.artifact_dir,
                                         "artifact_count": gate_result.artifact_count,
                                         "story_spec_exists": gate_result.story_spec_exists,
-                                        "reason": (
-                                            f"Design gate failed: {gate_result.reason}"
-                                        ),
+                                        "reason": (f"Design gate failed: {gate_result.reason}"),
                                     },
                                 )
                             finally:
@@ -1107,8 +1114,7 @@ class Orchestrator:
                             self._nudge.notify()
                             _sun(
                                 "normal",
-                                f"Design gate 失败: story {task.story_id}"
-                                f" — {gate_result.reason}",
+                                f"Design gate 失败: story {task.story_id} — {gate_result.reason}",
                             )
                             return
                     await self._tq.submit(

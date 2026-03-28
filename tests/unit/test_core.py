@@ -1520,9 +1520,7 @@ class TestMergeAuthorizationConsumption:
 class TestRegressionFailureDecisions:
     """regression_failure approval 三种决策的端到端验证。"""
 
-    async def _setup_regression_scenario(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def _setup_regression_scenario(self, initialized_db_path: Path) -> None:
         """创建 story + merge queue entry + 冻结 queue。"""
         from ato.models.db import (
             enqueue_merge,
@@ -1754,9 +1752,7 @@ class TestRebaseConflictDecisions:
         # worktree 不清理
         orchestrator._worktree_mgr.cleanup.assert_not_awaited()
 
-    async def test_rebase_abandon_escalates_story(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_rebase_abandon_escalates_story(self, initialized_db_path: Path) -> None:
         """abandon: 移除 entry + escalate story。"""
         from ato.models.schemas import ApprovalRecord
 
@@ -1815,9 +1811,7 @@ class TestBatchRestartPhaseOptions:
             ],
         )
 
-        await _insert_test_task(
-            initialized_db_path, status="pending", task_id="t1", story_id="s1"
-        )
+        await _insert_test_task(initialized_db_path, status="pending", task_id="t1", story_id="s1")
         db = await get_connection(initialized_db_path)
         try:
             await db.execute(
@@ -1883,9 +1877,7 @@ class TestBatchRestartPhaseOptions:
             ],
         )
 
-        await _insert_test_task(
-            initialized_db_path, status="pending", task_id="t2", story_id="s2"
-        )
+        await _insert_test_task(initialized_db_path, status="pending", task_id="t2", story_id="s2")
         db = await get_connection(initialized_db_path)
         try:
             await db.execute(
@@ -1996,115 +1988,148 @@ class TestPreWorktreeSerialControl:
 
 
 class TestDesignGate:
-    """check_design_gate 通过/失败两种路径。"""
+    """check_design_gate 通过/失败路径 + 已知工件名匹配。"""
 
-    async def test_gate_pass_with_artifacts(self, tmp_path: Path) -> None:
-        """story spec + UX 产出物齐全时 gate 通过。"""
+    @staticmethod
+    def _setup_project(tmp_path: Path, story_id: str) -> tuple[Path, Path, Path]:
+        """构建 project_root 布局，返回 (project_root, artifacts_dir, ux_dir)。"""
+        from ato.design_artifacts import ARTIFACTS_REL
+
+        project_root = tmp_path / "proj"
+        artifacts_dir = project_root / ARTIFACTS_REL
+        artifacts_dir.mkdir(parents=True)
+        ux_dir = artifacts_dir / f"{story_id}-ux"
+        return project_root, artifacts_dir, ux_dir
+
+    async def test_gate_pass_with_ux_spec(self, tmp_path: Path) -> None:
+        """story spec + ux-spec.md（已知工件名）时 gate 通过。"""
         from ato.core import check_design_gate
 
-        artifacts_dir = tmp_path / "artifacts"
-        artifacts_dir.mkdir()
-        (artifacts_dir / "story-ux-1.md").touch()
-        ux_dir = artifacts_dir / "story-ux-1-ux"
-        ux_dir.mkdir()
-        (ux_dir / "wireframe.md").touch()
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "ux-spec.md").touch()
 
-        result = await check_design_gate(
-            story_id="story-ux-1",
-            task_id="t1",
-            artifacts_dir=artifacts_dir,
-        )
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
         assert result.passed is True
         assert result.story_spec_exists is True
         assert result.artifact_count == 1
 
     async def test_gate_pass_with_pen_file(self, tmp_path: Path) -> None:
-        """story spec 存在 + UX 目录下有 .pen 文件时 gate 通过。"""
+        """prototype.pen（已知工件名）时 gate 通过。"""
         from ato.core import check_design_gate
 
-        artifacts_dir = tmp_path / "artifacts"
-        artifacts_dir.mkdir()
-        (artifacts_dir / "s1.md").touch()
-        ux_dir = artifacts_dir / "s1-ux"
-        ux_dir.mkdir()
-        (ux_dir / "design.pen").touch()
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.pen").touch()
 
-        result = await check_design_gate(
-            story_id="s1",
-            task_id="t1",
-            artifacts_dir=artifacts_dir,
-        )
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
         assert result.passed is True
 
     async def test_gate_fail_no_story_spec(self, tmp_path: Path) -> None:
-        """story spec 不存在时 gate 失败（即使 UX 产出物齐全）。"""
+        """story spec 不存在时 gate 失败。"""
         from ato.core import check_design_gate
 
-        artifacts_dir = tmp_path / "artifacts"
-        artifacts_dir.mkdir()
-        ux_dir = artifacts_dir / "s1-ux"
-        ux_dir.mkdir()
-        (ux_dir / "design.pen").touch()
+        root, _arts, ux = self._setup_project(tmp_path, "s1")
+        ux.mkdir()
+        (ux / "prototype.pen").touch()
 
-        result = await check_design_gate(
-            story_id="s1",
-            task_id="t1",
-            artifacts_dir=artifacts_dir,
-        )
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
         assert result.passed is False
         assert result.story_spec_exists is False
-        assert result.artifact_count == 1  # UX artifact 存在但 spec 缺失
+        assert result.artifact_count == 1
         assert "Story spec missing" in result.reason
 
     async def test_gate_fail_no_ux_dir(self, tmp_path: Path) -> None:
-        """UX 设计目录不存在时 gate 失败。"""
+        """UX 目录不存在时 gate 失败。"""
         from ato.core import check_design_gate
 
-        artifacts_dir = tmp_path / "artifacts"
-        artifacts_dir.mkdir()
-        (artifacts_dir / "s1.md").touch()
+        root, arts, _ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
 
-        result = await check_design_gate(
-            story_id="s1",
-            task_id="t1",
-            artifacts_dir=artifacts_dir,
-        )
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
         assert result.passed is False
         assert result.story_spec_exists is True
         assert result.artifact_count == 0
-        assert "No UX artifacts" in result.reason
+        assert "No design artifacts" in result.reason
 
     async def test_gate_fail_empty_ux_dir(self, tmp_path: Path) -> None:
-        """UX 目录存在但没有 .md/.pen/.png 文件时 gate 失败。"""
+        """UX 目录存在但没有已知工件时 gate 失败。"""
         from ato.core import check_design_gate
 
-        artifacts_dir = tmp_path / "artifacts"
-        artifacts_dir.mkdir()
-        (artifacts_dir / "s1.md").touch()
-        ux_dir = artifacts_dir / "s1-ux"
-        ux_dir.mkdir()
-        (ux_dir / "README.txt").touch()
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "README.txt").touch()
 
-        result = await check_design_gate(
-            story_id="s1",
-            task_id="t1",
-            artifacts_dir=artifacts_dir,
-        )
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
         assert result.passed is False
         assert result.artifact_count == 0
 
-    async def test_gate_logs_event(self, tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    async def test_gate_fail_unknown_json(self, tmp_path: Path) -> None:
+        """非核心工件的 .json（如 debug.json）不应被计为有效工件。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "debug.json").touch()
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert result.artifact_count == 0
+
+    async def test_gate_pass_exports_subdir_png(self, tmp_path: Path) -> None:
+        """exports/ 子目录下的 .png 应被 gate 识别。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+        (exports / "screen.png").touch()
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is True
+        assert result.artifact_count >= 1
+
+    async def test_gate_pass_snapshot_json(self, tmp_path: Path) -> None:
+        """prototype.snapshot.json（已知工件名）应被 gate 识别。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.snapshot.json").touch()
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is True
+        assert result.artifact_count >= 1
+
+    async def test_gate_pass_save_report_json(self, tmp_path: Path) -> None:
+        """prototype.save-report.json（已知工件名）应被 gate 识别。"""
+        from ato.core import check_design_gate
+
+        root, arts, ux = self._setup_project(tmp_path, "s1")
+        (arts / "s1.md").touch()
+        ux.mkdir()
+        (ux / "prototype.save-report.json").touch()
+
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is True
+
+    async def test_gate_logs_event(
+        self,
+        tmp_path: Path,
+        capfd: pytest.CaptureFixture[str],
+    ) -> None:
         """gate 检查应记录 structlog 事件。"""
         from ato.core import check_design_gate
 
-        artifacts_dir = tmp_path / "artifacts"
-        artifacts_dir.mkdir()
+        root, _arts, _ux = self._setup_project(tmp_path, "s1")
 
-        await check_design_gate(
-            story_id="s1",
-            task_id="t1",
-            artifacts_dir=artifacts_dir,
-        )
+        await check_design_gate(story_id="s1", task_id="t1", project_root=root)
 
         captured = capfd.readouterr()
         output = captured.out + captured.err
