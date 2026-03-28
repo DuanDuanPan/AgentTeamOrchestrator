@@ -11,7 +11,7 @@ from pathlib import Path
 
 import aiosqlite
 import structlog
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -214,11 +214,9 @@ async def _get_crash_approval_map(
     return crash_approvals
 
 
-def _build_renderable_group(parts: list[Text | Table | str]) -> object:
+def _build_renderable_group(parts: list[Text | Table | str]) -> Group:
     """将多个 renderable 部分组合为 rich Group。"""
-    from rich.console import Group
-
-    renderables = []
+    renderables: list[Text | Table] = []
     for part in parts:
         if isinstance(part, str):
             renderables.append(Text(part))
