@@ -361,7 +361,7 @@ class TestConfirmBatch:
             s1 = await get_story(db, "1-1-scaffolding")
             assert s1 is not None
             assert s1.status == "planning"
-            assert s1.current_phase == "creating"
+            assert s1.current_phase == "planning"
 
             s2 = await get_story(db, "1-2-sqlite")
             assert s2 is not None
@@ -414,7 +414,7 @@ class TestConfirmBatch:
             story = await get_story(db, "1-1-existing")
             assert story is not None
             assert story.status == "planning"
-            assert story.current_phase == "creating"
+            assert story.current_phase == "planning"
         finally:
             await db.close()
 
@@ -541,7 +541,7 @@ class TestConfirmBatch:
 
             # 1-2 is seq=0 → creating
             assert links[0][1].status == "planning"
-            assert links[0][1].current_phase == "creating"
+            assert links[0][1].current_phase == "planning"
         finally:
             await db.close()
 
@@ -667,7 +667,7 @@ class TestConfirmBatch:
             # 1-2 is seq=0 → creating
             assert links[0][1].story_id == "1-2-backlog"
             assert links[0][1].status == "planning"
-            assert links[0][1].current_phase == "creating"
+            assert links[0][1].current_phase == "planning"
             # 1-3 is seq=1 → queued
             assert links[1][1].story_id == "1-3-new"
             assert links[1][1].status == "backlog"

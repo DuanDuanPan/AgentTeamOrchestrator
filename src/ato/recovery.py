@@ -40,6 +40,7 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 _PHASE_SUCCESS_EVENT: dict[str, str] = {
+    "planning": "plan_done",
     "creating": "create_done",
     "validating": "validate_pass",
     "dev_ready": "start_dev",

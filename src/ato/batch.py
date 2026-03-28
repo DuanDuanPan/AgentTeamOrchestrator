@@ -371,7 +371,7 @@ async def confirm_batch(
                         info.story_key,
                         info.title,
                         "backlog",
-                        "queued" if seq > 0 else "creating",
+                        "queued" if seq > 0 else "planning",
                         None,
                         now_iso,
                         now_iso,
@@ -383,13 +383,13 @@ async def confirm_batch(
                 (batch_id, info.story_key, seq),
             )
 
-        # 5. 更新状态：seq=0 → creating，其余 → queued
+        # 5. 更新状态：seq=0 → planning，其余 → queued
         for seq, info in enumerate(actionable):
             if seq == 0:
                 await db.execute(
                     "UPDATE stories SET status = ?, current_phase = ?, "
                     "updated_at = ? WHERE story_id = ?",
-                    ("planning", "creating", now_iso, info.story_key),
+                    ("planning", "planning", now_iso, info.story_key),
                 )
             else:
                 await db.execute(

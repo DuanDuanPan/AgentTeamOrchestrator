@@ -1,6 +1,6 @@
 # Story 8.2: 新增 Planning 阶段 — 使用 Claude 规划并行 Story
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -65,31 +65,31 @@ And planner 执行复用现有 structured_job task / artifact 路径
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 更新状态机 canonical 合同 (AC: #1, #2)
-  - [ ] 1.1 在 `src/ato/state_machine.py` 中把 `planning` 插入 `CANONICAL_PHASES` 首位
-  - [ ] 1.2 在 `PHASE_TO_STATUS` 中新增 `planning: "planning"`，并保持 `creating` / `validating` 继续映射到高层 `planning`
-  - [ ] 1.3 在 `CANONICAL_TRANSITIONS` 中新增 `planning -> creating`，保留 `creating -> validating`
-  - [ ] 1.4 `StoryLifecycle` 新增 `planning = State()`
-  - [ ] 1.5 保留现有事件名 `start_create`，但其目标改为 `queued.to(planning)`；新增 `plan_done = planning.to(creating)`
-  - [ ] 1.6 `escalate` 联合 transition 补入 `planning.to(blocked)`
-  - [ ] 1.7 **不要**修改 `src/ato/models/schemas.py` 中的 `StoryStatus` literal；该高层状态已存在
+- [x] Task 1: 更新状态机 canonical 合同 (AC: #1, #2)
+  - [x] 1.1 在 `src/ato/state_machine.py` 中把 `planning` 插入 `CANONICAL_PHASES` 首位
+  - [x] 1.2 在 `PHASE_TO_STATUS` 中新增 `planning: “planning”`，并保持 `creating` / `validating` 继续映射到高层 `planning`
+  - [x] 1.3 在 `CANONICAL_TRANSITIONS` 中新增 `planning -> creating`，保留 `creating -> validating`
+  - [x] 1.4 `StoryLifecycle` 新增 `planning = State()`
+  - [x] 1.5 保留现有事件名 `start_create`，但其目标改为 `queued.to(planning)`；新增 `plan_done = planning.to(creating)`
+  - [x] 1.6 `escalate` 联合 transition 补入 `planning.to(blocked)`
+  - [x] 1.7 **不要**修改 `src/ato/models/schemas.py` 中的 `StoryStatus` literal；该高层状态已存在
 
-- [ ] Task 2: 对齐配置模板与 phase-order 消费方 (AC: #1, #3)
-  - [ ] 2.1 在 `ato.yaml.example` 中新增 `planner` 角色，并在 `phases:` 首位加入 `planning`
-  - [ ] 2.2 更新 `src/ato/config.py` / `tests/integration/test_config_workflow.py` / `tests/unit/test_state_machine.py` 对 phase 顺序的期望
-  - [ ] 2.3 更新 `src/ato/cli.py::render_plan()` 与 `tests/unit/test_cli_plan.py` 的阶段序列基线，从 12 个阶段调整为包含 `planning` 的新序列
-  - [ ] 2.4 合并 `ato.yaml.example` 改动时兼容 Story 8.1 的 role-field 可选化方向，避免把邻近 story 的模板改动覆盖掉
+- [x] Task 2: 对齐配置模板与 phase-order 消费方 (AC: #1, #3)
+  - [x] 2.1 在 `ato.yaml.example` 中新增 `planner` 角色，并在 `phases:` 首位加入 `planning`
+  - [x] 2.2 更新 `src/ato/config.py` / `tests/integration/test_config_workflow.py` / `tests/unit/test_state_machine.py` 对 phase 顺序的期望
+  - [x] 2.3 更新 `src/ato/cli.py::render_plan()` 与 `tests/unit/test_cli_plan.py` 的阶段序列基线，从 12 个阶段调整为包含 `planning` 的新序列
+  - [x] 2.4 合并 `ato.yaml.example` 改动时兼容 Story 8.1 的 role-field 可选化方向，避免把邻近 story 的模板改动覆盖掉
 
-- [ ] Task 3: 对齐 batch / replay / recovery 路径 (AC: #4, #5)
-  - [ ] 3.1 在 `src/ato/batch.py::confirm_batch()` 中把头部 story 的初始写入改为 `status="planning", current_phase="planning"`
-  - [ ] 3.2 在 `src/ato/transition_queue.py` 中更新 `_HP_EVENTS`、`_HP_PHASES`、`_HAPPY_PATH_EVENTS` 与相关 replay 测试，使 `planning` 成为可恢复 phase
-  - [ ] 3.3 在 `src/ato/recovery.py::_PHASE_SUCCESS_EVENT` 中新增 `planning: "plan_done"`，并更新 structured-job recovery / restart 相关测试
-  - [ ] 3.4 更新 `tests/unit/test_batch.py`、`tests/unit/test_transition_queue.py`、`tests/integration/test_transition_queue.py`、`tests/integration/test_state_persistence.py`、`tests/unit/test_recovery.py`、`tests/integration/test_crash_recovery.py` 中对首阶段与 success event 的既有断言
+- [x] Task 3: 对齐 batch / replay / recovery 路径 (AC: #4, #5)
+  - [x] 3.1 在 `src/ato/batch.py::confirm_batch()` 中把头部 story 的初始写入改为 `status=”planning”, current_phase=”planning”`
+  - [x] 3.2 在 `src/ato/transition_queue.py` 中更新 `_HP_EVENTS`、`_HP_PHASES`、`_HAPPY_PATH_EVENTS` 与相关 replay 测试，使 `planning` 成为可恢复 phase
+  - [x] 3.3 在 `src/ato/recovery.py::_PHASE_SUCCESS_EVENT` 中新增 `planning: “plan_done”`，并更新 structured-job recovery / restart 相关测试
+  - [x] 3.4 更新 `tests/unit/test_batch.py`、`tests/unit/test_transition_queue.py`、`tests/integration/test_transition_queue.py`、`tests/integration/test_state_persistence.py`、`tests/unit/test_recovery.py`、`tests/integration/test_crash_recovery.py` 中对首阶段与 success event 的既有断言
 
-- [ ] Task 4: 收紧显示与回归测试范围 (AC: #3, #4)
-  - [ ] 4.1 若 CLI phase icon 需要显式区分 `planning`，更新 `src/ato/cli.py::_PHASE_ICONS` 与相关 batch CLI 断言
-  - [ ] 4.2 更新 `tests/unit/test_story_status_line.py`、`tests/unit/test_story_detail_view.py`、`tests/unit/test_db.py` 等依赖 phase-count / first-active-phase 假设的测试
-  - [ ] 4.3 对 TUI 代码遵循“优先复用 `CANONICAL_PHASES`”原则；除非确有硬编码逻辑失败，不要为 dashboard / story detail 发明额外 phase 映射分支
+- [x] Task 4: 收紧显示与回归测试范围 (AC: #3, #4)
+  - [x] 4.1 若 CLI phase icon 需要显式区分 `planning`，更新 `src/ato/cli.py::_PHASE_ICONS` 与相关 batch CLI 断言
+  - [x] 4.2 更新 `tests/unit/test_story_status_line.py`、`tests/unit/test_story_detail_view.py`、`tests/unit/test_db.py` 等依赖 phase-count / first-active-phase 假设的测试
+  - [x] 4.3 对 TUI 代码遵循”优先复用 `CANONICAL_PHASES`”原则；除非确有硬编码逻辑失败，不要为 dashboard / story detail 发明额外 phase 映射分支
 
 ## Dev Notes
 
@@ -152,16 +152,42 @@ And planner 执行复用现有 structured_job task / artifact 路径
 
 ## Change Log
 
-- 2026-03-28: `validate-create-story` 修订 —— 将 Story 从“只改状态机 + schema + `_poll_cycle`”收敛为真实的 phase insertion 合同；保留 `start_create`、新增 `plan_done` 以减少 repo-wide churn；补齐 `batch.py` / `transition_queue.py` / `recovery.py` 的影响面，并补回模板 baseline / Scope Boundary / Dev Agent Record 结构
+- 2026-03-28: `validate-create-story` 修订 —— 将 Story 从”只改状态机 + schema + `_poll_cycle`”收敛为真实的 phase insertion 合同；保留 `start_create`、新增 `plan_done` 以减少 repo-wide churn；补齐 `batch.py` / `transition_queue.py` / `recovery.py` 的影响面，并补回模板 baseline / Scope Boundary / Dev Agent Record 结构
+- 2026-03-28: `dev-story` 实现完成 —— 全部 4 个 Task 完成，1471 测试通过，0 失败
+- 2026-03-28: code-review finding 修复 —— 补充 planning phase crash-recovery 回归测试（unit + integration），1486 测试通过
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-TBD
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- Task 1: 在 state_machine.py 中将 `planning` 插入 CANONICAL_PHASES 首位、PHASE_TO_STATUS 新增映射、CANONICAL_TRANSITIONS 新增 `planning -> creating`、StoryLifecycle 新增 `planning` state + `plan_done` event、`start_create` 目标改为 `queued.to(planning)`、`escalate` 补入 `planning.to(blocked)`。未修改 StoryStatus literal。
+- Task 2: ato.yaml.example 新增 `planner` 角色及 `planning` phase；更新 test_config_workflow.py（阶段列表及索引偏移）、test_state_machine.py（happy path、escalatable states、phase count、PHASE_TO_STATUS 断言）、test_cli_plan.py（phase_defs + 13 阶段基线）。
+- Task 3: batch.py confirm_batch() 头部 story 初始写入改为 `current_phase=”planning”`；transition_queue.py 的 _HP_EVENTS / _HP_PHASES 插入 `plan_done` / `planning`；recovery.py _PHASE_SUCCESS_EVENT 新增 `planning: “plan_done”`。更新 test_batch.py、test_transition_queue.py（单元+集成）、test_state_persistence.py 的所有受影响断言。
+- Task 4: cli.py _PHASE_ICONS 新增 `planning: “📋”`；test_story_detail_view.py 阶段计数从 12 → 13；TUI PHASE_ORDER 通过 `[“queued”, *CANONICAL_PHASES, “done”]` 自动继承变更，无需额外修改。额外修复 test_config.py 和 test_convergent_loop.py 中受影响的断言。
+- Code review fix: 补充 planning phase crash-recovery 回归测试 — test_recovery.py 和 test_crash_recovery.py 各增 1 条 case，显式断言 `phase=”planning”` 时 reschedule 提交 `plan_done` 事件。
+
 ### File List
+
+- src/ato/state_machine.py (modified)
+- src/ato/batch.py (modified)
+- src/ato/transition_queue.py (modified)
+- src/ato/recovery.py (modified)
+- src/ato/cli.py (modified)
+- ato.yaml.example (modified)
+- tests/unit/test_state_machine.py (modified)
+- tests/unit/test_cli_plan.py (modified)
+- tests/unit/test_batch.py (modified)
+- tests/unit/test_transition_queue.py (modified)
+- tests/unit/test_config.py (modified)
+- tests/unit/test_convergent_loop.py (modified)
+- tests/unit/test_story_detail_view.py (modified)
+- tests/integration/test_config_workflow.py (modified)
+- tests/integration/test_transition_queue.py (modified)
+- tests/integration/test_state_persistence.py (modified)
+- _bmad-output/implementation-artifacts/8-2-add-planning-phase.md (modified)

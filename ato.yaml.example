@@ -17,6 +17,8 @@
 #   sandbox: read-only（只读沙箱）或 workspace-write（可写沙箱）
 
 roles:
+  planner:
+    cli: claude
   creator:
     cli: claude
   validator:
@@ -39,6 +41,11 @@ roles:
 # next_on_failure: 失败后跳转的阶段（可选）
 
 phases:
+  - name: planning
+    role: planner
+    type: structured_job
+    next_on_success: creating
+
   - name: creating
     role: creator
     type: structured_job

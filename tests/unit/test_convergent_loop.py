@@ -787,6 +787,7 @@ class TestValidateFailFromReviewingStateMachine:
         sm = await StoryLifecycle.create()
         # Advance to reviewing
         await sm.send("start_create")
+        await sm.send("plan_done")
         await sm.send("create_done")
         await sm.send("validate_pass")
         await sm.send("start_dev")

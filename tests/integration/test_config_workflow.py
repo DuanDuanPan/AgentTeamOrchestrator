@@ -32,6 +32,7 @@ class TestConfigWorkflow:
         definitions = build_phase_definitions(settings)
 
         assert [definition.name for definition in definitions] == [
+            "planning",
             "creating",
             "validating",
             "dev_ready",
@@ -43,11 +44,11 @@ class TestConfigWorkflow:
             "merging",
             "regression",
         ]
-        assert definitions[4].cli_tool == "codex"
-        assert definitions[4].sandbox is None  # 模板不再默认指定 sandbox
-        assert definitions[4].next_on_failure == "fixing"
-        assert definitions[7].phase_type == "interactive_session"
-        assert definitions[7].timeout_seconds == settings.timeout.interactive_session
+        assert definitions[5].cli_tool == "codex"
+        assert definitions[5].sandbox is None  # 模板不再默认指定 sandbox
+        assert definitions[5].next_on_failure == "fixing"
+        assert definitions[8].phase_type == "interactive_session"
+        assert definitions[8].timeout_seconds == settings.timeout.interactive_session
 
     def test_nested_custom_config_end_to_end_applies_model_overrides(self, tmp_path: Path) -> None:
         """自定义路径中的配置可加载，并正确应用 model_map 与 timeout 映射。"""

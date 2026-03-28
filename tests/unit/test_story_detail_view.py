@@ -163,8 +163,8 @@ def test_phase_order_matches_canonical() -> None:
 
 
 def test_phase_order_length() -> None:
-    """PHASE_ORDER 应有 12 个阶段（queued + 10 canonical + done）。"""
-    assert len(PHASE_ORDER) == 12
+    """PHASE_ORDER 应有 13 个阶段（queued + 11 canonical + done）。"""
+    assert len(PHASE_ORDER) == 13
 
 
 # ---------------------------------------------------------------------------
