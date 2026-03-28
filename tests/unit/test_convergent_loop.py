@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -4055,3 +4056,107 @@ class TestReviewerOptionsPassthrough:
         call_kwargs = mock_sub.dispatch_with_retry.call_args
         options = call_kwargs.kwargs.get("options") or call_kwargs[1].get("options")
         assert options == {"cwd": "/tmp/wt"}
+
+
+# ---------------------------------------------------------------------------
+# Story 9.1d: review / re-review prompt manifest 注入 (AC#3, #5)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewPromptManifestInjection:
+    """ConvergentLoop 的 review / re-review prompt 有 manifest 时包含 UX 引用。"""
+
+    @staticmethod
+    def _setup_manifest(tmp_path: Path, story_id: str = "s1") -> Path:
+        """构建含 manifest 的项目结构并返回 project_root。"""
+        from ato.design_artifacts import write_prototype_manifest
+
+        root = tmp_path / "proj"
+        ato_dir = root / ".ato"
+        ato_dir.mkdir(parents=True)
+        arts = root / "_bmad-output/implementation-artifacts"
+        ux = arts / f"{story_id}-ux"
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+        (arts / f"{story_id}.md").touch()
+        (ux / "ux-spec.md").touch()
+        (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+        (ux / "prototype.save-report.json").write_text('{}')
+        (exports / "a.png").write_bytes(b"PNG")
+        write_prototype_manifest(story_id, root)
+        return root
+
+    async def test_first_review_prompt_includes_ux_context(
+        self, tmp_path: Path, initialized_db_path: Any
+    ) -> None:
+        """首轮 review prompt 在 manifest 存在时包含 UX 上下文。"""
+        root = self._setup_manifest(tmp_path, "s-ux")
+
+        # 用 root/.ato/state.db 让 derive_project_root 正确推导
+        import shutil
+        ato_dir = root / ".ato"
+        db_path = ato_dir / "state.db"
+        shutil.copy2(initialized_db_path, db_path)
+
+        story = _make_story("s-ux")
+        db = await get_connection(db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, mock_sub, _bmad, _tq = _make_loop(db_path)
+        await loop.run_first_review("s-ux", "/tmp/wt")
+
+        mock_sub.dispatch_with_retry.assert_called_once()
+        call_kwargs = mock_sub.dispatch_with_retry.call_args
+        prompt = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
+        assert "UX Design Context" in prompt
+        assert "prototype.manifest.yaml" in prompt
+
+    async def test_rereview_prompt_includes_ux_context(
+        self, tmp_path: Path, initialized_db_path: Any
+    ) -> None:
+        """re-review prompt 在 manifest 存在时包含 UX 上下文。"""
+        from ato.models.db import insert_findings_batch
+        from ato.models.schemas import FindingRecord
+
+        root = self._setup_manifest(tmp_path, "s-ux2")
+
+        import shutil
+        ato_dir = root / ".ato"
+        db_path = ato_dir / "state.db"
+        shutil.copy2(initialized_db_path, db_path)
+
+        story = _make_story("s-ux2")
+        db = await get_connection(db_path)
+        try:
+            await insert_story(db, story)
+            # 插入一条 finding 供 re-review scope
+            from datetime import UTC, datetime
+            finding = FindingRecord(
+                finding_id="f1",
+                story_id="s-ux2",
+                round_num=1,
+                file_path="src/foo.py",
+                line_number=10,
+                rule_id="R001",
+                severity="blocking",
+                description="test finding",
+                dedup_hash="h1",
+                status="open",
+                created_at=datetime.now(UTC),
+            )
+            await insert_findings_batch(db, [finding])
+        finally:
+            await db.close()
+
+        loop, mock_sub, _bmad, _tq = _make_loop(db_path)
+        await loop.run_rereview("s-ux2", 2, "/tmp/wt")
+
+        mock_sub.dispatch_with_retry.assert_called_once()
+        call_kwargs = mock_sub.dispatch_with_retry.call_args
+        prompt = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
+        assert "UX Design Context" in prompt
+        assert "prototype.manifest.yaml" in prompt

@@ -390,6 +390,8 @@ class RecoveryEngine:
         if event_name is not None:
             # Design gate: designing phase 需要验证 UX 产出物
             if event_name == "design_done":
+                # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
+                self._generate_manifest_before_gate(task.story_id)
                 gate_ok = await self._check_design_gate(task)
                 if not gate_ok:
                     return
@@ -706,6 +708,16 @@ class RecoveryEngine:
                     f"Perform a full {task.phase} on the worktree at {worktree_path}."
                 )
 
+            # Story 9.1d: 附加 UX 上下文（manifest 存在时）
+            from ato.core import derive_project_root
+            from ato.design_artifacts import build_ux_context_from_manifest
+
+            ux_ctx = build_ux_context_from_manifest(
+                task.story_id, derive_project_root(self._db_path)
+            )
+            if ux_ctx:
+                prompt = f"{prompt}{ux_ctx}"
+
             dispatch_opts: dict[str, Any] = {"cwd": worktree_path}
             if sandbox:
                 dispatch_opts["sandbox"] = sandbox
@@ -882,6 +894,8 @@ class RecoveryEngine:
                 if event_name is not None:
                     # Design gate: designing phase 需要验证 UX 产出物
                     if event_name == "design_done":
+                        # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
+                        self._generate_manifest_before_gate(task.story_id)
                         gate_ok = await self._check_design_gate(task)
                         if not gate_ok:
                             return
@@ -919,6 +933,17 @@ class RecoveryEngine:
         finally:
             if limiter is not None:
                 limiter.release()
+
+    def _generate_manifest_before_gate(self, story_id: str) -> None:
+        """Story 9.1d: 在 design gate 前基于磁盘真相生成 manifest。"""
+        from ato.core import derive_project_root
+        from ato.design_artifacts import write_prototype_manifest
+
+        project_root = derive_project_root(self._db_path)
+        try:
+            write_prototype_manifest(story_id, project_root)
+        except Exception:
+            logger.exception("manifest_generation_failed", story_id=story_id)
 
     async def _check_design_gate(self, task: TaskRecord) -> bool:
         """Designing artifact gate V2：严格验证 UX 产出物存在性与内容完整性。

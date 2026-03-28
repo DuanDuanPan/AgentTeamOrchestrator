@@ -1,7 +1,7 @@
-"""design_artifacts — 设计阶段工件路径推导与强制落盘 (Story 9.1a, 9.1b)。
+"""design_artifacts — 设计阶段工件路径推导与强制落盘 (Story 9.1a, 9.1b, 9.1d)。
 
 所有 designing 阶段相关的路径命名约定集中于此，
-同时提供结构化回写、快照/报告生成和落盘校验 helper。
+同时提供结构化回写、快照/报告生成、落盘校验和 manifest 生成 helper。
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ DESIGN_ARTIFACT_NAMES: frozenset[str] = frozenset(
         "prototype.pen",
         "prototype.snapshot.json",
         "prototype.save-report.json",
+        "prototype.manifest.yaml",
         "exports",
     }
 )
@@ -84,6 +85,7 @@ def derive_design_artifact_paths(
         - ``prototype_pen``: ``prototype.pen``
         - ``snapshot_json``: ``prototype.snapshot.json``
         - ``save_report_json``: ``prototype.save-report.json``
+        - ``manifest_yaml``: ``prototype.manifest.yaml``
         - ``exports_dir``: ``exports/``
         - ``template_pen``: 仓库内 .pen 模板路径
     """
@@ -95,6 +97,7 @@ def derive_design_artifact_paths(
         "prototype_pen": ux_dir / "prototype.pen",
         "snapshot_json": ux_dir / "prototype.snapshot.json",
         "save_report_json": ux_dir / "prototype.save-report.json",
+        "manifest_yaml": ux_dir / "prototype.manifest.yaml",
         "exports_dir": ux_dir / "exports",
         "template_pen": project_root / TEMPLATE_PEN_REL,
     }
@@ -112,6 +115,7 @@ def derive_design_artifact_paths_relative(story_id: str) -> dict[str, str]:
         "prototype_pen": f"{ux_dir}/prototype.pen",
         "snapshot_json": f"{ux_dir}/prototype.snapshot.json",
         "save_report_json": f"{ux_dir}/prototype.save-report.json",
+        "manifest_yaml": f"{ux_dir}/prototype.manifest.yaml",
         "exports_dir": f"{ux_dir}/exports",
         "template_pen": TEMPLATE_PEN_REL,
     }
@@ -381,3 +385,187 @@ def verify_save_report(report_path: Path) -> bool:
     if data.get("json_parse_verified") is not True:
         return False
     return data.get("reopen_verified") is True
+
+
+# ---------------------------------------------------------------------------
+# Prototype Manifest 生成与读取 (Story 9.1d)
+# ---------------------------------------------------------------------------
+
+_DEV_LOOKUP_ORDER: list[str] = [
+    "Read story file design notes",
+    "Read this manifest",
+    "Open reference PNG for visual fidelity",
+    "Open .pen for structure and interaction detail",
+]
+
+_MANIFEST_NOTES = "PNG 用于视觉对齐参考，.pen 用于结构与交互细节查阅。"
+
+
+def _atomic_write_yaml(target: Path, data: dict[str, Any]) -> None:
+    """通过临时文件 + os.replace 实现原子写入 YAML。"""
+    import yaml
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        os.replace(tmp_path, str(target))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _extract_primary_frames(snapshot_path: Path) -> list[str]:
+    """从 prototype.snapshot.json 确定性提取 primary_frames。
+
+    规则：取根 children 中 ``type`` 为 ``"FRAME"`` 的节点的 ``name``，
+    按出现顺序排列。若无 FRAME 节点，取所有根 children 的 ``name``。
+    """
+    try:
+        with open(snapshot_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(data, dict):
+        return []
+
+    children = data.get("children")
+    if not isinstance(children, list):
+        return []
+
+    frames = [
+        c["name"]
+        for c in children
+        if isinstance(c, dict)
+        and c.get("type") == "FRAME"
+        and isinstance(c.get("name"), str)
+    ]
+    if frames:
+        return frames
+
+    # Fallback: 所有根 children 的 name
+    return [
+        c["name"]
+        for c in children
+        if isinstance(c, dict) and isinstance(c.get("name"), str)
+    ]
+
+
+def _collect_reference_exports(exports_dir: Path) -> list[str]:
+    """收集 exports/ 下真实存在的 .png 文件列表（UX 目录相对路径，确定性排序）。"""
+    if not exports_dir.is_dir():
+        return []
+    pngs = sorted(
+        p.name for p in exports_dir.iterdir() if p.is_file() and p.suffix == ".png"
+    )
+    return [f"exports/{name}" for name in pngs]
+
+
+def write_prototype_manifest(
+    story_id: str,
+    project_root: Path,
+) -> Path:
+    """基于磁盘真相生成 prototype.manifest.yaml。
+
+    确定性推导 ``reference_exports`` 和 ``primary_frames``，
+    而不是依赖 agent 手写。
+
+    Args:
+        story_id: Story 标识符。
+        project_root: 项目根目录绝对路径。
+
+    Returns:
+        写入后的 manifest 文件绝对路径。
+    """
+    paths = derive_design_artifact_paths(story_id, project_root)
+
+    story_file_rel = f"{ARTIFACTS_REL}/{story_id}.md"
+
+    reference_exports = _collect_reference_exports(paths["exports_dir"])
+    primary_frames = _extract_primary_frames(paths["snapshot_json"])
+
+    manifest: dict[str, Any] = {
+        "story_id": story_id,
+        "story_file": story_file_rel,
+        "ux_spec": "ux-spec.md",
+        "pen_file": "prototype.pen",
+        "snapshot_file": "prototype.snapshot.json",
+        "save_report_file": "prototype.save-report.json",
+        "reference_exports": reference_exports,
+        "primary_frames": primary_frames,
+        "dev_lookup_order": list(_DEV_LOOKUP_ORDER),
+        "notes": _MANIFEST_NOTES,
+    }
+
+    manifest_path = paths["manifest_yaml"]
+    _atomic_write_yaml(manifest_path, manifest)
+    return manifest_path
+
+
+def read_prototype_manifest(manifest_path: Path) -> dict[str, Any] | None:
+    """读取并解析 prototype.manifest.yaml。
+
+    Returns:
+        解析后的 dict，文件不存在或解析失败返回 None。
+    """
+    import yaml
+
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except (FileNotFoundError, OSError):
+        return None
+    except Exception:  # yaml.YAMLError 等
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def build_ux_context_from_manifest(
+    story_id: str,
+    project_root: Path,
+) -> str:
+    """读取 manifest 并构建可嵌入 prompt 的 UX 上下文段落。
+
+    供 validating / developing / reviewing 的 prompt builder 复用。
+    manifest 不存在时返回空字符串（兼容无 UI story）。
+    """
+    paths = derive_design_artifact_paths(story_id, project_root)
+    manifest_path = paths["manifest_yaml"]
+    manifest = read_prototype_manifest(manifest_path)
+    if manifest is None:
+        return ""
+
+    ux_dir_rel = f"{ARTIFACTS_REL}/{story_id}-ux"
+    pen_file = manifest.get("pen_file", "prototype.pen")
+    exports = manifest.get("reference_exports", [])
+    lookup_order = manifest.get("dev_lookup_order", _DEV_LOOKUP_ORDER)
+
+    lines = [
+        "\n\n## UX Design Context\n",
+        f"- Manifest: {ux_dir_rel}/prototype.manifest.yaml",
+        f"- PNG exports: {ux_dir_rel}/exports/",
+        f"- .pen file: {ux_dir_rel}/{pen_file}",
+        "",
+        "### Lookup Order",
+    ]
+    for i, step in enumerate(lookup_order, 1):
+        lines.append(f"{i}. {step}")
+
+    if exports:
+        lines.append("")
+        lines.append("### Reference Exports")
+        for exp in exports:
+            lines.append(f"- {ux_dir_rel}/{exp}")
+
+    notes = manifest.get("notes", "")
+    if notes:
+        lines.append("")
+        lines.append(f"Note: {notes}")
+
+    return "\n".join(lines)

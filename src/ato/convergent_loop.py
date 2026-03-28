@@ -449,6 +449,8 @@ class ConvergentLoop:
             f"in the worktree at {resolved_path}. "
             f"Story: {story_id}. Review mode: branch diff against main."
         )
+        # Story 9.1d: 附加 UX 上下文（manifest 存在时）
+        review_prompt = self._append_ux_context(story_id, review_prompt)
         review_task_id = task_id or str(uuid.uuid4())
         review_opts: dict[str, Any] = {"cwd": resolved_path}
         review_opts.update(self._reviewer_options)
@@ -947,6 +949,8 @@ class ConvergentLoop:
 
         # --- Build scoped re-review prompt ---
         rereview_prompt = self._build_rereview_prompt(previous_findings, resolved_path)
+        # Story 9.1d: 附加 UX 上下文（manifest 存在时）
+        rereview_prompt = self._append_ux_context(story_id, rereview_prompt)
 
         # --- Dispatch Codex reviewer agent ---
         rereview_task_id = task_id or str(uuid.uuid4())
@@ -1116,6 +1120,20 @@ class ConvergentLoop:
             closed_count=len(match_result.closed_ids),
             new_count=len(match_result.new_findings),
         )
+
+    def _append_ux_context(self, story_id: str, prompt: str) -> str:
+        """Story 9.1d: 有 manifest 时附加 UX 上下文到 prompt，否则 passthrough。"""
+        try:
+            from ato.core import derive_project_root
+            from ato.design_artifacts import build_ux_context_from_manifest
+
+            project_root = derive_project_root(self._db_path)
+            ux_ctx = build_ux_context_from_manifest(story_id, project_root)
+            if ux_ctx:
+                return f"{prompt}{ux_ctx}"
+        except Exception:
+            logger.debug("ux_context_append_skipped", story_id=story_id)
+        return prompt
 
     def _build_rereview_prompt(
         self,

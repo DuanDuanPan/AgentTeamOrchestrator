@@ -623,3 +623,210 @@ class TestForcePersistAndVerifyIntegration:
             exported_png_count=0,
         )
         assert verify_save_report(report) is True
+
+
+# ---------------------------------------------------------------------------
+# Manifest 生成 / 读取 / UX 上下文 (Story 9.1d AC#1, #2, #5)
+# ---------------------------------------------------------------------------
+
+
+class TestWritePrototypeManifest:
+    """write_prototype_manifest 基于磁盘真相确定性生成 manifest。"""
+
+    @staticmethod
+    def _setup_ux_dir(tmp_path: Path, story_id: str = "s1") -> Path:
+        """构建含完整工件的 UX 目录。"""
+        root = tmp_path / "proj"
+        arts = root / "_bmad-output/implementation-artifacts"
+        ux = arts / f"{story_id}-ux"
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+        (arts / f"{story_id}.md").touch()
+        (ux / "ux-spec.md").touch()
+        (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
+        snapshot = {"children": [
+            {"type": "FRAME", "name": "Dashboard", "children": []},
+            {"type": "FRAME", "name": "Settings", "children": []},
+        ]}
+        (ux / "prototype.snapshot.json").write_text(json.dumps(snapshot))
+        (ux / "prototype.save-report.json").write_text(json.dumps({
+            "story_id": story_id, "saved_at": "2026-03-28T00:00:00+00:00",
+            "pen_file": "prototype.pen", "snapshot_file": "prototype.snapshot.json",
+            "children_count": 0, "json_parse_verified": True,
+            "reopen_verified": True, "exported_png_count": 1,
+        }))
+        (exports / "frame-1.png").write_bytes(b"PNG")
+        (exports / "frame-2.png").write_bytes(b"PNG")
+        return root
+
+    def test_generates_manifest_with_correct_fields(self, tmp_path: Path) -> None:
+        """manifest 包含所有 AC#1 必需字段。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        for key in (
+            "story_id", "story_file", "ux_spec", "pen_file",
+            "snapshot_file", "save_report_file", "reference_exports",
+            "primary_frames", "dev_lookup_order", "notes",
+        ):
+            assert key in m, f"Missing key: {key}"
+
+    def test_reference_exports_from_disk(self, tmp_path: Path) -> None:
+        """reference_exports 来自磁盘上真实存在的 exports/*.png (AC#1)。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        assert m["reference_exports"] == ["exports/frame-1.png", "exports/frame-2.png"]
+
+    def test_primary_frames_from_snapshot(self, tmp_path: Path) -> None:
+        """primary_frames 按确定性规则从 snapshot 提取 (AC#1)。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        assert m["primary_frames"] == ["Dashboard", "Settings"]
+
+    def test_story_file_uses_project_root_relative_path(self, tmp_path: Path) -> None:
+        """story_file 使用 project-root 相对路径 (AC#2)。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        assert m["story_file"] == "_bmad-output/implementation-artifacts/s1.md"
+
+    def test_ux_artifacts_use_ux_dir_relative_paths(self, tmp_path: Path) -> None:
+        """UX 工件使用 UX 目录相对路径 (AC#2)。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        assert m["ux_spec"] == "ux-spec.md"
+        assert m["pen_file"] == "prototype.pen"
+        assert m["snapshot_file"] == "prototype.snapshot.json"
+        assert m["save_report_file"] == "prototype.save-report.json"
+
+    def test_dev_lookup_order_present(self, tmp_path: Path) -> None:
+        """dev_lookup_order 至少包含 4 个步骤 (AC#2)。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        assert len(m["dev_lookup_order"]) >= 4
+
+    def test_no_exports_dir_produces_empty_list(self, tmp_path: Path) -> None:
+        """exports/ 不存在时 reference_exports 为空列表。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        # 删除 exports 目录
+        import shutil
+        exports = root / "_bmad-output/implementation-artifacts/s1-ux/exports"
+        shutil.rmtree(exports)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        assert m["reference_exports"] == []
+
+
+class TestReadPrototypeManifest:
+    """read_prototype_manifest 健壮性测试。"""
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        from ato.design_artifacts import read_prototype_manifest
+
+        assert read_prototype_manifest(tmp_path / "nonexistent.yaml") is None
+
+    def test_invalid_yaml_returns_none(self, tmp_path: Path) -> None:
+        from ato.design_artifacts import read_prototype_manifest
+
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("{{{{not: yaml::::")
+        assert read_prototype_manifest(bad) is None
+
+    def test_non_dict_root_returns_none(self, tmp_path: Path) -> None:
+        from ato.design_artifacts import read_prototype_manifest
+
+        f = tmp_path / "list.yaml"
+        f.write_text("- item1\n- item2\n")
+        assert read_prototype_manifest(f) is None
+
+
+class TestBuildUxContextFromManifest:
+    """build_ux_context_from_manifest 上下文段落测试。"""
+
+    @staticmethod
+    def _setup(tmp_path: Path) -> Path:
+        root = tmp_path / "proj"
+        arts = root / "_bmad-output/implementation-artifacts"
+        ux = arts / "s1-ux"
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+        (arts / "s1.md").touch()
+        (ux / "ux-spec.md").touch()
+        (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+        (ux / "prototype.save-report.json").write_text('{}')
+        (exports / "a.png").write_bytes(b"PNG")
+        from ato.design_artifacts import write_prototype_manifest
+        write_prototype_manifest("s1", root)
+        return root
+
+    def test_includes_manifest_path(self, tmp_path: Path) -> None:
+        from ato.design_artifacts import build_ux_context_from_manifest
+
+        root = self._setup(tmp_path)
+        ctx = build_ux_context_from_manifest("s1", root)
+        assert "prototype.manifest.yaml" in ctx
+
+    def test_includes_png_and_pen_paths(self, tmp_path: Path) -> None:
+        from ato.design_artifacts import build_ux_context_from_manifest
+
+        root = self._setup(tmp_path)
+        ctx = build_ux_context_from_manifest("s1", root)
+        assert "exports/" in ctx
+        assert "prototype.pen" in ctx
+
+    def test_includes_lookup_order(self, tmp_path: Path) -> None:
+        from ato.design_artifacts import build_ux_context_from_manifest
+
+        root = self._setup(tmp_path)
+        ctx = build_ux_context_from_manifest("s1", root)
+        assert "Lookup Order" in ctx
+
+    def test_no_manifest_returns_empty(self, tmp_path: Path) -> None:
+        """manifest 不存在时返回空字符串（兼容无 UI story）。"""
+        from ato.design_artifacts import build_ux_context_from_manifest
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        ctx = build_ux_context_from_manifest("no-story", root)
+        assert ctx == ""
+
+    def test_derive_paths_include_manifest_yaml_key(self) -> None:
+        """derive_design_artifact_paths 返回 manifest_yaml 键 (subtask 1.1)。"""
+        from ato.design_artifacts import (
+            derive_design_artifact_paths,
+            derive_design_artifact_paths_relative,
+        )
+
+        abs_paths = derive_design_artifact_paths("s1", Path("/proj"))
+        assert "manifest_yaml" in abs_paths
+        assert abs_paths["manifest_yaml"].name == "prototype.manifest.yaml"
+
+        rel_paths = derive_design_artifact_paths_relative("s1")
+        assert "manifest_yaml" in rel_paths
+        assert rel_paths["manifest_yaml"].endswith("prototype.manifest.yaml")

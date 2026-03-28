@@ -2053,3 +2053,116 @@ class TestPenTemplateBaseline:
         assert "version" in data
         assert "children" in data
         assert "variables" in data
+
+
+# ---------------------------------------------------------------------------
+# Story 9.1d: validating prompt manifest 注入 (AC#3, #5)
+# ---------------------------------------------------------------------------
+
+
+class TestValidatingPromptManifestInjection:
+    """recovery _dispatch_convergent_loop 的 validating prompt 包含 manifest 引用 (AC#3, #5)。
+
+    这些测试直接调用真实的 _dispatch_convergent_loop 路径，
+    而不是 simulation，确保注入点被删除时测试能检测到。
+    """
+
+    @staticmethod
+    def _setup_project_with_manifest(tmp_path: Path, story_id: str = "s1") -> Path:
+        """构建含 manifest 的项目结构，db 在 .ato/ 下使 derive_project_root 正确推导。"""
+        from ato.design_artifacts import write_prototype_manifest
+
+        root = tmp_path / "proj"
+        ato_dir = root / ".ato"
+        ato_dir.mkdir(parents=True)
+        arts = root / "_bmad-output/implementation-artifacts"
+        ux = arts / f"{story_id}-ux"
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+        (arts / f"{story_id}.md").touch()
+        (ux / "ux-spec.md").touch()
+        (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+        (ux / "prototype.save-report.json").write_text('{}')
+        (exports / "a.png").write_bytes(b"PNG")
+        write_prototype_manifest(story_id, root)
+        return root
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_dispatch_convergent_loop_validating_includes_ux_context(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: MagicMock,
+    ) -> None:
+        """_dispatch_convergent_loop(validating) 真实路径中 prompt 包含 UX 上下文。"""
+        import shutil
+
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        root = self._setup_project_with_manifest(tmp_path, "s-val")
+
+        # 使用 .ato/state.db 使 derive_project_root 正确推导到 root
+        db_path = root / ".ato" / "state.db"
+        shutil.copy2(initialized_db_path, db_path)
+
+        # 插入 story 和 task
+        db = await get_connection(db_path)
+        try:
+            await insert_story(db, _make_story("s-val", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-val", "s-val", status="pending", pid=None, phase="validating"
+                ),
+            )
+        finally:
+            await db.close()
+
+        # Mock bmad adapter 返回 approved 结果
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="h",
+            raw_output_preview="preview",
+            parsed_at=datetime.now(UTC),
+        )
+
+        engine = RecoveryEngine(
+            db_path=db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"validating", "reviewing"},
+        )
+
+        task = _make_task(
+            "t-val", "s-val", status="pending", pid=None, phase="validating"
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine._dispatch_convergent_loop(task)
+
+        # 从 mock adapter 的 execute 调用中提取 prompt
+        assert _mock_recovery_adapter.execute.called
+        prompt = _mock_recovery_adapter.execute.call_args[0][0]
+        assert "UX Design Context" in prompt
+        assert "prototype.manifest.yaml" in prompt
+        assert "prototype.pen" in prompt
+
+    def test_no_manifest_prompt_passthrough(self, tmp_path: Path) -> None:
+        """无 manifest 时 build_ux_context_from_manifest 返回空字符串（兼容无 UI story）。"""
+        from ato.design_artifacts import build_ux_context_from_manifest
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        ctx = build_ux_context_from_manifest("no-story", root)
+        assert ctx == ""

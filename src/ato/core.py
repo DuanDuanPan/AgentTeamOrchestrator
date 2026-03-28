@@ -102,6 +102,7 @@ class DesignGateResult:
     pen_integrity_ok: bool = False
     snapshot_valid: bool = False
     save_report_valid: bool = False
+    manifest_valid: bool = False
     ux_spec_exists: bool = False
     exports_png_count: int = 0
     save_report_summary: dict[str, object] | None = None
@@ -135,6 +136,7 @@ async def check_design_gate(
         DESIGN_ARTIFACT_NAMES,
         SAVE_REPORT_REQUIRED_KEYS,
         derive_design_artifact_paths,
+        read_prototype_manifest,
         verify_pen_integrity,
         verify_snapshot,
     )
@@ -254,6 +256,61 @@ async def check_design_gate(
         if not exports_dir.is_dir():
             missing_files.append(str(exports_dir))
 
+    # 7. prototype.manifest.yaml (Story 9.1d AC#4)
+    manifest_path = paths["manifest_yaml"]
+    manifest_valid = False
+    if not manifest_path.is_file():
+        failure_codes.append("MANIFEST_MISSING")
+        missing_files.append(str(manifest_path))
+    else:
+        manifest_data = read_prototype_manifest(manifest_path)
+        if manifest_data is None:
+            failure_codes.append("MANIFEST_INVALID")
+        elif manifest_data.get("story_id") != story_id:
+            failure_codes.append("MANIFEST_STORY_ID_MISMATCH")
+        else:
+            # 3.3: 混合路径基准校验
+            # AC#2 要求 story_file 为 project-root 相对路径，
+            # UX 工件为 ux_dir 相对路径。
+            # 拒绝绝对路径、.. 越界和非 .png 的 reference_exports。
+            _manifest_paths_ok = True
+            # story_file: project_root 相对路径（不得为绝对、不得含 ..）
+            _sf = manifest_data.get("story_file", "")
+            if (
+                not _sf
+                or _sf != str(Path(_sf))  # normalize 后不变（排除多余 / 等）
+                or Path(_sf).is_absolute()
+                or ".." in Path(_sf).parts
+                or not (project_root / _sf).is_file()
+            ):
+                _manifest_paths_ok = False
+            # UX 工件: UX 目录相对路径（不得为绝对、不得含 ..）
+            for _key in ("ux_spec", "pen_file", "snapshot_file", "save_report_file"):
+                _val = manifest_data.get(_key, "")
+                if not _val:
+                    _manifest_paths_ok = False
+                    break
+                if Path(_val).is_absolute() or ".." in Path(_val).parts:
+                    _manifest_paths_ok = False
+                    break
+                if not (ux_dir / _val).is_file():
+                    _manifest_paths_ok = False
+                    break
+            # 3.4: reference_exports PNG 文件真实存在 + 必须为 .png 后缀
+            for _exp in manifest_data.get("reference_exports", []):
+                if (
+                    Path(_exp).is_absolute()
+                    or ".." in Path(_exp).parts
+                    or not _exp.endswith(".png")
+                    or not (ux_dir / _exp).is_file()
+                ):
+                    _manifest_paths_ok = False
+                    break
+            if not _manifest_paths_ok:
+                failure_codes.append("MANIFEST_PATHS_MISSING")
+            else:
+                manifest_valid = True
+
     # --- 通过条件：所有核心工件均通过 ---
     passed = len(failure_codes) == 0
 
@@ -270,6 +327,7 @@ async def check_design_gate(
         pen_integrity_ok=pen_integrity_ok,
         snapshot_valid=snapshot_valid,
         save_report_valid=save_report_valid,
+        manifest_valid=manifest_valid,
         ux_spec_exists=ux_spec_exists,
         exports_png_count=exports_png_count,
         failure_codes=failure_codes,
@@ -287,6 +345,7 @@ async def check_design_gate(
         pen_integrity_ok=pen_integrity_ok,
         snapshot_valid=snapshot_valid,
         save_report_valid=save_report_valid,
+        manifest_valid=manifest_valid,
         ux_spec_exists=ux_spec_exists,
         exports_png_count=exports_png_count,
         save_report_summary=save_report_summary,
@@ -375,11 +434,17 @@ _INTERACTIVE_PHASE_PROMPTS: dict[str, str] = {
 }
 
 
-def _build_interactive_prompt(task: TaskRecord, worktree_path: str, story_ctx: str = "") -> str:
+def _build_interactive_prompt(
+    task: TaskRecord,
+    worktree_path: str,
+    story_ctx: str = "",
+    project_root: Path | None = None,
+) -> str:
     """按 phase 构造 interactive session prompt。
 
     developing 阶段使用专用模板触发 bmad-dev-story skill；
     其他阶段使用通用 interactive restart prompt。
+    Story 9.1d: 有 manifest 时附加 UX 上下文。
     """
     template = _INTERACTIVE_PHASE_PROMPTS.get(task.phase)
     if template is not None:
@@ -393,7 +458,13 @@ def _build_interactive_prompt(task: TaskRecord, worktree_path: str, story_ctx: s
             f"phase {task.phase}. "
             f"Please continue the work for this phase."
         )
-    return f"{prompt}{story_ctx}"
+    # Story 9.1d: 附加 UX 上下文（manifest 存在时）
+    ux_ctx = ""
+    if project_root is not None:
+        from ato.design_artifacts import build_ux_context_from_manifest
+
+        ux_ctx = build_ux_context_from_manifest(task.story_id, project_root)
+    return f"{prompt}{story_ctx}{ux_ctx}"
 
 
 # ---------------------------------------------------------------------------
@@ -1038,7 +1109,10 @@ class Orchestrator:
             story_ctx = ""
             if task.context_briefing:
                 story_ctx = f"\n\nPrevious context: {task.context_briefing}"
-            prompt = _build_interactive_prompt(task, worktree_path, story_ctx)
+            prompt = _build_interactive_prompt(
+                task, worktree_path, story_ctx,
+                project_root=derive_project_root(self._db_path),
+            )
 
             ato_dir = self._db_path.parent
 
@@ -1230,6 +1304,16 @@ class Orchestrator:
                     # Design gate: designing phase 需要验证 UX 产出物
                     if event_name == "design_done":
                         project_root = derive_project_root(self._db_path)
+                        # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
+                        from ato.design_artifacts import write_prototype_manifest
+
+                        try:
+                            write_prototype_manifest(task.story_id, project_root)
+                        except Exception:
+                            logger.exception(
+                                "manifest_generation_failed",
+                                story_id=task.story_id,
+                            )
                         gate_result = await check_design_gate(
                             story_id=task.story_id,
                             task_id=task.task_id,

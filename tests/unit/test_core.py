@@ -2022,6 +2022,8 @@ class TestDesignGate:
         self, tmp_path: Path, story_id: str = "s1"
     ) -> tuple[Path, Path, Path]:
         """构建完整 V2 通过条件（全部核心工件）。"""
+        from ato.design_artifacts import write_prototype_manifest
+
         root, arts, ux = self._setup_project(tmp_path, story_id)
         (arts / f"{story_id}.md").touch()
         ux.mkdir()
@@ -2032,6 +2034,7 @@ class TestDesignGate:
         exports = ux / "exports"
         exports.mkdir()
         (exports / "screen.png").touch()
+        write_prototype_manifest(story_id, root)
         return root, arts, ux
 
     # --- Happy path ---
@@ -2500,8 +2503,8 @@ class TestDesignGate:
         root, _arts, _ux = self._setup_full_prerequisites(tmp_path)
 
         result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
-        # ux-spec + .pen + snapshot + save-report + 1 png = 5
-        assert result.artifact_count == 5
+        # ux-spec + .pen + snapshot + save-report + manifest + 1 png = 6
+        assert result.artifact_count == 6
 
     # --- 日志 ---
 
@@ -2520,3 +2523,167 @@ class TestDesignGate:
         captured = capfd.readouterr()
         output = captured.out + captured.err
         assert "design_gate_check" in output
+
+    # --- Story 9.1d: manifest gate 校验 ---
+
+    async def test_gate_fail_manifest_missing(self, tmp_path: Path) -> None:
+        """prototype.manifest.yaml 缺失时 gate 失败 (AC#4)。"""
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        # 删除 manifest
+        (ux / "prototype.manifest.yaml").unlink()
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert "MANIFEST_MISSING" in result.failure_codes
+        assert result.manifest_valid is False
+
+    async def test_gate_fail_manifest_invalid(self, tmp_path: Path) -> None:
+        """prototype.manifest.yaml 解析失败时 gate 失败 (AC#4)。"""
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        (ux / "prototype.manifest.yaml").write_text("{{invalid yaml")
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert "MANIFEST_INVALID" in result.failure_codes
+
+    async def test_gate_fail_manifest_story_id_mismatch(self, tmp_path: Path) -> None:
+        """manifest story_id 不匹配时 gate 失败 (AC#4)。"""
+        import yaml
+
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        manifest = ux / "prototype.manifest.yaml"
+        data = yaml.safe_load(manifest.read_text())
+        data["story_id"] = "wrong-story"
+        manifest.write_text(yaml.safe_dump(data))
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert "MANIFEST_STORY_ID_MISMATCH" in result.failure_codes
+
+    async def test_gate_fail_manifest_paths_missing(self, tmp_path: Path) -> None:
+        """manifest 中引用的路径不存在时 gate 失败 (AC#4)。"""
+        import yaml
+
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        manifest = ux / "prototype.manifest.yaml"
+        data = yaml.safe_load(manifest.read_text())
+        data["reference_exports"] = ["exports/nonexistent.png"]
+        manifest.write_text(yaml.safe_dump(data))
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert "MANIFEST_PATHS_MISSING" in result.failure_codes
+
+    async def test_gate_pass_manifest_valid(self, tmp_path: Path) -> None:
+        """完整 manifest 通过校验时 manifest_valid=True (AC#4)。"""
+        from ato.core import check_design_gate
+
+        root, _arts, _ux = self._setup_full_prerequisites(tmp_path)
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is True
+        assert result.manifest_valid is True
+
+    async def test_gate_fail_manifest_absolute_story_file(self, tmp_path: Path) -> None:
+        """story_file 为绝对路径时 gate 失败 (AC#2 相对路径合同)。"""
+        import yaml
+
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        manifest = ux / "prototype.manifest.yaml"
+        data = yaml.safe_load(manifest.read_text())
+        data["story_file"] = str(root / data["story_file"])  # 改为绝对路径
+        manifest.write_text(yaml.safe_dump(data))
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert "MANIFEST_PATHS_MISSING" in result.failure_codes
+
+    async def test_gate_fail_manifest_non_png_export(self, tmp_path: Path) -> None:
+        """reference_exports 含非 .png 文件时 gate 失败 (AC#4 PNG 合同)。"""
+        import yaml
+
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        exports_dir = ux / "exports"
+        (exports_dir / "readme.txt").write_bytes(b"text")
+        manifest = ux / "prototype.manifest.yaml"
+        data = yaml.safe_load(manifest.read_text())
+        data["reference_exports"] = ["exports/readme.txt"]
+        manifest.write_text(yaml.safe_dump(data))
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert "MANIFEST_PATHS_MISSING" in result.failure_codes
+
+    async def test_gate_fail_manifest_path_traversal(self, tmp_path: Path) -> None:
+        """story_file 含 .. 路径越界时 gate 失败。"""
+        import yaml
+
+        from ato.core import check_design_gate
+
+        root, _arts, ux = self._setup_full_prerequisites(tmp_path)
+        manifest = ux / "prototype.manifest.yaml"
+        data = yaml.safe_load(manifest.read_text())
+        data["story_file"] = "../../etc/passwd"
+        manifest.write_text(yaml.safe_dump(data))
+        result = await check_design_gate(story_id="s1", task_id="t1", project_root=root)
+        assert result.passed is False
+        assert "MANIFEST_PATHS_MISSING" in result.failure_codes
+
+
+class TestDevelopingPromptUxContext:
+    """Story 9.1d: developing prompt 包含 manifest / PNG / .pen 引用 (AC#3, #5)。"""
+
+    def test_developing_prompt_includes_ux_context(self, tmp_path: Path) -> None:
+        """_build_interactive_prompt 在 manifest 存在时附加 UX 上下文。"""
+        from ato.core import _build_interactive_prompt
+        from ato.design_artifacts import write_prototype_manifest
+        from ato.models.schemas import TaskRecord
+
+        root = tmp_path / "proj"
+        arts = root / "_bmad-output/implementation-artifacts"
+        ux = arts / "s1-ux"
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+        (arts / "s1.md").touch()
+        (ux / "ux-spec.md").touch()
+        (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
+        (ux / "prototype.snapshot.json").write_text('{"children":[]}')
+        (ux / "prototype.save-report.json").write_text('{}')
+        (exports / "a.png").write_bytes(b"PNG")
+        write_prototype_manifest("s1", root)
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="s1",
+            phase="developing",
+            role="developer",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree", project_root=root)
+        assert "UX Design Context" in prompt
+        assert "prototype.manifest.yaml" in prompt
+        assert "prototype.pen" in prompt
+
+    def test_developing_prompt_no_manifest_passthrough(self, tmp_path: Path) -> None:
+        """无 manifest 时 prompt 不含 UX 上下文（兼容无 UI story）。"""
+        from ato.core import _build_interactive_prompt
+        from ato.models.schemas import TaskRecord
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        task = TaskRecord(
+            task_id="t1",
+            story_id="s1",
+            phase="developing",
+            role="developer",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree", project_root=root)
+        assert "UX Design Context" not in prompt
