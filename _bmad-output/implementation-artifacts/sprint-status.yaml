@@ -125,7 +125,7 @@ development_status:
   # ===== Epic 8: 配置简化与工作流增强 =====
   epic-8: in-progress
   8-1-role-config-simplify-model-sandbox-optional: done
-  8-2-add-planning-phase: ready-for-dev
+  8-2-add-planning-phase: done
   8-3-cost-control-optional: done
   8-4-regression-test-multi-command: done
   8-5-init-auto-generate-config: ready-for-dev

@@ -1002,7 +1002,7 @@ class TestConfigTemplate:
     def test_example_has_required_roles(self) -> None:
         """模板包含至少 6 个角色。"""
         config = load_config(Path("ato.yaml.example"))
-        expected_roles = {"creator", "validator", "developer", "reviewer", "fixer", "qa"}
+        expected_roles = {"planner", "creator", "validator", "developer", "reviewer", "fixer", "qa"}
         assert expected_roles.issubset(set(config.roles.keys()))
 
     def test_example_has_full_lifecycle_phases(self) -> None:
@@ -1010,6 +1010,7 @@ class TestConfigTemplate:
         config = load_config(Path("ato.yaml.example"))
         phase_names = [p.name for p in config.phases]
         expected = [
+            "planning",
             "creating",
             "validating",
             "dev_ready",

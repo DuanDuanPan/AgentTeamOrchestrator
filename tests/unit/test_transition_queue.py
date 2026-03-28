@@ -98,6 +98,11 @@ class TestReplayToPhase:
         await _replay_to_phase(sm, "queued")
         assert sm.current_state_value == "queued"
 
+    async def test_replay_to_planning(self) -> None:
+        sm = await StoryLifecycle.create()
+        await _replay_to_phase(sm, "planning")
+        assert sm.current_state_value == "planning"
+
     async def test_replay_to_creating(self) -> None:
         sm = await StoryLifecycle.create()
         await _replay_to_phase(sm, "creating")
@@ -151,7 +156,7 @@ class TestReplayToPhase:
 
 class TestTransitionQueueFIFO:
     async def test_fifo_order(self, initialized_db_path: Path) -> None:
-        """提交 3 个事件，验证处理顺序与提交顺序一致。"""
+        """提交 4 个事件，验证处理顺序与提交顺序一致。"""
         await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
 
         tq = TransitionQueue(initialized_db_path)
@@ -159,6 +164,7 @@ class TestTransitionQueueFIFO:
 
         events = [
             _make_event("s1", "start_create"),
+            _make_event("s1", "plan_done"),
             _make_event("s1", "create_done"),
             _make_event("s1", "validate_pass"),
         ]
@@ -196,8 +202,8 @@ class TestTransitionQueueSerialization:
 
         sa = await _read_story(initialized_db_path, "sa")
         sb = await _read_story(initialized_db_path, "sb")
-        assert sa is not None and sa.current_phase == "creating"
-        assert sb is not None and sb.current_phase == "creating"
+        assert sa is not None and sa.current_phase == "planning"
+        assert sb is not None and sb.current_phase == "planning"
 
         await tq.stop()
 
@@ -223,7 +229,7 @@ class TestTransitionQueueErrorIsolation:
 
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "creating"
+        assert story.current_phase == "planning"
 
         await tq.stop()
 
@@ -242,7 +248,7 @@ class TestTransitionQueueErrorIsolation:
 
         story = await _read_story(initialized_db_path, "real")
         assert story is not None
-        assert story.current_phase == "creating"
+        assert story.current_phase == "planning"
 
         await tq.stop()
 
@@ -261,12 +267,12 @@ class TestTransitionQueueErrorIsolation:
         await tq._queue.join()
         assert "s1" not in tq._machines
 
-        await tq.submit(_make_event("s1", "create_done"))
+        await tq.submit(_make_event("s1", "plan_done"))
         await tq._queue.join()
 
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "validating"
+        assert story.current_phase == "creating"
 
         await tq.stop()
 
@@ -279,7 +285,7 @@ class TestTransitionQueueErrorIsolation:
         tq = TransitionQueue(initialized_db_path)
         await tq.start()
 
-        # 先让 s1 进入 creating 以填充缓存
+        # 先让 s1 进入 planning 以填充缓存
         await tq.submit(_make_event("s1", "start_create"))
         await tq._queue.join()
         assert "s1" in tq._machines
@@ -295,8 +301,8 @@ class TestTransitionQueueErrorIsolation:
 
         tq_mod.save_story_state = failing_save  # type: ignore[attr-defined]
         try:
-            # send 会成功（内存推进到 validating），但 persist 会失败
-            await tq.submit(_make_event("s1", "create_done"))
+            # send 会成功（内存推进到 creating），但 persist 会失败
+            await tq.submit(_make_event("s1", "plan_done"))
             await tq._queue.join()
         finally:
             tq_mod.save_story_state = orig_save  # type: ignore[attr-defined]
@@ -304,18 +310,18 @@ class TestTransitionQueueErrorIsolation:
         # 缓存应被驱逐（内存 vs DB 不一致）
         assert "s1" not in tq._machines
 
-        # DB 中应该还是 creating（rollback 了）
+        # DB 中应该还是 planning（rollback 了）
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "creating"
+        assert story.current_phase == "planning"
 
         # 队列仍然存活——后续合法事件正常处理
-        await tq.submit(_make_event("s1", "create_done"))
+        await tq.submit(_make_event("s1", "plan_done"))
         await tq._queue.join()
 
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "validating"
+        assert story.current_phase == "creating"
 
         await tq.stop()
 
@@ -344,7 +350,7 @@ class TestTransitionQueueErrorIsolation:
 
         tq._db.commit = failing_commit  # type: ignore[method-assign]
         try:
-            await tq.submit(_make_event("s1", "create_done"))
+            await tq.submit(_make_event("s1", "plan_done"))
             await tq._queue.join()
         finally:
             tq._db.commit = orig_commit  # type: ignore[method-assign]
@@ -353,12 +359,12 @@ class TestTransitionQueueErrorIsolation:
         assert "s1" not in tq._machines
 
         # 后续合法事件正常处理
-        await tq.submit(_make_event("s1", "create_done"))
+        await tq.submit(_make_event("s1", "plan_done"))
         await tq._queue.join()
 
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "validating"
+        assert story.current_phase == "creating"
 
         await tq.stop()
 
@@ -419,7 +425,7 @@ class TestTransitionQueueLifecycle:
 
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "creating"
+        assert story.current_phase == "planning"
         await tq.stop()
 
     async def test_stop_clears_machines_cache(self, initialized_db_path: Path) -> None:
@@ -444,6 +450,7 @@ class TestMachineRestore:
         "phase",
         [
             "queued",
+            "planning",
             "creating",
             "validating",
             "dev_ready",
@@ -462,6 +469,7 @@ class TestMachineRestore:
         """从各个 phase 恢复状态机实例。"""
         status_map = {
             "queued": "backlog",
+            "planning": "planning",
             "creating": "planning",
             "validating": "planning",
             "dev_ready": "ready",

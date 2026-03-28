@@ -258,6 +258,40 @@ class TestFourRecoveryScenarios:
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_reschedule_planning_phase_submits_plan_done(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        """Story 8.2: planning phase（首阶段）reschedule 提交 plan_done 事件。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1"))
+            await insert_task(db, _make_running_task("t1", "s1", pid=99999, phase="planning"))
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat", "developing"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+        )
+        result = await engine.run_recovery()
+        await engine.await_background_tasks()
+
+        assert result.classifications[0].action == "reschedule"
+
+        mock_tq.submit.assert_called_once()
+        event = mock_tq.submit.call_args[0][0]
+        assert event.event_name == "plan_done"
+        assert event.story_id == "s1"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
     async def test_reschedule_convergent_loop_phase_aware(
         self,
         mock_alive: MagicMock,
