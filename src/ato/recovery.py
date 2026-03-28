@@ -480,7 +480,9 @@ class RecoveryEngine:
             if self._settings is not None
             else ConvergentLoopConfig(),
             blocking_threshold=(
-                self._settings.cost.blocking_threshold if self._settings is not None else 10
+                self._settings.cost.blocking_threshold
+                if self._settings is not None and self._settings.cost is not None
+                else 10
             ),
             nudge=self._nudge,
         )
@@ -656,7 +658,9 @@ class RecoveryEngine:
             ]
 
             blocking_threshold = (
-                self._settings.cost.blocking_threshold if self._settings is not None else 10
+                self._settings.cost.blocking_threshold
+                if self._settings is not None and self._settings.cost is not None
+                else 10
             )
 
             db = await get_connection(self._db_path)

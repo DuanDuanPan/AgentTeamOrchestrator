@@ -111,7 +111,7 @@ class ATOSettings(BaseSettings):
     polling_interval: float = 3.0
     convergent_loop: ConvergentLoopConfig = ConvergentLoopConfig()
     timeout: TimeoutConfig = TimeoutConfig()
-    cost: CostConfig = CostConfig()
+    cost: CostConfig | None = None
     model_map: dict[str, str] = {}
     regression_test_command: str = "uv run pytest"
     merge_rebase_timeout: int = 120
@@ -294,10 +294,11 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
         raise ConfigError("配置错误：timeout.structured_job 必须 > 0")
     if config.timeout.interactive_session <= 0:
         raise ConfigError("配置错误：timeout.interactive_session 必须 > 0")
-    if config.cost.budget_per_story <= 0:
-        raise ConfigError("配置错误：cost.budget_per_story 必须 > 0")
-    if config.cost.blocking_threshold < 0:
-        raise ConfigError("配置错误：cost.blocking_threshold 必须 >= 0")
+    if config.cost is not None:
+        if config.cost.budget_per_story <= 0:
+            raise ConfigError("配置错误：cost.budget_per_story 必须 > 0")
+        if config.cost.blocking_threshold < 0:
+            raise ConfigError("配置错误：cost.blocking_threshold 必须 >= 0")
     if config.polling_interval <= 0:
         raise ConfigError("配置错误：polling_interval 必须 > 0")
 

@@ -1485,3 +1485,149 @@ class TestDispatchErrorFallback:
             assert approvals[0].approval_type == "crash_recovery"
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Story 8.3: cost=None 时恢复路径 fallback blocking_threshold
+# ---------------------------------------------------------------------------
+
+
+class TestRecoveryCostNoneFallback:
+    """AC3/AC4: settings.cost is None 时使用 fallback 10；显式值时传递配置值。"""
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_cost_none_uses_fallback_threshold(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC3: settings.cost is None → blocking_threshold fallback 为 10。"""
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task("t1", "s1", status="running", pid=999, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        # settings 对象中 cost=None
+        mock_settings = MagicMock()
+        mock_settings.cost = None
+        mock_settings.convergent_loop = MagicMock()
+        mock_settings.convergent_loop.max_rounds = 3
+        mock_settings.convergent_loop.convergence_threshold = 0.5
+        mock_settings.max_concurrent_agents = 4
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=mock_settings,
+        )
+
+        with (
+            patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
+            patch(
+                "ato.validation.maybe_create_blocking_abnormal_approval",
+                new_callable=AsyncMock,
+            ) as mock_approval,
+        ):
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        # fallback threshold == 10
+        mock_approval.assert_called_once()
+        assert mock_approval.call_args.kwargs["threshold"] == 10
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_explicit_blocking_threshold_passed(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC4: 显式 blocking_threshold 时恢复路径传递配置值。"""
+        from ato.config import CostConfig
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task("t1", "s1", status="running", pid=999, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        # settings 对象中 cost 显式配置
+        mock_settings = MagicMock()
+        mock_settings.cost = CostConfig(budget_per_story=5.0, blocking_threshold=7)
+        mock_settings.convergent_loop = MagicMock()
+        mock_settings.convergent_loop.max_rounds = 3
+        mock_settings.convergent_loop.convergence_threshold = 0.5
+        mock_settings.max_concurrent_agents = 4
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=mock_settings,
+        )
+
+        with (
+            patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
+            patch(
+                "ato.validation.maybe_create_blocking_abnormal_approval",
+                new_callable=AsyncMock,
+            ) as mock_approval,
+        ):
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        # 显式配置值 == 7
+        mock_approval.assert_called_once()
+        assert mock_approval.call_args.kwargs["threshold"] == 7
