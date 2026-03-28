@@ -46,6 +46,7 @@ def _make_phase_defs() -> list[PhaseDefinition]:
     phases_data = [
         ("planning", "planner", "structured_job"),
         ("creating", "creator", "structured_job"),
+        ("designing", "ux_designer", "structured_job"),
         ("validating", "validator", "convergent_loop"),
         ("dev_ready", "developer", "structured_job"),
         ("developing", "developer", "structured_job"),
@@ -179,7 +180,7 @@ class TestPlanDoneStatus:
 
         assert result.exit_code == 0
         # All phases should show ✔
-        assert result.output.count("✔") >= 13
+        assert result.output.count("✔") >= 14
         assert "▶" not in result.output
         assert "○" not in result.output
 
@@ -252,12 +253,13 @@ class TestRenderPlanOutput:
         assert "AgentTeamOrchestrator" in output
         assert "Story Plan" in output
 
-    def test_all_13_phases_present(self) -> None:
+    def test_all_14_phases_present(self) -> None:
         output = self._capture(_story(), _make_phase_defs())
         phases = [
             "queued",
             "planning",
             "creating",
+            "designing",
             "validating",
             "dev_ready",
             "developing",
@@ -298,7 +300,7 @@ class TestRenderPlanOutput:
 
     def test_done_all_checkmarks(self) -> None:
         output = self._capture(_story(status="done", current_phase="done"), [])
-        assert output.count("✔") >= 13
+        assert output.count("✔") >= 14
         assert "▶" not in output
 
     def test_blocked_no_progress(self) -> None:

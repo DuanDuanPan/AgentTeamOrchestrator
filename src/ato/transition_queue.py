@@ -35,7 +35,8 @@ _HAPPY_PATH_EVENTS: dict[str, list[str]] = {}
 _HP_EVENTS: list[str] = [
     "start_create",  # queued → planning
     "plan_done",  # planning → creating
-    "create_done",  # creating → validating
+    "create_done",  # creating → designing
+    "design_done",  # designing → validating
     "validate_pass",  # validating → dev_ready
     "start_dev",  # dev_ready → developing
     "dev_done",  # developing → reviewing
@@ -49,6 +50,7 @@ _HP_PHASES: list[str] = [
     "queued",
     "planning",
     "creating",
+    "designing",
     "validating",
     "dev_ready",
     "developing",

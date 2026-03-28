@@ -1,6 +1,6 @@
 # Story 9.1: 新增 Designing 阶段 — 可选的 UX 设计环节
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -94,46 +94,46 @@ And 新增 ≥6 个测试：
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 更新状态机 canonical 合同 (AC: #1, #2)
-  - [ ] 1.1 在 `src/ato/state_machine.py` 中把 `designing` 插入 `CANONICAL_PHASES`，位于 `creating` 之后、`validating` 之前
-  - [ ] 1.2 在 `PHASE_TO_STATUS` 中新增 `designing: "planning"`
-  - [ ] 1.3 在 `CANONICAL_TRANSITIONS` 中：`creating` 的 success 从 `validating` 改为 `designing`；新增 `designing: ("validating", None)`
-  - [ ] 1.4 `StoryLifecycle` 新增 `designing = State()`
-  - [ ] 1.5 现有 `create_done` 目标改为 `creating.to(designing)`；新增 `design_done = designing.to(validating)`
-  - [ ] 1.6 `escalate` 联合 transition 补入 `designing.to(blocked)`
+- [x] Task 1: 更新状态机 canonical 合同 (AC: #1, #2)
+  - [x] 1.1 在 `src/ato/state_machine.py` 中把 `designing` 插入 `CANONICAL_PHASES`，位于 `creating` 之后、`validating` 之前
+  - [x] 1.2 在 `PHASE_TO_STATUS` 中新增 `designing: "planning"`
+  - [x] 1.3 在 `CANONICAL_TRANSITIONS` 中：`creating` 的 success 从 `validating` 改为 `designing`；新增 `designing: ("validating", None)`
+  - [x] 1.4 `StoryLifecycle` 新增 `designing = State()`
+  - [x] 1.5 现有 `create_done` 目标改为 `creating.to(designing)`；新增 `design_done = designing.to(validating)`
+  - [x] 1.6 `escalate` 联合 transition 补入 `designing.to(blocked)`
 
-- [ ] Task 2: 对齐配置模板与 phase-order 消费方 (AC: #3)
-  - [ ] 2.1 在 `ato.yaml.example` 中新增 `ux_designer` 角色（`cli: claude`），并在 `phases:` 中 `creating` 之后加入 `designing`
-  - [ ] 2.2 更新 `src/ato/cli.py::_PHASE_ICONS` 新增 `designing` 图标
-  - [ ] 2.3 更新 `tests/unit/test_state_machine.py`：happy path 事件序列、`_canonical_phase_defs()`、`PHASE_TO_STATUS` 断言、escalatable states 集合
-  - [ ] 2.4 更新 `tests/unit/test_config.py`：`len(config.phases)` 断言、`ato.yaml.example` 加载测试
-  - [ ] 2.5 更新 `tests/unit/test_cli_plan.py`：阶段序列基线
-  - [ ] 2.6 更新 `tests/unit/test_story_detail_view.py`、`tests/unit/test_story_status_line.py`：阶段计数断言
+- [x] Task 2: 对齐配置模板与 phase-order 消费方 (AC: #3)
+  - [x] 2.1 在 `ato.yaml.example` 中新增 `ux_designer` 角色（`cli: claude`），并在 `phases:` 中 `creating` 之后加入 `designing`
+  - [x] 2.2 更新 `src/ato/cli.py::_PHASE_ICONS` 新增 `designing` 图标
+  - [x] 2.3 更新 `tests/unit/test_state_machine.py`：happy path 事件序列、`_canonical_phase_defs()`、`PHASE_TO_STATUS` 断言、escalatable states 集合
+  - [x] 2.4 更新 `tests/unit/test_config.py`：`len(config.phases)` 断言、`ato.yaml.example` 加载测试
+  - [x] 2.5 更新 `tests/unit/test_cli_plan.py`：阶段序列基线
+  - [x] 2.6 更新 `tests/unit/test_story_detail_view.py`、`tests/unit/test_story_status_line.py`：阶段计数断言
 
-- [ ] Task 3: 对齐 recovery / replay 路径 (AC: #4)
-  - [ ] 3.1 在 `src/ato/recovery.py::_PHASE_SUCCESS_EVENT` 中新增 `designing: "design_done"`
-  - [ ] 3.2 在 `src/ato/transition_queue.py` 中更新 `_HP_EVENTS`、`_HP_PHASES`、`_HAPPY_PATH_EVENTS`，插入 `designing` / `design_done`
-  - [ ] 3.3 更新 `tests/unit/test_recovery.py`、`tests/integration/test_crash_recovery.py` 中 phase 枚举断言
-  - [ ] 3.4 更新 `tests/unit/test_transition_queue.py`、`tests/integration/test_transition_queue.py`、`tests/integration/test_state_persistence.py`
+- [x] Task 3: 对齐 recovery / replay 路径 (AC: #4)
+  - [x] 3.1 在 `src/ato/recovery.py::_PHASE_SUCCESS_EVENT` 中新增 `designing: "design_done"`
+  - [x] 3.2 在 `src/ato/transition_queue.py` 中更新 `_HP_EVENTS`、`_HP_PHASES`、`_HAPPY_PATH_EVENTS`，插入 `designing` / `design_done`
+  - [x] 3.3 更新 `tests/unit/test_recovery.py`、`tests/integration/test_crash_recovery.py` 中 phase 枚举断言
+  - [x] 3.4 更新 `tests/unit/test_transition_queue.py`、`tests/integration/test_transition_queue.py`、`tests/integration/test_state_persistence.py`
 
-- [ ] Task 4: Pre-worktree structured_job 串行控制 (AC: #5)
-  - [ ] 4.1 在 `src/ato/core.py` / `src/ato/recovery.py` 的共享 dispatch 路径上增加单实例 main-path limiter（max=1）
-  - [ ] 4.2 明确不要把该限流只放在某个临时 `SubprocessManager` 实例里，因为现有代码会在不同路径上不断新建 manager
-  - [ ] 4.3 新增 `tests/unit/test_core.py` 或 `tests/unit/test_recovery.py`：同一时刻仅允许 1 个 pre-worktree structured_job 执行
+- [x] Task 4: Pre-worktree structured_job 串行控制 (AC: #5)
+  - [x] 4.1 在 `src/ato/core.py` / `src/ato/recovery.py` 的共享 dispatch 路径上增加单实例 main-path limiter（max=1）
+  - [x] 4.2 明确不要把该限流只放在某个临时 `SubprocessManager` 实例里，因为现有代码会在不同路径上不断新建 manager
+  - [x] 4.3 新增 `tests/unit/test_core.py` 或 `tests/unit/test_recovery.py`：同一时刻仅允许 1 个 pre-worktree structured_job 执行
 
-- [ ] Task 5: Designing artifact gate 验证 (AC: #6)
-  - [ ] 5.1 在 structured_job 成功后、提交 `design_done` 前的 success-event 路径增加 gate helper，不放在 `state_machine.py` 的 transition handler 中
-  - [ ] 5.2 设计产出物路径与当前 `story_location` 对齐：story 文件仍在 `_bmad-output/implementation-artifacts/{story_id}.md`，设计目录为 `_bmad-output/implementation-artifacts/{story_id}-ux/`
-  - [ ] 5.3 验证失败时创建 `needs_human_review` approval，payload 含 `task_id`、`artifact_dir`、`artifact_count`
-  - [ ] 5.4 新增 `tests/unit/test_core.py` 或 `tests/unit/test_recovery.py`：gate 通过 / 缺失两种路径
+- [x] Task 5: Designing artifact gate 验证 (AC: #6)
+  - [x] 5.1 在 structured_job 成功后、提交 `design_done` 前的 success-event 路径增加 gate helper，不放在 `state_machine.py` 的 transition handler 中
+  - [x] 5.2 设计产出物路径与当前 `story_location` 对齐：story 文件仍在 `_bmad-output/implementation-artifacts/{story_id}.md`，设计目录为 `_bmad-output/implementation-artifacts/{story_id}-ux/`
+  - [x] 5.3 验证失败时创建 `needs_human_review` approval，payload 含 `task_id`、`artifact_dir`、`artifact_count`
+  - [x] 5.4 新增 `tests/unit/test_core.py` 或 `tests/unit/test_recovery.py`：gate 通过 / 缺失两种路径
 
-- [ ] Task 6: 新增 designing 覆盖测试 (AC: #7)
-  - [ ] 6.1 `tests/unit/test_state_machine.py`：`test_designing_to_validating`
-  - [ ] 6.2 `tests/unit/test_state_machine.py`：`test_creating_to_designing`
-  - [ ] 6.3 `tests/unit/test_state_machine.py`：`test_designing_escalate`
-  - [ ] 6.4 `tests/unit/test_transition_queue.py`：`test_replay_to_designing`
-  - [ ] 6.5 `tests/unit/test_recovery.py`：designing phase crash-recovery reschedule 断言
-  - [ ] 6.6 `tests/unit/test_core.py` 或 `tests/unit/test_recovery.py`：design gate 断言
+- [x] Task 6: 新增 designing 覆盖测试 (AC: #7)
+  - [x] 6.1 `tests/unit/test_state_machine.py`：`test_designing_to_validating`
+  - [x] 6.2 `tests/unit/test_state_machine.py`：`test_creating_to_designing`
+  - [x] 6.3 `tests/unit/test_state_machine.py`：`test_designing_escalate`
+  - [x] 6.4 `tests/unit/test_transition_queue.py`：`test_replay_to_designing`
+  - [x] 6.5 `tests/unit/test_recovery.py`：designing phase crash-recovery reschedule 断言
+  - [x] 6.6 `tests/unit/test_core.py` 或 `tests/unit/test_recovery.py`：design gate 断言
 
 ## Dev Notes
 
@@ -202,16 +202,53 @@ uv run pytest tests/integration/test_transition_queue.py tests/integration/test_
 ## Change Log
 
 - 2026-03-28: Story 创建
-- 2026-03-28: `validate-create-story` 修订 —— 去除与当前仓库不一致的 `_bmad-output/stories/` 路径；将 design gate 落点从“transition handler”收紧到真实 success-event 提交路径；将 main 串行控制收敛为共享 dispatch limiter；补回 Scope Boundary、Previous Story Intelligence 与 Dev Agent Record 结构
+- 2026-03-28: `validate-create-story` 修订 —— 去除与当前仓库不一致的 `_bmad-output/stories/` 路径；将 design gate 落点从”transition handler”收紧到真实 success-event 提交路径；将 main 串行控制收敛为共享 dispatch limiter；补回 Scope Boundary、Previous Story Intelligence 与 Dev Agent Record 结构
+- 2026-03-28: 实现完成 — 6 个 task 全部交付，1505 测试全部通过，17 个新测试覆盖 designing 阶段各路径
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-待 dev-story 填写
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+无调试问题。
+
 ### Completion Notes List
 
+- 在 `state_machine.py` 中插入 `designing` phase，复用 `planning` 高层状态，遵循 Story 8.2 的 phase-insertion 模式
+- `create_done` 改向 `designing`，新增 `design_done` 事件推进 `designing → validating`，最小改动策略
+- `ato.yaml.example` 新增 `ux_designer` 角色和 `designing` structured_job 阶段
+- replay/recovery 路径完整对齐：`_HP_EVENTS`、`_HP_PHASES`、`_PHASE_SUCCESS_EVENT` 均已更新
+- Pre-worktree 串行控制：在 `core.py` 中新增共享 `asyncio.Semaphore(1)` limiter（`PRE_WORKTREE_PHASES = {planning, creating, designing}`），core.py 和 recovery.py 的 dispatch 路径均 acquire/release
+- Design artifact gate：`check_design_gate()` 检查 `{story_id}-ux/` 目录下是否有 `.md/.pen/.png` 文件，失败时创建 `needs_human_review` approval
+- 全部 1505 个测试通过（0 回归），新增 17 个 designing 相关测试
+- 也修复了 `test_convergent_loop.py` 和 `test_config_workflow.py` 中遗漏的 designing 对齐
+
 ### File List
+
+**修改的源文件：**
+- `src/ato/state_machine.py` — 插入 designing state/transitions
+- `src/ato/transition_queue.py` — replay tables 更新
+- `src/ato/recovery.py` — _PHASE_SUCCESS_EVENT + design gate + pre-worktree limiter
+- `src/ato/core.py` — PRE_WORKTREE_PHASES + get_main_path_limiter() + check_design_gate() + dispatch limiter
+- `src/ato/cli.py` — _PHASE_ICONS 新增 designing
+- `ato.yaml.example` — ux_designer 角色 + designing phase
+
+**修改的测试文件：**
+- `tests/unit/test_state_machine.py` — happy path/escalate/PHASE_TO_STATUS 更新 + TestDesigningPhase 新增
+- `tests/unit/test_config.py` — phase list 断言更新
+- `tests/unit/test_cli_plan.py` — phase list/count 更新
+- `tests/unit/test_story_detail_view.py` — PHASE_ORDER 长度更新
+- `tests/unit/test_transition_queue.py` — FIFO test + replay_to_designing 新增
+- `tests/unit/test_recovery.py` — TestDesigningPhaseRecovery 新增
+- `tests/unit/test_core.py` — TestPreWorktreeSerialControl + TestDesignGate 新增
+- `tests/unit/test_convergent_loop.py` — advance-to-reviewing path 更新
+- `tests/integration/test_transition_queue.py` — create_done → designing 更新
+- `tests/integration/test_state_persistence.py` — happy path + event sequences 更新
+- `tests/integration/test_config_workflow.py` — phase list 断言更新
+
+**修改的配置/状态文件：**
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — story status 更新
+- `_bmad-output/implementation-artifacts/9-1-add-designing-phase.md` — story file 更新

@@ -25,6 +25,7 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 CANONICAL_PHASES: tuple[str, ...] = (
     "planning",
     "creating",
+    "designing",
     "validating",
     "dev_ready",
     "developing",
@@ -45,6 +46,7 @@ PHASE_TO_STATUS: dict[str, StoryStatus] = {
     "queued": "backlog",
     "planning": "planning",
     "creating": "planning",
+    "designing": "planning",
     "validating": "planning",
     "dev_ready": "ready",
     "developing": "in_progress",
@@ -81,7 +83,8 @@ class HasPhaseInfo(Protocol):
 # 规范 transition 映射：phase_name → (next_on_success, next_on_failure | None)
 CANONICAL_TRANSITIONS: dict[str, tuple[str, str | None]] = {
     "planning": ("creating", None),
-    "creating": ("validating", None),
+    "creating": ("designing", None),
+    "designing": ("validating", None),
     "validating": ("dev_ready", "creating"),
     "dev_ready": ("developing", None),
     "developing": ("reviewing", None),
@@ -102,14 +105,15 @@ CANONICAL_TRANSITIONS: dict[str, tuple[str, str | None]] = {
 class StoryLifecycle(StateMachine):
     """Story 生命周期状态机。
 
-    14 个规范状态，覆盖从 queued（等待启动）到 done（完成）的完整流程，
+    15 个规范状态，覆盖从 queued（等待启动）到 done（完成）的完整流程，
     以及 blocked（升级阻塞）的 sink state。
 
     状态图::
 
         queued ──start_create──→ planning
         planning ──plan_done──→ creating
-        creating ──create_done──→ validating
+        creating ──create_done──→ designing
+        designing ──design_done──→ validating
         validating ──validate_pass──→ dev_ready
         validating ──validate_fail──→ creating      ← Convergent Loop 回退
         dev_ready ──start_dev──→ developing
@@ -131,6 +135,7 @@ class StoryLifecycle(StateMachine):
     queued = State(initial=True)
     planning = State()
     creating = State()
+    designing = State()
     validating = State()
     dev_ready = State()
     developing = State()
@@ -146,7 +151,8 @@ class StoryLifecycle(StateMachine):
     # --- Transitions ---
     start_create = queued.to(planning)
     plan_done = planning.to(creating)
-    create_done = creating.to(validating)
+    create_done = creating.to(designing)
+    design_done = designing.to(validating)
     validate_pass = validating.to(dev_ready)
     validate_fail = validating.to(creating) | reviewing.to(creating)
     start_dev = dev_ready.to(developing)
@@ -167,6 +173,7 @@ class StoryLifecycle(StateMachine):
         queued.to(blocked)
         | planning.to(blocked)
         | creating.to(blocked)
+        | designing.to(blocked)
         | validating.to(blocked)
         | dev_ready.to(blocked)
         | developing.to(blocked)

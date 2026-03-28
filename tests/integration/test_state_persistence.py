@@ -44,7 +44,8 @@ class TestStatePersistenceIntegration:
             events_and_expected = [
                 ("start_create", "planning", "planning"),
                 ("plan_done", "creating", "planning"),
-                ("create_done", "validating", "planning"),
+                ("create_done", "designing", "planning"),
+                ("design_done", "validating", "planning"),
                 ("validate_pass", "dev_ready", "ready"),
                 ("start_dev", "developing", "in_progress"),
                 ("dev_done", "reviewing", "review"),
@@ -79,7 +80,7 @@ class TestStatePersistenceIntegration:
             sm = await StoryLifecycle.create()
 
             # 推进到 reviewing
-            for event in ("start_create", "plan_done", "create_done", "validate_pass", "start_dev", "dev_done"):
+            for event in ("start_create", "plan_done", "create_done", "design_done", "validate_pass", "start_dev", "dev_done"):
                 await sm.send(event)
                 await save_story_state(db, _STORY_ID, sm.current_state_value)
                 await db.commit()
@@ -124,7 +125,7 @@ class TestStatePersistenceIntegration:
             sm = await StoryLifecycle.create()
 
             # 推进到 developing，然后 escalate
-            for event in ("start_create", "plan_done", "create_done", "validate_pass", "start_dev"):
+            for event in ("start_create", "plan_done", "create_done", "design_done", "validate_pass", "start_dev"):
                 await sm.send(event)
                 await save_story_state(db, _STORY_ID, sm.current_state_value)
                 await db.commit()

@@ -36,6 +36,7 @@ async def _seed_story(db_path: Path, story_id: str, phase: str = "queued") -> No
         "queued": "backlog",
         "planning": "planning",
         "creating": "planning",
+        "designing": "planning",
         "validating": "planning",
         "dev_ready": "ready",
         "developing": "in_progress",
@@ -73,15 +74,15 @@ async def _read_story(db_path: Path, story_id: str) -> StoryRecord | None:
 
 
 class TestBDDConcurrentTransitions:
-    async def test_two_stories_creating_to_validating_serial(
+    async def test_two_stories_creating_to_designing_serial(
         self, initialized_db_path: Path
     ) -> None:
-        """BDD Scenario（spec 原文）:
+        """BDD Scenario:
 
         Given Story A and Story B are in 'creating'
         When both submit 'create_done' simultaneously
-        Then A transitions to 'validating' first, B second
-        And both end up in 'validating' with no conflicts.
+        Then A transitions to 'designing' first, B second
+        And both end up in 'designing' with no conflicts.
 
         通过记录 consumer 处理顺序证明串行性。
         """
@@ -119,11 +120,11 @@ class TestBDDConcurrentTransitions:
         sb = await _read_story(initialized_db_path, "story-b")
 
         assert sa is not None
-        assert sa.current_phase == "validating"
+        assert sa.current_phase == "designing"
         assert sa.status == "planning"
 
         assert sb is not None
-        assert sb.current_phase == "validating"
+        assert sb.current_phase == "designing"
         assert sb.status == "planning"
 
         await tq.stop()
@@ -212,7 +213,8 @@ class TestEndToEnd:
         transitions = [
             ("start_create", "planning", "planning"),
             ("plan_done", "creating", "planning"),
-            ("create_done", "validating", "planning"),
+            ("create_done", "designing", "planning"),
+            ("design_done", "validating", "planning"),
             ("validate_pass", "dev_ready", "ready"),
             ("start_dev", "developing", "in_progress"),
             ("dev_done", "reviewing", "review"),

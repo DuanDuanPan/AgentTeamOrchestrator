@@ -143,6 +143,12 @@ class TestReplayToPhase:
         await _replay_to_phase(sm, "regression")
         assert sm.current_state_value == "regression"
 
+    async def test_replay_to_designing(self) -> None:
+        """Story 9.1: replay 到 designing 阶段。"""
+        sm = await StoryLifecycle.create()
+        await _replay_to_phase(sm, "designing")
+        assert sm.current_state_value == "designing"
+
     async def test_replay_unknown_phase_raises(self) -> None:
         sm = await StoryLifecycle.create()
         with pytest.raises(StateTransitionError, match="unknown phase"):
@@ -156,7 +162,7 @@ class TestReplayToPhase:
 
 class TestTransitionQueueFIFO:
     async def test_fifo_order(self, initialized_db_path: Path) -> None:
-        """提交 4 个事件，验证处理顺序与提交顺序一致。"""
+        """提交 5 个事件，验证处理顺序与提交顺序一致。"""
         await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
 
         tq = TransitionQueue(initialized_db_path)
@@ -166,6 +172,7 @@ class TestTransitionQueueFIFO:
             _make_event("s1", "start_create"),
             _make_event("s1", "plan_done"),
             _make_event("s1", "create_done"),
+            _make_event("s1", "design_done"),
             _make_event("s1", "validate_pass"),
         ]
         for evt in events:

@@ -72,20 +72,12 @@ _DEFAULT_EPICS_PATH = Path("_bmad-output/planning-artifacts/epics.md")
 def _derive_project_root(db_path: Path) -> Path:
     """从 db_path 推导项目根目录。
 
-    标准布局 ``<project>/.ato/state.db`` → 祖父目录即项目根。
-    自定义 db（同级目录有 ``ato.yaml``）→ db 所在目录。
-    回退到当前工作目录。
+    委托给 :func:`ato.core.derive_project_root` 的共享实现。
+    保留 ``_`` 前缀以维持 CLI 层的向后兼容性。
     """
-    # 标准布局: <project>/.ato/state.db
-    grandparent = db_path.parent.parent
-    if db_path.parent.name == ".ato" and grandparent.is_dir():
-        return grandparent
+    from ato.core import derive_project_root
 
-    # 自定义 db: db 同级目录有 ato.yaml
-    if (db_path.parent / "ato.yaml").is_file():
-        return db_path.parent
-
-    return Path.cwd()
+    return derive_project_root(db_path)
 
 
 def _resolve_config_path(
@@ -123,6 +115,7 @@ _PHASE_ICONS: dict[str, str] = {
     "queued": "⏳",
     "planning": "📋",
     "creating": "🔄",
+    "designing": "🎨",
 }
 
 

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import signal
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,6 +29,126 @@ from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
+
+# ---------------------------------------------------------------------------
+# Pre-worktree structured_job 串行控制
+# ---------------------------------------------------------------------------
+
+# Phases that execute on project_root (no worktree yet) — must run at most 1 at a time.
+PRE_WORKTREE_PHASES: frozenset[str] = frozenset({"planning", "creating", "designing"})
+
+# Shared single-instance limiter for pre-worktree structured_jobs.
+# Created lazily by get_main_path_limiter() inside the running event loop.
+_main_path_limiter: asyncio.Semaphore | None = None
+
+
+def get_main_path_limiter() -> asyncio.Semaphore:
+    """Return the shared main-path limiter (max=1), creating it on first call."""
+    global _main_path_limiter
+    if _main_path_limiter is None:
+        _main_path_limiter = asyncio.Semaphore(1)
+    return _main_path_limiter
+
+
+def reset_main_path_limiter() -> None:
+    """Reset the limiter (for testing only)."""
+    global _main_path_limiter
+    _main_path_limiter = None
+
+
+# ---------------------------------------------------------------------------
+# Project root 推导（复用 cli.py 的三级回退逻辑）
+# ---------------------------------------------------------------------------
+
+
+def derive_project_root(db_path: Path) -> Path:
+    """从 db_path 推导项目根目录。
+
+    标准布局 ``<project>/.ato/state.db`` → 祖父目录即项目根。
+    自定义 db（同级目录有 ``ato.yaml``）→ db 所在目录。
+    回退到当前工作目录。
+    """
+    grandparent = db_path.parent.parent
+    if db_path.parent.name == ".ato" and grandparent.is_dir():
+        return grandparent
+
+    if (db_path.parent / "ato.yaml").is_file():
+        return db_path.parent
+
+    return Path.cwd()
+
+
+# ---------------------------------------------------------------------------
+# Designing artifact gate (AC#6)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DesignGateResult:
+    """Design gate 检查结果。"""
+
+    passed: bool
+    story_spec_exists: bool
+    artifact_count: int
+    artifact_dir: str
+    reason: str
+
+
+async def check_design_gate(
+    story_id: str,
+    task_id: str,
+    artifacts_dir: Path,
+) -> DesignGateResult:
+    """验证 designing 阶段产出物是否存在。
+
+    检查条件（全部满足才 pass）:
+    1. Story spec 仍位于 ``artifacts_dir/{story_id}.md``
+    2. UX 设计目录 ``artifacts_dir/{story_id}-ux/`` 存在
+    3. 该目录下至少有 1 个设计 artifact（.md / .pen / .png）
+
+    Returns:
+        DesignGateResult 包含 passed 状态和具体失败原因。
+    """
+    story_spec = artifacts_dir / f"{story_id}.md"
+    story_spec_exists = story_spec.is_file()
+
+    artifact_dir = artifacts_dir / f"{story_id}-ux"
+    artifact_count = 0
+
+    if artifact_dir.is_dir():
+        for p in artifact_dir.iterdir():
+            if p.suffix in (".md", ".pen", ".png"):
+                artifact_count += 1
+
+    passed = story_spec_exists and artifact_count > 0
+
+    if passed:
+        reason = "all checks passed"
+    elif not story_spec_exists and artifact_count == 0:
+        reason = "Story spec missing AND no UX artifacts"
+    elif not story_spec_exists:
+        reason = f"Story spec missing: {story_spec}"
+    else:
+        reason = f"No UX artifacts (.md/.pen/.png) in {artifact_dir}"
+
+    logger.info(
+        "design_gate_check",
+        story_id=story_id,
+        task_id=task_id,
+        story_spec=str(story_spec),
+        story_spec_exists=story_spec_exists,
+        artifact_dir=str(artifact_dir),
+        artifact_count=artifact_count,
+        result="pass" if passed else "fail",
+    )
+
+    return DesignGateResult(
+        passed=passed,
+        story_spec_exists=story_spec_exists,
+        artifact_count=artifact_count,
+        artifact_dir=str(artifact_dir),
+        reason=reason,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -863,11 +984,15 @@ class Orchestrator:
         """后台重新调度 structured_job phase（非 convergent_loop、非 interactive）。
 
         复用 SubprocessManager.dispatch_with_retry(is_retry=True)。
+        Pre-worktree phases 通过共享 main-path limiter（max=1）串行化。
         """
         from ato.models.db import get_connection as _gc
         from ato.models.db import get_story
         from ato.subprocess_mgr import SubprocessManager
 
+        limiter = get_main_path_limiter() if task.phase in PRE_WORKTREE_PHASES else None
+        if limiter is not None:
+            await limiter.acquire()
         try:
             db = await _gc(self._db_path)
             try:
@@ -889,15 +1014,26 @@ class Orchestrator:
                 db_path=self._db_path,
             )
 
-            # 构建 prompt
-            story_ctx = ""
-            if task.context_briefing:
-                story_ctx = f"\n\nPrevious context: {task.context_briefing}"
-            prompt = (
-                f"Restart for story {task.story_id}, phase {task.phase}. "
-                f"The previous task needs to be retried. "
-                f"Please perform the work for this phase.{story_ctx}"
+            # 构建 prompt（优先使用 phase-specific 模板）
+            from ato.recovery import (
+                _STRUCTURED_JOB_PROMPTS,
+                _format_structured_job_prompt,
             )
+
+            prompt_template = _STRUCTURED_JOB_PROMPTS.get(task.phase)
+            if prompt_template is not None:
+                prompt = _format_structured_job_prompt(
+                    prompt_template, task.story_id
+                )
+            else:
+                story_ctx = ""
+                if task.context_briefing:
+                    story_ctx = f"\n\nPrevious context: {task.context_briefing}"
+                prompt = (
+                    f"Restart for story {task.story_id}, phase {task.phase}. "
+                    f"The previous task needs to be retried. "
+                    f"Please perform the work for this phase.{story_ctx}"
+                )
 
             # 从 phase config 获取 model / sandbox，确保 restart 路径也透传
             from ato.recovery import RecoveryEngine
@@ -908,6 +1044,9 @@ class Orchestrator:
             options: dict[str, object] = {}
             if worktree_path:
                 options["cwd"] = worktree_path
+            else:
+                # Pre-worktree fallback: derive project root from db_path
+                options["cwd"] = str(derive_project_root(self._db_path))
             phase_model = phase_cfg.get("model")
             if phase_model:
                 options["model"] = phase_model
@@ -932,6 +1071,46 @@ class Orchestrator:
 
                 event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
                 if event_name is not None:
+                    # Design gate: designing phase 需要验证 UX 产出物
+                    if event_name == "design_done":
+                        project_root = derive_project_root(self._db_path)
+                        artifacts_dir = (
+                            project_root / "_bmad-output" / "implementation-artifacts"
+                        )
+                        gate_result = await check_design_gate(
+                            story_id=task.story_id,
+                            task_id=task.task_id,
+                            artifacts_dir=artifacts_dir,
+                        )
+                        if not gate_result.passed:
+                            from ato.approval_helpers import create_approval as _ca
+                            from ato.nudge import send_user_notification as _sun
+
+                            db_gate = await get_connection(self._db_path)
+                            try:
+                                await _ca(
+                                    db_gate,
+                                    story_id=task.story_id,
+                                    approval_type="needs_human_review",
+                                    payload_dict={
+                                        "task_id": task.task_id,
+                                        "artifact_dir": gate_result.artifact_dir,
+                                        "artifact_count": gate_result.artifact_count,
+                                        "story_spec_exists": gate_result.story_spec_exists,
+                                        "reason": (
+                                            f"Design gate failed: {gate_result.reason}"
+                                        ),
+                                    },
+                                )
+                            finally:
+                                await db_gate.close()
+                            self._nudge.notify()
+                            _sun(
+                                "normal",
+                                f"Design gate 失败: story {task.story_id}"
+                                f" — {gate_result.reason}",
+                            )
+                            return
                     await self._tq.submit(
                         TransitionEvent(
                             story_id=task.story_id,
@@ -957,6 +1136,9 @@ class Orchestrator:
             await self._mark_dispatch_failed(
                 task, error_message="dispatch_failed:batch_restart_exception"
             )
+        finally:
+            if limiter is not None:
+                limiter.release()
 
     @staticmethod
     async def _get_base_commit(worktree_path: Path) -> str:

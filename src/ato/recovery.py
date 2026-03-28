@@ -42,6 +42,7 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 _PHASE_SUCCESS_EVENT: dict[str, str] = {
     "planning": "plan_done",
     "creating": "create_done",
+    "designing": "design_done",
     "validating": "validate_pass",
     "dev_ready": "start_dev",
     "developing": "dev_done",
@@ -99,6 +100,52 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
         "Also include a Quality Criteria Assessment table."
     ),
 }
+
+# Structured job phase-specific prompt 模板（非 convergent_loop / interactive 阶段）
+_STRUCTURED_JOB_PROMPTS: dict[str, str] = {
+    "designing": (
+        "为 story {story_id} 创建 UX 设计原型。\n"
+        "Story 规格文件: {story_file}\n\n"
+        "## 工作流程\n\n"
+        "1. **读取 story 规格** — 理解功能需求和 Acceptance Criteria\n"
+        "2. **运行 /bmad-create-ux-design** — 生成 UX 设计规格（交互模式、信息架构、页面流）\n"
+        "   - 将 UX 规格保存为 {ux_dir}/ux-spec.md\n"
+        "3. **使用 Pencil MCP 创建视觉设计**\n"
+        "   a. 调用 get_guidelines(topic) 获取设计指南（web-app / mobile-app 按需选择）\n"
+        "   b. 调用 get_style_guide_tags → get_style_guide(tags) 获取风格灵感\n"
+        "   c. 调用 batch_design(filePath=\"{ux_dir}/prototype.pen\", operations=...) "
+        "创建线框图/高保真原型\n"
+        "   d. 调用 get_screenshot 验证设计结果是否正确\n"
+        "   e. 调用 export_nodes(filePath=..., outputDir=\"{ux_dir}\", nodeIds=[...], "
+        "format=\"png\") 导出截图\n"
+        "4. **可选: 使用 /frontend-design** — 如果 story 需要可交互的代码级 UI 原型\n\n"
+        "## 产出物要求\n\n"
+        "所有文件保存到 {ux_dir}/ 目录下，至少包含:\n"
+        "- ux-spec.md（UX 设计规格文档）\n"
+        "- prototype.pen（Pencil 设计文件）\n"
+        "- 至少 1 个 .png 截图（设计预览）\n\n"
+        "## 重要约束\n\n"
+        "- batch_design 的 filePath 参数直接指向目标路径，文件会自动创建/保存\n"
+        "- .pen 文件是加密格式，只能通过 Pencil MCP 工具读写，不要用 Read/Write 工具\n"
+        "- 设计完成后必须用 get_screenshot 验证视觉效果\n"
+        "- 不要跳过 export_nodes 步骤，.png 截图是 design gate 验证的一部分"
+    ),
+}
+
+def _format_structured_job_prompt(template: str, story_id: str) -> str:
+    """Format a structured_job prompt template with story-specific variables.
+
+    Paths are project-root-relative (agent cwd = project_root for pre-worktree phases).
+    """
+    artifacts_dir = "_bmad-output/implementation-artifacts"
+    story_file = f"{artifacts_dir}/{story_id}.md"
+    ux_dir = f"{artifacts_dir}/{story_id}-ux"
+    return template.format(
+        story_id=story_id,
+        story_file=story_file,
+        ux_dir=ux_dir,
+    )
+
 
 _PID_MONITOR_INTERVAL = 5.0
 
@@ -308,6 +355,11 @@ class RecoveryEngine:
 
         event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
         if event_name is not None:
+            # Design gate: designing phase 需要验证 UX 产出物
+            if event_name == "design_done":
+                gate_ok = await self._check_design_gate(task)
+                if not gate_ok:
+                    return
             await self._transition_queue.submit(
                 TransitionEvent(
                     story_id=task.story_id,
@@ -416,10 +468,19 @@ class RecoveryEngine:
         worktree_path: str | None,
         phase_cfg: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """构建 dispatch options（cwd, sandbox, model, max_turns 等）。"""
+        """构建 dispatch options（cwd, sandbox, model, max_turns 等）。
+
+        Pre-worktree phases（worktree_path=None）使用 project root 作为 cwd，
+        确保 agent 在正确的目录下读写 _bmad-output/ 等相对路径。
+        """
         opts: dict[str, Any] = {}
         if worktree_path:
             opts["cwd"] = worktree_path
+        else:
+            # Pre-worktree fallback: derive project root from db_path
+            from ato.core import derive_project_root
+
+            opts["cwd"] = str(derive_project_root(self._db_path))
 
         # sandbox: 仅当 phase config 明确提供时才传
         sandbox = phase_cfg.get("sandbox")
@@ -734,7 +795,16 @@ class RecoveryEngine:
             return False
 
     async def _dispatch_structured_job(self, task: TaskRecord) -> None:
-        """后台 dispatch structured_job：遵守 config 的 model/timeout/sandbox/并发。"""
+        """后台 dispatch structured_job：遵守 config 的 model/timeout/sandbox/并发。
+
+        Pre-worktree phases（planning/creating/designing）在 project_root 上执行，
+        通过共享 main-path limiter（max=1）保证同一时刻最多 1 个 story 占用 project_root。
+        """
+        from ato.core import PRE_WORKTREE_PHASES, get_main_path_limiter
+
+        limiter = get_main_path_limiter() if task.phase in PRE_WORKTREE_PHASES else None
+        if limiter is not None:
+            await limiter.acquire()
         try:
             worktree_path = await self._get_story_worktree(task.story_id)
             phase_cfg = self._resolve_phase_config(task.phase)
@@ -752,12 +822,18 @@ class RecoveryEngine:
             if task.context_briefing:
                 story_ctx = f"\n\nPrevious context: {task.context_briefing}"
 
-            prompt = (
-                f"Recovery re-dispatch for story {task.story_id}, "
-                f"phase {task.phase}. "
-                f"The previous task crashed without producing an artifact. "
-                f"Please resume the work for this phase.{story_ctx}"
-            )
+            prompt_template = _STRUCTURED_JOB_PROMPTS.get(task.phase)
+            if prompt_template is not None:
+                prompt = _format_structured_job_prompt(
+                    prompt_template, task.story_id
+                )
+            else:
+                prompt = (
+                    f"Recovery re-dispatch for story {task.story_id}, "
+                    f"phase {task.phase}. "
+                    f"The previous task crashed without producing an artifact. "
+                    f"Please resume the work for this phase.{story_ctx}"
+                )
 
             result = await mgr.dispatch_with_retry(
                 story_id=task.story_id,
@@ -773,6 +849,11 @@ class RecoveryEngine:
             if result.status == "success":
                 event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
                 if event_name is not None:
+                    # Design gate: designing phase 需要验证 UX 产出物
+                    if event_name == "design_done":
+                        gate_ok = await self._check_design_gate(task)
+                        if not gate_ok:
+                            return
                     await self._transition_queue.submit(
                         TransitionEvent(
                             story_id=task.story_id,
@@ -804,6 +885,60 @@ class RecoveryEngine:
                 story_id=task.story_id,
             )
             await self._mark_dispatch_failed(task)
+        finally:
+            if limiter is not None:
+                limiter.release()
+
+    async def _check_design_gate(self, task: TaskRecord) -> bool:
+        """Designing artifact gate：验证 UX 产出物存在性。
+
+        验证失败时创建 needs_human_review approval，不自动推进。
+
+        Returns:
+            True 表示通过，False 表示失败（已创建 approval）。
+        """
+        from ato.core import check_design_gate, derive_project_root
+
+        # 从 db_path 推导项目根目录（支持自定义 db 布局）
+        project_root = derive_project_root(self._db_path)
+        artifacts_dir = project_root / "_bmad-output" / "implementation-artifacts"
+
+        result = await check_design_gate(
+            story_id=task.story_id,
+            task_id=task.task_id,
+            artifacts_dir=artifacts_dir,
+        )
+
+        if not result.passed:
+            from ato.approval_helpers import create_approval
+            from ato.models.db import get_connection
+            from ato.nudge import send_user_notification
+
+            db = await get_connection(self._db_path)
+            try:
+                await create_approval(
+                    db,
+                    story_id=task.story_id,
+                    approval_type="needs_human_review",
+                    payload_dict={
+                        "task_id": task.task_id,
+                        "artifact_dir": result.artifact_dir,
+                        "artifact_count": result.artifact_count,
+                        "story_spec_exists": result.story_spec_exists,
+                        "reason": f"Design gate failed: {result.reason}",
+                    },
+                )
+            finally:
+                await db.close()
+
+            if self._nudge is not None:
+                self._nudge.notify()
+            send_user_notification(
+                "normal",
+                f"Design gate 失败: story {task.story_id} — {result.reason}",
+            )
+
+        return result.passed
 
     async def _mark_dispatch_failed(self, task: TaskRecord) -> None:
         """后台 dispatch 异常兜底：标记 task=failed + 创建 approval。

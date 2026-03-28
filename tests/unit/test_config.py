@@ -1012,6 +1012,7 @@ class TestConfigTemplate:
         expected = [
             "planning",
             "creating",
+            "designing",
             "validating",
             "dev_ready",
             "developing",

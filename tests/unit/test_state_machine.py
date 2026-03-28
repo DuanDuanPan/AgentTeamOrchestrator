@@ -69,6 +69,7 @@ async def _advance_to(sm: StoryLifecycle, target_state: str) -> None:
         "start_create",
         "plan_done",
         "create_done",
+        "design_done",
         "validate_pass",
         "start_dev",
         "dev_done",
@@ -81,7 +82,8 @@ async def _advance_to(sm: StoryLifecycle, target_state: str) -> None:
     state_after_event: dict[str, str] = {
         "start_create": "planning",
         "plan_done": "creating",
-        "create_done": "validating",
+        "create_done": "designing",
+        "design_done": "validating",
         "validate_pass": "dev_ready",
         "start_dev": "developing",
         "dev_done": "reviewing",
@@ -138,7 +140,7 @@ class TestLegalTransitions:
         sm = await _make_sm()
         await _advance_to(sm, "creating")
         await sm.send("create_done")
-        assert sm.current_state_value == "validating"
+        assert sm.current_state_value == "designing"
 
     async def test_validate_pass(self) -> None:
         sm = await _make_sm()
@@ -230,6 +232,7 @@ class TestEscalateTransitions:
         "queued",
         "planning",
         "creating",
+        "designing",
         "validating",
         "dev_ready",
         "developing",
@@ -371,7 +374,8 @@ class TestHappyPath:
         events = [
             ("start_create", "planning"),
             ("plan_done", "creating"),
-            ("create_done", "validating"),
+            ("create_done", "designing"),
+            ("design_done", "validating"),
             ("validate_pass", "dev_ready"),
             ("start_dev", "developing"),
             ("dev_done", "reviewing"),
@@ -416,7 +420,7 @@ class TestConvergentLoop:
         assert sm.current_state_value == "qa_testing"
 
     async def test_validate_fail_retry(self) -> None:
-        """validating → creating → validating → validate_pass。"""
+        """validating → creating → designing → validating → validate_pass。"""
         sm = await _make_sm()
         await _advance_to(sm, "validating")
 
@@ -424,6 +428,9 @@ class TestConvergentLoop:
         assert sm.current_state_value == "creating"
 
         await sm.send("create_done")
+        assert sm.current_state_value == "designing"
+
+        await sm.send("design_done")
         assert sm.current_state_value == "validating"
 
         await sm.send("validate_pass")
@@ -603,6 +610,7 @@ class TestSaveStoryState:
             "queued": "backlog",
             "planning": "planning",
             "creating": "planning",
+            "designing": "planning",
             "validating": "planning",
             "dev_ready": "ready",
             "developing": "in_progress",
@@ -681,6 +689,7 @@ class TestRegressionFail:
         await sm.send("start_create")
         await sm.send("plan_done")
         await sm.send("create_done")
+        await sm.send("design_done")
         await sm.send("validate_pass")
         await sm.send("start_dev")
         await sm.send("dev_done")
@@ -702,3 +711,52 @@ class TestRegressionFail:
         success, failure = CANONICAL_TRANSITIONS["regression"]
         assert success == "done"
         assert failure == "fixing"
+
+
+# ---------------------------------------------------------------------------
+# designing phase 覆盖测试 (Story 9.1 AC#7)
+# ---------------------------------------------------------------------------
+
+
+class TestDesigningPhase:
+    """designing 阶段的状态机转换测试。"""
+
+    async def test_designing_to_validating(self) -> None:
+        """designing → validating (design_done)。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "designing")
+        assert sm.current_state_value == "designing"
+        await sm.send("design_done")
+        assert sm.current_state_value == "validating"
+
+    async def test_creating_to_designing(self) -> None:
+        """creating → designing (create_done 新目标)。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "creating")
+        assert sm.current_state_value == "creating"
+        await sm.send("create_done")
+        assert sm.current_state_value == "designing"
+
+    async def test_designing_escalate(self) -> None:
+        """designing → blocked (escalate)。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "designing")
+        assert sm.current_state_value == "designing"
+        await sm.send("escalate")
+        assert sm.current_state_value == "blocked"
+
+    async def test_designing_maps_to_planning_status(self) -> None:
+        """designing 映射到 planning 高层状态。"""
+        assert PHASE_TO_STATUS["designing"] == "planning"
+
+    async def test_canonical_transitions_creating_points_to_designing(self) -> None:
+        """CANONICAL_TRANSITIONS 中 creating.success 应指向 designing。"""
+        success, failure = CANONICAL_TRANSITIONS["creating"]
+        assert success == "designing"
+        assert failure is None
+
+    async def test_canonical_transitions_designing_points_to_validating(self) -> None:
+        """CANONICAL_TRANSITIONS 中 designing.success 应指向 validating。"""
+        success, failure = CANONICAL_TRANSITIONS["designing"]
+        assert success == "validating"
+        assert failure is None

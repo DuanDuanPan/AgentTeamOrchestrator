@@ -1892,3 +1892,68 @@ class TestConvergentLoopGenericBranchModelPassthrough:
         assert options["cwd"] == "/tmp/wt"
         assert "model" not in options
         assert "sandbox" not in options
+
+
+# ---------------------------------------------------------------------------
+# designing phase crash-recovery reschedule 测试 (Story 9.1 AC#7)
+# ---------------------------------------------------------------------------
+
+
+class TestDesigningPhaseRecovery:
+    """designing phase 崩溃恢复重调度测试。"""
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_designing_phase_reschedule(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        """designing phase 的 running task 应分类为 reschedule 并提交 design_done。"""
+        # Seed story + task
+        db = await get_connection(initialized_db_path)
+        try:
+            story = StoryRecord(
+                story_id="s-design-1",
+                title="Design Test",
+                status="planning",
+                current_phase="designing",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+            await insert_story(db, story)
+
+            task = TaskRecord(
+                task_id="t-design-1",
+                story_id="s-design-1",
+                phase="designing",
+                role="ux_designer",
+                cli_tool="claude",
+                status="running",
+                pid=99999,
+                started_at=_NOW,
+                expected_artifact="/tmp/design-artifact",
+            )
+            await insert_task(db, task)
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat", "developing"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+        )
+
+        # 分类验证
+        classification = engine.classify_task(task)
+        assert classification.action == "reschedule"
+
+    async def test_phase_success_event_includes_designing(self) -> None:
+        """_PHASE_SUCCESS_EVENT 包含 designing → design_done 映射。"""
+        from ato.recovery import _PHASE_SUCCESS_EVENT
+
+        assert _PHASE_SUCCESS_EVENT["designing"] == "design_done"

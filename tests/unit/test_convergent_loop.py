@@ -789,6 +789,7 @@ class TestValidateFailFromReviewingStateMachine:
         await sm.send("start_create")
         await sm.send("plan_done")
         await sm.send("create_done")
+        await sm.send("design_done")
         await sm.send("validate_pass")
         await sm.send("start_dev")
         await sm.send("dev_done")

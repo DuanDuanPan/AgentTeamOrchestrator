@@ -21,6 +21,8 @@ roles:
     cli: claude
   creator:
     cli: claude
+  ux_designer:
+    cli: claude
   validator:
     cli: codex
   developer:
@@ -48,6 +50,11 @@ phases:
 
   - name: creating
     role: creator
+    type: structured_job
+    next_on_success: designing
+
+  - name: designing
+    role: ux_designer
     type: structured_job
     next_on_success: validating
 

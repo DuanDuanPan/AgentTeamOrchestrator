@@ -1927,3 +1927,185 @@ class TestBatchRestartPhaseOptions:
         assert options["cwd"] == "/tmp/wt2"
         assert "model" not in options
         assert "sandbox" not in options
+
+
+# ---------------------------------------------------------------------------
+# Pre-worktree structured_job 串行控制测试 (Story 9.1 AC#5)
+# ---------------------------------------------------------------------------
+
+
+class TestPreWorktreeSerialControl:
+    """验证 pre-worktree phases（planning/creating/designing）共享 main-path limiter (max=1)。"""
+
+    async def test_limiter_is_shared_singleton(self) -> None:
+        """get_main_path_limiter 返回同一个 Semaphore 实例。"""
+        from ato.core import get_main_path_limiter, reset_main_path_limiter
+
+        reset_main_path_limiter()
+        lim1 = get_main_path_limiter()
+        lim2 = get_main_path_limiter()
+        assert lim1 is lim2
+        reset_main_path_limiter()
+
+    async def test_pre_worktree_phases_include_designing(self) -> None:
+        """PRE_WORKTREE_PHASES 包含 planning、creating、designing。"""
+        from ato.core import PRE_WORKTREE_PHASES
+
+        assert "planning" in PRE_WORKTREE_PHASES
+        assert "creating" in PRE_WORKTREE_PHASES
+        assert "designing" in PRE_WORKTREE_PHASES
+        # 非 pre-worktree phases 不应在集合中
+        assert "developing" not in PRE_WORKTREE_PHASES
+        assert "reviewing" not in PRE_WORKTREE_PHASES
+
+    async def test_only_one_pre_worktree_job_at_a_time(self) -> None:
+        """同一时刻最多只有 1 个 pre-worktree structured_job 在执行。"""
+        from ato.core import get_main_path_limiter, reset_main_path_limiter
+
+        reset_main_path_limiter()
+        limiter = get_main_path_limiter()
+
+        max_concurrent = 0
+        active = 0
+
+        async def simulate_dispatch(phase: str) -> str:
+            nonlocal max_concurrent, active
+            async with limiter:
+                active += 1
+                if active > max_concurrent:
+                    max_concurrent = active
+                await asyncio.sleep(0.01)  # simulate work
+                active -= 1
+                return phase
+
+        # 同时启动 3 个 pre-worktree dispatch
+        results = await asyncio.gather(
+            simulate_dispatch("planning"),
+            simulate_dispatch("creating"),
+            simulate_dispatch("designing"),
+        )
+
+        assert set(results) == {"planning", "creating", "designing"}
+        assert max_concurrent == 1, f"Expected max 1 concurrent, got {max_concurrent}"
+        reset_main_path_limiter()
+
+
+# ---------------------------------------------------------------------------
+# Design gate 测试 (Story 9.1 AC#6)
+# ---------------------------------------------------------------------------
+
+
+class TestDesignGate:
+    """check_design_gate 通过/失败两种路径。"""
+
+    async def test_gate_pass_with_artifacts(self, tmp_path: Path) -> None:
+        """story spec + UX 产出物齐全时 gate 通过。"""
+        from ato.core import check_design_gate
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        (artifacts_dir / "story-ux-1.md").touch()
+        ux_dir = artifacts_dir / "story-ux-1-ux"
+        ux_dir.mkdir()
+        (ux_dir / "wireframe.md").touch()
+
+        result = await check_design_gate(
+            story_id="story-ux-1",
+            task_id="t1",
+            artifacts_dir=artifacts_dir,
+        )
+        assert result.passed is True
+        assert result.story_spec_exists is True
+        assert result.artifact_count == 1
+
+    async def test_gate_pass_with_pen_file(self, tmp_path: Path) -> None:
+        """story spec 存在 + UX 目录下有 .pen 文件时 gate 通过。"""
+        from ato.core import check_design_gate
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        (artifacts_dir / "s1.md").touch()
+        ux_dir = artifacts_dir / "s1-ux"
+        ux_dir.mkdir()
+        (ux_dir / "design.pen").touch()
+
+        result = await check_design_gate(
+            story_id="s1",
+            task_id="t1",
+            artifacts_dir=artifacts_dir,
+        )
+        assert result.passed is True
+
+    async def test_gate_fail_no_story_spec(self, tmp_path: Path) -> None:
+        """story spec 不存在时 gate 失败（即使 UX 产出物齐全）。"""
+        from ato.core import check_design_gate
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        ux_dir = artifacts_dir / "s1-ux"
+        ux_dir.mkdir()
+        (ux_dir / "design.pen").touch()
+
+        result = await check_design_gate(
+            story_id="s1",
+            task_id="t1",
+            artifacts_dir=artifacts_dir,
+        )
+        assert result.passed is False
+        assert result.story_spec_exists is False
+        assert result.artifact_count == 1  # UX artifact 存在但 spec 缺失
+        assert "Story spec missing" in result.reason
+
+    async def test_gate_fail_no_ux_dir(self, tmp_path: Path) -> None:
+        """UX 设计目录不存在时 gate 失败。"""
+        from ato.core import check_design_gate
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        (artifacts_dir / "s1.md").touch()
+
+        result = await check_design_gate(
+            story_id="s1",
+            task_id="t1",
+            artifacts_dir=artifacts_dir,
+        )
+        assert result.passed is False
+        assert result.story_spec_exists is True
+        assert result.artifact_count == 0
+        assert "No UX artifacts" in result.reason
+
+    async def test_gate_fail_empty_ux_dir(self, tmp_path: Path) -> None:
+        """UX 目录存在但没有 .md/.pen/.png 文件时 gate 失败。"""
+        from ato.core import check_design_gate
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        (artifacts_dir / "s1.md").touch()
+        ux_dir = artifacts_dir / "s1-ux"
+        ux_dir.mkdir()
+        (ux_dir / "README.txt").touch()
+
+        result = await check_design_gate(
+            story_id="s1",
+            task_id="t1",
+            artifacts_dir=artifacts_dir,
+        )
+        assert result.passed is False
+        assert result.artifact_count == 0
+
+    async def test_gate_logs_event(self, tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+        """gate 检查应记录 structlog 事件。"""
+        from ato.core import check_design_gate
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+
+        await check_design_gate(
+            story_id="s1",
+            task_id="t1",
+            artifacts_dir=artifacts_dir,
+        )
+
+        captured = capfd.readouterr()
+        output = captured.out + captured.err
+        assert "design_gate_check" in output
