@@ -1,6 +1,6 @@
 # Story 8.5: ato init 自动生成配置文件并支持项目路径选择
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -75,29 +75,29 @@ And 回归覆盖通过扩展现有 `test_cli_init.py`、`test_preflight.py`、`t
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 更新 preflight 的 `ato_yaml` 合同 (AC: #1, #6)
-  - [ ] 1.1 将 `src/ato/preflight.py::_check_ato_yaml()` 从 `HALT` 调整为 `INFO`，message 改为“`ato.yaml` 不存在，init 时将自动从 `ato.yaml.example` 生成”
-  - [ ] 1.2 更新 `src/ato/cli.py::_HINTS["ato_yaml"]`，把引导从“手动复制”改为“init 将自动生成 / 若失败再检查 example”
-  - [ ] 1.3 更新 `tests/unit/test_preflight.py` 与 `tests/integration/test_preflight_integration.py`：缺少 `ato.yaml` 时不再导致 Layer 2 HALT，也不再跳过 Layer 3
+- [x] Task 1: 更新 preflight 的 `ato_yaml` 合同 (AC: #1, #6)
+  - [x] 1.1 将 `src/ato/preflight.py::_check_ato_yaml()` 从 `HALT` 调整为 `INFO`，message 改为”`ato.yaml` 不存在，init 时将自动从 `ato.yaml.example` 生成”
+  - [x] 1.2 更新 `src/ato/cli.py::_HINTS[“ato_yaml”]`，把引导从”手动复制”改为”init 将自动生成 / 若失败再检查 example”
+  - [x] 1.3 更新 `tests/unit/test_preflight.py` 与 `tests/integration/test_preflight_integration.py`：缺少 `ato.yaml` 时不再导致 Layer 2 HALT，也不再跳过 Layer 3
 
-- [ ] Task 2: 在现有 `_init_async()` 时序中加入配置自动生成 (AC: #2, #3, #4)
-  - [ ] 2.1 在 `src/ato/cli.py::_init_async()` 中，保持 `run_preflight()` 与 `render_preflight_results()` 先执行
-  - [ ] 2.2 在 preflight 通过、最终成功提示之前，检测 `<project_path>/ato.yaml`
-  - [ ] 2.3 若缺失，则从 `<project_path>/ato.yaml.example` 复制生成；若 example 也缺失，则输出明确错误并 `raise typer.Exit`
-  - [ ] 2.4 若 `ato.yaml` 已存在，输出“使用已有配置文件”并继续
-  - [ ] 2.5 **不要**把 DB 初始化从 `run_preflight()` 挪到 CLI 层，也不要移除现有 reinit 确认逻辑
+- [x] Task 2: 在现有 `_init_async()` 时序中加入配置自动生成 (AC: #2, #3, #4)
+  - [x] 2.1 在 `src/ato/cli.py::_init_async()` 中，保持 `run_preflight()` 与 `render_preflight_results()` 先执行
+  - [x] 2.2 在 preflight 通过、最终成功提示之前，检测 `<project_path>/ato.yaml`
+  - [x] 2.3 若缺失，则从 `<project_path>/ato.yaml.example` 复制生成；若 example 也缺失，则输出明确错误并 `raise typer.Exit`
+  - [x] 2.4 若 `ato.yaml` 已存在，输出”使用已有配置文件”并继续
+  - [x] 2.5 **不要**把 DB 初始化从 `run_preflight()` 挪到 CLI 层，也不要移除现有 reinit 确认逻辑
 
-- [ ] Task 3: 对齐 `ato start --db-path ...` 的项目路径解析 (AC: #5)
-  - [ ] 3.1 在 `src/ato/cli.py::start_cmd()` 中，不再把 `Path.cwd()` 当作唯一 project root
-  - [ ] 3.2 从 `resolved_db` 推导项目根（标准 `.ato/state.db` 布局，或同目录 custom db 场景），用于 start-time preflight
-  - [ ] 3.3 配置加载优先使用显式 `--config`；未显式指定时，优先从 db 推导出的项目根发现 `ato.yaml`
-  - [ ] 3.4 尽量复用或提取与 `_resolve_tui_config()` 一致的路径解析策略，避免 init/start/tui 各写一套互相漂移的逻辑
+- [x] Task 3: 对齐 `ato start --db-path ...` 的项目路径解析 (AC: #5)
+  - [x] 3.1 在 `src/ato/cli.py::start_cmd()` 中，不再把 `Path.cwd()` 当作唯一 project root
+  - [x] 3.2 从 `resolved_db` 推导项目根（标准 `.ato/state.db` 布局，或同目录 custom db 场景），用于 start-time preflight
+  - [x] 3.3 配置加载优先使用显式 `--config`；未显式指定时，优先从 db 推导出的项目根发现 `ato.yaml`
+  - [x] 3.4 尽量复用或提取与 `_resolve_tui_config()` 一致的路径解析策略，避免 init/start/tui 各写一套互相漂移的逻辑
 
-- [ ] Task 4: 扩展现有回归测试，而不是新建平行测试矩阵 (AC: #1-#6)
-  - [ ] 4.1 在 `tests/unit/test_cli_init.py` 增加：无 `ato.yaml` 时自动生成、已有 `ato.yaml` 不覆盖、缺少 example 时失败
-  - [ ] 4.2 在 `tests/unit/test_preflight.py` / `tests/integration/test_preflight_integration.py` 中更新 `ato_yaml` 的 status/message 与层级跳过预期
-  - [ ] 4.3 在 `tests/unit/test_cli_start_stop.py`（或同级 start 测试）中增加“`--db-path` 指向其他项目时，start 仍能从该项目根做 preflight/config 解析”的断言
-  - [ ] 4.4 保留 `tests/integration/test_config_workflow.py` / `tests/unit/test_config.py` 对 `ato.yaml.example` 可直接加载的模板基线
+- [x] Task 4: 扩展现有回归测试，而不是新建平行测试矩阵 (AC: #1-#6)
+  - [x] 4.1 在 `tests/unit/test_cli_init.py` 增加：无 `ato.yaml` 时自动生成、已有 `ato.yaml` 不覆盖、缺少 example 时失败
+  - [x] 4.2 在 `tests/unit/test_preflight.py` / `tests/integration/test_preflight_integration.py` 中更新 `ato_yaml` 的 status/message 与层级跳过预期
+  - [x] 4.3 在 `tests/unit/test_cli_start_stop.py`（或同级 start 测试）中增加”`--db-path` 指向其他项目时，start 仍能从该项目根做 preflight/config 解析”的断言
+  - [x] 4.4 保留 `tests/integration/test_config_workflow.py` / `tests/unit/test_config.py` 对 `ato.yaml.example` 可直接加载的模板基线
 
 ## Dev Notes
 
@@ -161,16 +161,31 @@ And 回归覆盖通过扩展现有 `test_cli_init.py`、`test_preflight.py`、`t
 
 ## Change Log
 
-- 2026-03-28: `validate-create-story` 修订 —— 将 Story 从“重复声明已有 project_path 参数 + 错误描述 DB 初始化时序”收敛为真实的 init/preflight/start 合同；补齐 `ato start --db-path` 的项目根解析一致性；扩展 preflight/init/start 现有测试基线，并补回模板 validation note / Scope Boundary / Dev Agent Record 结构
+- 2026-03-28: `validate-create-story` 修订 —— 将 Story 从”重复声明已有 project_path 参数 + 错误描述 DB 初始化时序”收敛为真实的 init/preflight/start 合同；补齐 `ato start --db-path` 的项目根解析一致性；扩展 preflight/init/start 现有测试基线，并补回模板 validation note / Scope Boundary / Dev Agent Record 结构
+- 2026-03-28: Story 实现完成 —— 全部 4 个 Task 完成，1479 tests passed, 0 failed
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-TBD
+claude-opus-4-6 (1M context)
 
 ### Debug Log References
 
+无调试问题。
+
 ### Completion Notes List
 
+- ✅ Task 1: `_check_ato_yaml()` 从 HALT 改为 INFO，message 对齐”自动生成”语义；`_HINTS[“ato_yaml”]` 更新；preflight 单元测试和集成测试更新以反映新行为（缺少 ato.yaml 不再跳过 Layer 3）
+- ✅ Task 2: 新增 `_ensure_ato_yaml()` 函数，在 preflight 落库后、最终成功提示前自动从 `ato.yaml.example` 复制生成 `ato.yaml`；已有文件不覆盖；example 缺失时以非零退出码终止
+- ✅ Task 3: 新增 `_derive_project_root()` 从 db_path 推导项目根，新增 `_resolve_config_path()` 统一配置发现逻辑；`start_cmd()` 不再用 `Path.cwd()` 做 preflight；`_resolve_tui_config()` 委托给共享实现，消除 init/start/tui 三套路径解析漂移
+- ✅ Task 4: 在 `test_cli_init.py` 增加 3 个自动生成测试（生成/不覆盖/缺example）；在 `test_preflight.py` 更新 INFO 预期；在 `test_preflight_integration.py` 增加 missing_ato_yaml_does_not_skip_layer3 测试并修复 halt_in_layer2 触发方式（改用 bmad_config 缺失）；在 `test_cli_start_stop.py` 增加 8 个路径解析测试（_derive_project_root 3个 + _resolve_config_path 4个 + start 集成 1个）
+
 ### File List
+
+- `src/ato/preflight.py` — 修改 `_check_ato_yaml()`: HALT → INFO
+- `src/ato/cli.py` — 新增 `_ensure_ato_yaml()`, `_derive_project_root()`, `_resolve_config_path()`; 修改 `_init_async()`, `start_cmd()`, `_resolve_tui_config()`, `_HINTS[“ato_yaml”]`
+- `tests/unit/test_preflight.py` — 更新 `test_missing_ato_yaml_returns_info`
+- `tests/integration/test_preflight_integration.py` — 修改 `test_halt_in_layer2_skips_layer3` 触发方式, 新增 `test_missing_ato_yaml_does_not_skip_layer3`
+- `tests/unit/test_cli_init.py` — 更新现有测试（增加 ato.yaml 到项目目录）, 新增 `TestInitAutoGenerateConfig` 类 (3 个测试)
+- `tests/unit/test_cli_start_stop.py` — 新增 `TestDeriveProjectRoot` (3 个), `TestResolveConfigPath` (4 个), `TestStartDbPathProjectRoot` (1 个)

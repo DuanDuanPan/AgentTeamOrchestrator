@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import signal
 import time
 from datetime import UTC, datetime
@@ -67,6 +68,52 @@ app.add_typer(batch_app, name="batch")
 _DEFAULT_DB_PATH = Path(".ato/state.db")
 _DEFAULT_EPICS_PATH = Path("_bmad-output/planning-artifacts/epics.md")
 
+
+def _derive_project_root(db_path: Path) -> Path:
+    """从 db_path 推导项目根目录。
+
+    标准布局 ``<project>/.ato/state.db`` → 祖父目录即项目根。
+    自定义 db（同级目录有 ``ato.yaml``）→ db 所在目录。
+    回退到当前工作目录。
+    """
+    # 标准布局: <project>/.ato/state.db
+    grandparent = db_path.parent.parent
+    if db_path.parent.name == ".ato" and grandparent.is_dir():
+        return grandparent
+
+    # 自定义 db: db 同级目录有 ato.yaml
+    if (db_path.parent / "ato.yaml").is_file():
+        return db_path.parent
+
+    return Path.cwd()
+
+
+def _resolve_config_path(
+    explicit: Path | None,
+    db_path: Path,
+) -> Path | None:
+    """自动发现 ato.yaml 配置文件。
+
+    搜索链（首个存在的胜出）：
+    1. 显式 ``--config`` 路径（直接返回，不检查存在性——由调用方校验）
+    2. ``_derive_project_root(db_path)`` 推导出的项目根下的 ``ato.yaml``
+    3. CWD 下 ``ato.yaml``（仅当推导结果为 CWD 以外目录时才尝试）
+
+    全部找不到时返回 ``None``。
+    """
+    if explicit is not None:
+        return explicit
+    project_root = _derive_project_root(db_path)
+    project_config = project_root / "ato.yaml"
+    if project_config.exists():
+        return project_config
+    # 仅当 project_root 不是 cwd 时，再尝试 cwd 回退
+    cwd_config = Path("ato.yaml")
+    if project_root != Path.cwd() and cwd_config.exists():
+        return cwd_config
+    return None
+
+
 # Status / Phase → 显示图标
 _STATUS_ICONS: dict[str, str] = {
     "done": "✅",
@@ -115,7 +162,7 @@ _HINTS: dict[str, str] = {
     "git_repo": "在目标目录执行 `git init`，或切换到已有仓库",
     "bmad_config": "补齐 `_bmad/bmm/config.yaml` 的必填字段",
     "bmad_skills": "运行 BMAD 安装流程以部署 skills 目录",
-    "ato_yaml": "从 `ato.yaml.example` 复制并补全配置",
+    "ato_yaml": "`ato init` 将自动从 `ato.yaml.example` 生成；若失败请检查 example 是否存在",
     "epic_files": "补齐 epics 文档，否则 `sprint-planning` / `create-story` 无法运行",
     "prd_files": "建议运行 `/bmad-create-prd`",
     "architecture_files": "建议运行 `/bmad-create-architecture`",
@@ -210,6 +257,32 @@ def init_command(
         raise typer.Exit(code=EXIT_ERROR) from exc
 
 
+def _ensure_ato_yaml(project_path: Path) -> None:
+    """确保 project_path 下存在 ato.yaml。
+
+    若已存在则跳过；否则从 ato.yaml.example 复制。
+    example 也不存在时以非零退出码终止。
+    """
+    ato_yaml = project_path / "ato.yaml"
+    if ato_yaml.is_file():
+        typer.echo("ℹ 使用已有配置文件: ato.yaml")
+        return
+
+    example = project_path / "ato.yaml.example"
+    if not example.is_file():
+        typer.echo(
+            _format_cli_error(
+                "ato.yaml.example 不存在，无法自动生成配置",
+                "在项目根目录放置 ato.yaml.example 后重新运行 `ato init`",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
+
+    shutil.copy2(example, ato_yaml)
+    typer.echo("✔ 已从 ato.yaml.example 生成 ato.yaml，可按需调整后运行 `ato start`")
+
+
 async def _init_async(project_path: Path, db_path: Path) -> None:
     """执行 Preflight 检查并渲染结果。"""
     results = await run_preflight(project_path, db_path, include_auth=True)
@@ -229,6 +302,9 @@ async def _init_async(project_path: Path, db_path: Path) -> None:
         default="",
         show_default=False,
     )
+
+    # 配置自动生成：preflight 已落库，在最终成功提示之前生成 ato.yaml
+    _ensure_ato_yaml(project_path)
 
     typer.echo("✔ 系统已初始化")
     typer.echo("运行 `ato start` 开始编排")
@@ -564,11 +640,16 @@ def start_cmd(
 
     configure_logging(log_dir=str(resolved_db.parent / "logs"))
 
+    # 从 db_path 推���项目根（而非硬编码 cwd）
+    project_root = _derive_project_root(resolved_db)
+
     # Preflight 快速检查
     from ato.preflight import run_preflight
 
     try:
-        preflight_results = asyncio.run(run_preflight(Path.cwd(), resolved_db, include_auth=False))
+        preflight_results = asyncio.run(
+            run_preflight(project_root, resolved_db, include_auth=False)
+        )
     except click.exceptions.Exit:
         raise
     except Exception as exc:
@@ -588,10 +669,19 @@ def start_cmd(
         )
         raise typer.Exit(code=EXIT_ENV_ERROR)
 
-    # 加载配置
+    # 加载配置：显式 --config 优先，其次从 db 推导的项目根发现 ato.yaml
     from ato.config import load_config
 
-    resolved_config = config_path or Path("ato.yaml")
+    resolved_config = _resolve_config_path(config_path, resolved_db)
+    if resolved_config is None:
+        typer.echo(
+            _format_cli_error(
+                "未找到 ato.yaml 配置文件",
+                "运行 `ato init` 生成配置，或使用 `--config` 指定路径",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
     try:
         settings = load_config(resolved_config)
     except Exception as exc:
@@ -890,27 +980,8 @@ def _resolve_tui_config(
     explicit: Path | None,
     db_path: Path,
 ) -> Path | None:
-    """自动发现 TUI 使用的 ato.yaml。
-
-    搜索链（首个存在的胜出）：
-    1. 显式 ``--config`` 路径（直接返回，不检查存在性——由调用方校验）
-    2. db_path 同级目录（支持 ``./custom.db`` + 同级 ``ato.yaml``）
-    3. db_path 祖父目录（标准 ``.ato/state.db`` 布局）
-    4. CWD 下 ``ato.yaml``
-
-    全部找不到时返回 ``None``，由调用方使用默认值。
-    """
-    if explicit is not None:
-        return explicit
-    candidates = [
-        db_path.parent / "ato.yaml",
-        db_path.parent.parent / "ato.yaml",
-        Path("ato.yaml"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+    """自动发现 TUI 使用的 ato.yaml（委托给共享实现）。"""
+    return _resolve_config_path(explicit, db_path)
 
 
 @app.command("tui")

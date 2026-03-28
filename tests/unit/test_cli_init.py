@@ -76,6 +76,7 @@ class TestInitNormalFlow:
     def test_exit_code_0(self, tmp_path: Path) -> None:
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
+        (project_dir / "ato.yaml").write_text("roles: {}\n")
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
         with patch("ato.cli.run_preflight", mock_preflight):
@@ -87,6 +88,7 @@ class TestInitNormalFlow:
     def test_calls_run_preflight_with_correct_args(self, tmp_path: Path) -> None:
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
+        (project_dir / "ato.yaml").write_text("roles: {}\n")
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
         with patch("ato.cli.run_preflight", mock_preflight):
@@ -128,6 +130,7 @@ class TestInitWarnFlow:
     def test_exit_code_0_with_warn(self, tmp_path: Path) -> None:
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
+        (project_dir / "ato.yaml").write_text("roles: {}\n")
 
         mock_preflight = AsyncMock(return_value=_warn_results())
         with patch("ato.cli.run_preflight", mock_preflight):
@@ -138,6 +141,7 @@ class TestInitWarnFlow:
     def test_summary_contains_warn(self, tmp_path: Path) -> None:
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
+        (project_dir / "ato.yaml").write_text("roles: {}\n")
 
         mock_preflight = AsyncMock(return_value=_warn_results())
         with patch("ato.cli.run_preflight", mock_preflight):
@@ -166,6 +170,7 @@ class TestInitReinitDetection:
     def test_reinit_confirm_proceeds(self, tmp_path: Path) -> None:
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
+        (project_dir / "ato.yaml").write_text("roles: {}\n")
         db_dir = project_dir / ".ato"
         db_dir.mkdir()
         db_file = db_dir / "state.db"
@@ -204,6 +209,7 @@ class TestInitCustomDbPath:
     def test_custom_db_path(self, tmp_path: Path) -> None:
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
+        (project_dir / "ato.yaml").write_text("roles: {}\n")
         custom_db = tmp_path / "custom" / "my.db"
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
@@ -226,6 +232,7 @@ class TestInitDefaultProjectPath:
         import os
 
         monkeypatch.setattr(os, "getcwd", lambda: str(tmp_path))  # type: ignore[attr-defined]
+        (tmp_path / "ato.yaml").write_text("roles: {}\n")
 
         mock_preflight = AsyncMock(return_value=_all_pass_results())
         with patch("ato.cli.run_preflight", mock_preflight):
@@ -396,3 +403,58 @@ class TestRenderPythonVersionHint:
         output = _capture_render(results)
         assert "→" in output
         assert "Python" in output or "3.11" in output
+
+
+# ---------------------------------------------------------------------------
+# Story 8.5: ato init 配置自动生成
+# ---------------------------------------------------------------------------
+
+
+class TestInitAutoGenerateConfig:
+    """8.5 AC2: 无 ato.yaml 时自动从 ato.yaml.example 生成。"""
+
+    def test_auto_generate_from_example(self, tmp_path: Path) -> None:
+        """无 ato.yaml 但有 ato.yaml.example 时自动生成。"""
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        example_content = "roles:\n  dev:\n    cli: claude\n"
+        (project_dir / "ato.yaml.example").write_text(example_content)
+
+        mock_preflight = AsyncMock(return_value=_all_pass_results())
+        with patch("ato.cli.run_preflight", mock_preflight):
+            result = runner.invoke(app, ["init", str(project_dir)], input="\n")
+
+        assert result.exit_code == 0
+        assert (project_dir / "ato.yaml").is_file()
+        assert (project_dir / "ato.yaml").read_text() == example_content
+        assert "已从 ato.yaml.example 生成" in result.output
+
+    def test_existing_ato_yaml_not_overwritten(self, tmp_path: Path) -> None:
+        """已有 ato.yaml 时不覆盖，输出"使用已有配置文件"。"""
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        original = "roles:\n  dev:\n    cli: codex\n"
+        (project_dir / "ato.yaml").write_text(original)
+        (project_dir / "ato.yaml.example").write_text("roles:\n  dev:\n    cli: claude\n")
+
+        mock_preflight = AsyncMock(return_value=_all_pass_results())
+        with patch("ato.cli.run_preflight", mock_preflight):
+            result = runner.invoke(app, ["init", str(project_dir)], input="\n")
+
+        assert result.exit_code == 0
+        assert (project_dir / "ato.yaml").read_text() == original
+        assert "使用已有配置文件" in result.output
+
+    def test_missing_example_fails(self, tmp_path: Path) -> None:
+        """无 ato.yaml 也无 ato.yaml.example 时以非零退出码失败。"""
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+
+        mock_preflight = AsyncMock(return_value=_all_pass_results())
+        with patch("ato.cli.run_preflight", mock_preflight):
+            result = runner.invoke(app, ["init", str(project_dir)], input="\n")
+
+        assert result.exit_code != 0
+        assert not (project_dir / "ato.yaml").exists()
+        assert "ato.yaml.example" in result.output
+        assert "系统已初始化" not in result.output

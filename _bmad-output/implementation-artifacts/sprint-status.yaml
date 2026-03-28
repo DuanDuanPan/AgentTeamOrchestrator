@@ -36,6 +36,8 @@
 
 generated: 2026-03-24
 last_updated: 2026-03-28
+# Story 8-5 done: 2026-03-28
+# Story 8-5 review: 2026-03-28
 # Story 8-1 done: 2026-03-28
 # Story 8-4 done: 2026-03-28
 # Story 8-4 started: 2026-03-28
@@ -128,7 +130,7 @@ development_status:
   8-2-add-planning-phase: done
   8-3-cost-control-optional: done
   8-4-regression-test-multi-command: done
-  8-5-init-auto-generate-config: ready-for-dev
+  8-5-init-auto-generate-config: done
   epic-8-retrospective: optional
 
   # ===== Epic 7: Growth — 多项目并行与系统智能 (Phase 2) =====

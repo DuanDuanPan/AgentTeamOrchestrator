@@ -114,12 +114,12 @@ class TestRunPreflight:
         assert any(r.status == "HALT" for r in results)
 
     async def test_halt_in_layer2_skips_layer3(self, tmp_path: Path) -> None:
-        """Layer 2 有 HALT 时跳过 Layer 3。"""
+        """Layer 2 有 HALT 时跳过 Layer 3（使用 bmad_config 缺失触发 HALT）。"""
         from ato.preflight import run_preflight
 
-        # 创建缺少 ato.yaml 的项目 (Layer 2 HALT)
+        # 创建缺少 bmad config 的项目 (Layer 2 HALT)
         project = _make_full_project(tmp_path)
-        (project / "ato.yaml").unlink()
+        (project / "_bmad" / "bmm" / "config.yaml").unlink()
         db_path = tmp_path / ".ato" / "state.db"
         proc = _mock_proc(stdout="version 1.0.0\n")
 
@@ -136,6 +136,32 @@ class TestRunPreflight:
         assert "project" in layers
         # Layer 3 应该被跳过
         assert "artifact" not in layers
+
+    async def test_missing_ato_yaml_does_not_skip_layer3(self, tmp_path: Path) -> None:
+        """缺少 ato.yaml 返回 INFO（非 HALT），Layer 3 继续执行。"""
+        from ato.preflight import run_preflight
+
+        project = _make_full_project(tmp_path)
+        (project / "ato.yaml").unlink()
+        db_path = tmp_path / ".ato" / "state.db"
+        proc = _mock_proc(stdout="version 1.0.0\n")
+
+        with (
+            patch("ato.preflight.sys") as mock_sys,
+            patch("asyncio.create_subprocess_exec", return_value=proc),
+        ):
+            mock_sys.version_info = (3, 11, 0, "final", 0)
+            mock_sys.version = "3.11.0"
+            results = await run_preflight(project, db_path)
+
+        layers = {r.layer for r in results}
+        assert "system" in layers
+        assert "project" in layers
+        # Layer 3 应该继续执行（ato_yaml 缺失只是 INFO）
+        assert "artifact" in layers
+        # 验证 ato_yaml 是 INFO 而不是 HALT
+        ato_yaml_result = next(r for r in results if r.check_item == "ato_yaml")
+        assert ato_yaml_result.status == "INFO"
 
     async def test_include_auth_false_skips_auth(self, tmp_path: Path) -> None:
         """include_auth=False 跳过 CLI 认证检查。"""

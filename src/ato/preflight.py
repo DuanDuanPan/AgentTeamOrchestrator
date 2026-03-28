@@ -333,9 +333,9 @@ def _check_ato_yaml(project_path: Path) -> CheckResult:
         return CheckResult(
             layer="project", check_item=check_item, status="PASS", message="ato.yaml 已找到"
         )
-    msg = "ato.yaml 不存在 — 请从 ato.yaml.example 复制并配置"
-    logger.warning("preflight_check_halt", layer="project", check_item=check_item, message=msg)
-    return CheckResult(layer="project", check_item=check_item, status="HALT", message=msg)
+    msg = "ato.yaml 不存在，init 时将自动从 ato.yaml.example 生成"
+    logger.info("preflight_check_info", layer="project", check_item=check_item, message=msg)
+    return CheckResult(layer="project", check_item=check_item, status="INFO", message=msg)
 
 
 async def check_project_structure(project_path: Path) -> list[CheckResult]:
