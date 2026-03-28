@@ -3931,3 +3931,125 @@ class TestConvergenceRateDedupRegression:
 
         # 只应入库 1 条
         assert len(all_findings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Story 8.1: reviewer_options 透传
+# ---------------------------------------------------------------------------
+
+
+class TestReviewerOptionsPassthrough:
+    """验证 ConvergentLoop 将 reviewer_options (model/sandbox) 透传到 dispatch。"""
+
+    async def test_first_review_passes_reviewer_options(
+        self, initialized_db_path: Any
+    ) -> None:
+        """run_first_review 应将 reviewer_options 合并到 dispatch options。"""
+        story = _make_story("s-ro-1")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        mock_sub = AsyncMock()
+        mock_sub.dispatch_with_retry = AsyncMock(return_value=_make_adapter_result())
+        mock_bmad = AsyncMock()
+        mock_bmad.parse = AsyncMock(return_value=_make_parse_result())
+        mock_tq = AsyncMock()
+        mock_tq.submit = AsyncMock()
+
+        loop = ConvergentLoop(
+            db_path=initialized_db_path,
+            subprocess_mgr=mock_sub,
+            bmad_adapter=mock_bmad,
+            transition_queue=mock_tq,
+            config=ConvergentLoopConfig(),
+            blocking_threshold=10,
+            reviewer_options={"model": "opus", "sandbox": "read-only"},
+        )
+
+        await loop.run_first_review(story.story_id, "/tmp/wt")
+
+        mock_sub.dispatch_with_retry.assert_called_once()
+        call_kwargs = mock_sub.dispatch_with_retry.call_args
+        options = call_kwargs.kwargs.get("options") or call_kwargs[1].get("options")
+        assert options["model"] == "opus"
+        assert options["sandbox"] == "read-only"
+        assert options["cwd"] == "/tmp/wt"
+
+    async def test_rereview_passes_reviewer_options(
+        self, initialized_db_path: Any
+    ) -> None:
+        """run_rereview 应将 reviewer_options 合并到 dispatch options。"""
+        from ato.models.db import insert_findings_batch
+
+        story = _make_story("s-ro-2")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            # 插入一条 open finding 使 rereview 有 scope
+            await insert_findings_batch(
+                db,
+                [
+                    FindingRecord(
+                        finding_id="f1",
+                        story_id=story.story_id,
+                        round_num=1,
+                        severity="blocking",
+                        description="test",
+                        status="open",
+                        file_path="a.py",
+                        rule_id="R1",
+                        dedup_hash="h1",
+                        created_at=datetime.now(tz=UTC),
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        mock_sub = AsyncMock()
+        mock_sub.dispatch_with_retry = AsyncMock(return_value=_make_adapter_result())
+        mock_bmad = AsyncMock()
+        mock_bmad.parse = AsyncMock(return_value=_make_parse_result())
+        mock_tq = AsyncMock()
+        mock_tq.submit = AsyncMock()
+
+        loop = ConvergentLoop(
+            db_path=initialized_db_path,
+            subprocess_mgr=mock_sub,
+            bmad_adapter=mock_bmad,
+            transition_queue=mock_tq,
+            config=ConvergentLoopConfig(),
+            blocking_threshold=10,
+            reviewer_options={"model": "codex-mini-latest", "sandbox": "read-only"},
+        )
+
+        await loop.run_rereview(story.story_id, 2, "/tmp/wt")
+
+        mock_sub.dispatch_with_retry.assert_called_once()
+        call_kwargs = mock_sub.dispatch_with_retry.call_args
+        options = call_kwargs.kwargs.get("options") or call_kwargs[1].get("options")
+        assert options["model"] == "codex-mini-latest"
+        assert options["sandbox"] == "read-only"
+        assert options["cwd"] == "/tmp/wt"
+
+    async def test_no_reviewer_options_only_cwd(
+        self, initialized_db_path: Any
+    ) -> None:
+        """无 reviewer_options 时 dispatch options 只含 cwd。"""
+        story = _make_story("s-ro-3")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, mock_sub, _bmad, _tq = _make_loop(initialized_db_path)
+        await loop.run_first_review(story.story_id, "/tmp/wt")
+
+        mock_sub.dispatch_with_retry.assert_called_once()
+        call_kwargs = mock_sub.dispatch_with_retry.call_args
+        options = call_kwargs.kwargs.get("options") or call_kwargs[1].get("options")
+        assert options == {"cwd": "/tmp/wt"}

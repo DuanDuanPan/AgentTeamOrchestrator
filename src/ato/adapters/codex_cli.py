@@ -1,7 +1,8 @@
 """codex_cli — Codex CLI 适配器与价格表。
 
 通过 ``codex exec`` (非交互模式) 调用 Codex CLI 并返回结构化结果。
-reviewer 角色默认使用 ``--sandbox read-only``。
+sandbox 和 model 参数仅在调用方显式传入时追加到命令行，
+未指定时由 Codex CLI 自身决定默认行为。
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ CODEX_PRICE_TABLE: dict[str, dict[str, float]] = {
 
 
 def calculate_cost(
-    model: str,
+    model: str | None,
     input_tokens: int,
     output_tokens: int,
     *,
@@ -41,8 +42,11 @@ def calculate_cost(
 ) -> float:
     """根据价格表计算 Codex 调用成本。
 
-    未知模型返回 0.0 并 structlog 警告。
+    model 为 None 或未知模型时返回 0.0 并 structlog 警告。
     """
+    if model is None:
+        logger.warning("codex_model_none_cost_fallback", model=model)
+        return 0.0
     prices = CODEX_PRICE_TABLE.get(model)
     if prices is None:
         logger.warning("codex_unknown_model_price", model=model)
@@ -175,10 +179,10 @@ class CodexAdapter(BaseAdapter):
     ) -> list[str]:
         """构建 codex exec 命令参数列表。"""
         cmd = ["codex", "exec", prompt, "--json"]
-        sandbox = options.get("sandbox", "read-only") if options else "read-only"
-        cmd.extend(["--sandbox", sandbox])
 
         if options:
+            if sandbox := options.get("sandbox"):
+                cmd.extend(["--sandbox", str(sandbox)])
             if model := options.get("model"):
                 cmd.extend(["--model", str(model)])
             if output_schema := options.get("output_schema"):
@@ -200,7 +204,7 @@ class CodexAdapter(BaseAdapter):
         opts = options or {}
         cwd = opts.get("cwd")
         timeout_seconds: int = opts.get("timeout", 1800)
-        model_name: str = opts.get("model", "codex-mini-latest")
+        model_name: str | None = opts.get("model")
 
         # 如果需要结构化输出但未指定 output_file，使用临时文件
         temp_dir: tempfile.TemporaryDirectory[str] | None = None

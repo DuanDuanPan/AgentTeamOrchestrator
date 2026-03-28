@@ -735,18 +735,18 @@ class TestRecoveryActions:
 
 
 class TestDispatchOptions:
-    """验证 dispatch 传递正确的 options（worktree、sandbox）。"""
+    """验证 dispatch 传递正确的 options（worktree、sandbox、model）。"""
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
-    async def test_dispatch_passes_worktree_and_sandbox(
+    async def test_dispatch_no_sandbox_when_not_configured(
         self,
         mock_alive: MagicMock,
         mock_artifact: MagicMock,
         initialized_db_path: Path,
         _mock_recovery_adapter: AsyncMock,
     ) -> None:
-        """structured_job dispatch 应传 cwd=worktree_path, sandbox=workspace-write。"""
+        """未显式配置时 structured_job dispatch 不应传 sandbox。"""
         from ato.models.db import update_story_worktree_path
 
         db = await get_connection(initialized_db_path)
@@ -782,6 +782,84 @@ class TestDispatchOptions:
         options = call_args[0][1]  # 第二个位置参数是 options
         assert options is not None
         assert options["cwd"] == "/tmp/test-worktree"
+        assert "sandbox" not in options, "未显式配置时不应默认传 sandbox"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_dispatch_passes_phase_config_sandbox_and_model(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """phase config 定义了 sandbox/model 时，options 必须透传。"""
+        from ato.config import ATOSettings
+        from ato.models.db import update_story_worktree_path
+
+        # 构建包含显式 sandbox 和 model 的 settings
+        settings = ATOSettings(
+            roles={
+                "creator": {"cli": "claude", "model": "opus", "sandbox": None},
+                "reviewer": {
+                    "cli": "codex",
+                    "model": "codex-mini-latest",
+                    "sandbox": "read-only",
+                },
+            },
+            phases=[
+                {
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                },
+                {
+                    "name": "reviewing",
+                    "role": "reviewer",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "creating",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1"))
+            await update_story_worktree_path(db, "s1", "/tmp/test-worktree")
+            await insert_task(
+                db,
+                _make_task(
+                    "t1",
+                    "s1",
+                    status="running",
+                    pid=999,
+                    phase="creating",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            convergent_loop_phases={"reviewing"},
+            settings=settings,
+        )
+        await engine.run_recovery()
+        await engine.await_background_tasks()
+
+        _mock_recovery_adapter.execute.assert_called_once()
+        call_args = _mock_recovery_adapter.execute.call_args
+        options = call_args[0][1]
+        assert options is not None
+        assert options["cwd"] == "/tmp/test-worktree"
+        assert options.get("model") == "opus"
+        # creator 角色无 sandbox → 不传
+        assert "sandbox" not in options
 
 
 # ---------------------------------------------------------------------------
@@ -1485,3 +1563,148 @@ class TestDispatchErrorFallback:
             assert approvals[0].approval_type == "crash_recovery"
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Story 8.1: 非 reviewing convergent-loop phase model/sandbox 透传
+# ---------------------------------------------------------------------------
+
+
+class TestConvergentLoopGenericBranchModelPassthrough:
+    """验证 validating/qa_testing 等非 reviewing convergent 分支透传 model/sandbox。"""
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_phase_passes_explicit_model_to_adapter(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """validating phase 的显式 model 应被传到 adapter.execute options。"""
+        from ato.config import ATOSettings
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        # settings 中 validator 角色有显式 model
+        settings = ATOSettings(
+            roles={
+                "validator": {
+                    "cli": "codex",
+                    "model": "codex-mini-latest",
+                    "sandbox": "read-only",
+                },
+            },
+            phases=[
+                {
+                    "name": "validating",
+                    "role": "validator",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "validating",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task("t1", "s1", status="running", pid=999, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=settings,
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        # adapter.execute 应收到包含 model 和 sandbox 的 options
+        _mock_recovery_adapter.execute.assert_called_once()
+        call_args = _mock_recovery_adapter.execute.call_args
+        options = call_args[0][1]  # 第二个位置参数
+        assert options["model"] == "codex-mini-latest"
+        assert options["sandbox"] == "read-only"
+        assert options["cwd"] == "/tmp/wt"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_phase_no_model_when_omitted(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """无 settings 时 validating 的 dispatch options 不含 model/sandbox。"""
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task("t1", "s1", status="running", pid=999, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            # 无 settings → _resolve_phase_config 返回 {}
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        _mock_recovery_adapter.execute.assert_called_once()
+        call_args = _mock_recovery_adapter.execute.call_args
+        options = call_args[0][1]
+        assert options["cwd"] == "/tmp/wt"
+        assert "model" not in options
+        assert "sandbox" not in options

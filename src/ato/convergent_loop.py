@@ -67,6 +67,7 @@ class ConvergentLoop:
         config: ConvergentLoopConfig,
         blocking_threshold: int,
         nudge: Nudge | None = None,
+        reviewer_options: dict[str, Any] | None = None,
     ) -> None:
         self._db_path = db_path
         self._subprocess_mgr = subprocess_mgr
@@ -75,6 +76,7 @@ class ConvergentLoop:
         self._config = config
         self._blocking_threshold = blocking_threshold
         self._nudge = nudge
+        self._reviewer_options = reviewer_options or {}
 
     # ------------------------------------------------------------------
     # Story 3.2d — Convergent Loop Orchestration
@@ -448,13 +450,15 @@ class ConvergentLoop:
             f"Story: {story_id}. Review mode: branch diff against main."
         )
         review_task_id = task_id or str(uuid.uuid4())
+        review_opts: dict[str, Any] = {"cwd": resolved_path}
+        review_opts.update(self._reviewer_options)
         result = await self._subprocess_mgr.dispatch_with_retry(
             story_id=story_id,
             phase="reviewing",
             role="reviewer",
             cli_tool="codex",
             prompt=review_prompt,
-            options={"cwd": resolved_path, "sandbox": "read-only"},
+            options=review_opts,
             task_id=review_task_id,
             is_retry=is_retry,
         )
@@ -946,13 +950,15 @@ class ConvergentLoop:
 
         # --- Dispatch Codex reviewer agent ---
         rereview_task_id = task_id or str(uuid.uuid4())
+        rereview_opts: dict[str, Any] = {"cwd": resolved_path}
+        rereview_opts.update(self._reviewer_options)
         result = await self._subprocess_mgr.dispatch_with_retry(
             story_id=story_id,
             phase="reviewing",
             role="reviewer",
             cli_tool="codex",
             prompt=rereview_prompt,
-            options={"cwd": resolved_path, "sandbox": "read-only"},
+            options=rereview_opts,
             task_id=rereview_task_id,
             is_retry=is_retry,
         )

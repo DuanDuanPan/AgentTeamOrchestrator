@@ -864,7 +864,21 @@ class Orchestrator:
                 f"Please perform the work for this phase.{story_ctx}"
             )
 
-            options: dict[str, object] | None = {"cwd": worktree_path} if worktree_path else None
+            # 从 phase config 获取 model / sandbox，确保 restart 路径也透传
+            from ato.recovery import RecoveryEngine
+
+            phase_cfg = RecoveryEngine._resolve_phase_config_static(
+                self._settings, task.phase
+            )
+            options: dict[str, object] = {}
+            if worktree_path:
+                options["cwd"] = worktree_path
+            phase_model = phase_cfg.get("model")
+            if phase_model:
+                options["model"] = phase_model
+            phase_sandbox = phase_cfg.get("sandbox")
+            if phase_sandbox:
+                options["sandbox"] = phase_sandbox
 
             result = await mgr.dispatch_with_retry(
                 story_id=task.story_id,

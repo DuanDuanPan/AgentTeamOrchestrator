@@ -806,6 +806,58 @@ phases:
         defs = build_phase_definitions(config)
         assert [d.name for d in defs] == ["alpha", "beta"]
 
+    def test_role_without_model_loads_successfully(self, tmp_path: Path) -> None:
+        """角色缺少 model 字段仍可成功加载。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.roles["dev"].model is None
+
+    def test_phase_definition_model_is_none_when_role_omits(self, tmp_path: Path) -> None:
+        """角色未指定 model 且 model_map 无覆盖时，PhaseDefinition.model 为 None。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        defs = build_phase_definitions(config)
+        assert defs[0].model is None
+
+    def test_model_map_overrides_none_role_model(self, tmp_path: Path) -> None:
+        """model_map 可覆盖角色的 None model。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+model_map:
+  working: opus
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        defs = build_phase_definitions(config)
+        assert defs[0].model == "opus"
+
     def test_no_state_machine_instantiation(self, tmp_path: Path) -> None:
         """build_phase_definitions 只返回数据，不实例化状态机。"""
         p = _write_yaml(tmp_path, _MINIMAL_VALID_YAML)
@@ -873,11 +925,12 @@ class TestConfigTemplate:
         ]
         assert phase_names == expected
 
-    def test_example_has_readonly_sandbox(self) -> None:
-        """模板中有角色使用 read-only sandbox。"""
+    def test_example_roles_no_model_no_sandbox_by_default(self) -> None:
+        """模板中角色默认不再包含 model 和 sandbox。"""
         config = load_config(Path("ato.yaml.example"))
-        has_readonly = any(r.sandbox == "read-only" for r in config.roles.values())
-        assert has_readonly
+        for name, role in config.roles.items():
+            assert role.model is None, f"角色 {name} 不应默认指定 model"
+            assert role.sandbox is None, f"角色 {name} 不应默认指定 sandbox"
 
     def test_example_contains_comments(self) -> None:
         """模板文件包含说明注释。"""

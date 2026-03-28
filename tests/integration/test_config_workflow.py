@@ -44,7 +44,7 @@ class TestConfigWorkflow:
             "regression",
         ]
         assert definitions[4].cli_tool == "codex"
-        assert definitions[4].sandbox == "read-only"
+        assert definitions[4].sandbox is None  # 模板不再默认指定 sandbox
         assert definitions[4].next_on_failure == "fixing"
         assert definitions[7].phase_type == "interactive_session"
         assert definitions[7].timeout_seconds == settings.timeout.interactive_session
