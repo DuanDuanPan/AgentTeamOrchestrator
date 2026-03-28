@@ -75,6 +75,8 @@ class ATOApp(App[None]):
         self._pending_approval_records: list[object] = []
         # Story 级 findings 摘要（Story 6.3a AC2）
         self._story_findings_summary: dict[str, dict[str, int]] = {}
+        # Story 级 task 计数（Story 6.4 Task 1.2 — 轻量轮询）
+        self._story_task_counts: dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         """骨架布局：Header + ThreeQuestionHeader + DashboardScreen + Footer。"""
@@ -247,6 +249,12 @@ class ATOApp(App[None]):
 
             # 10. Story 级 findings 摘要（Story 6.3a AC2 — QA 结果）
             self._story_findings_summary = await get_story_findings_summary(db)
+
+            # 11. Story 级 task 计数（Story 6.4 Task 1.2 — 轻量轮询）
+            cursor = await db.execute(
+                "SELECT story_id, COUNT(*) as cnt FROM tasks GROUP BY story_id"
+            )
+            self._story_task_counts = {str(row[0]): int(row[1]) for row in await cursor.fetchall()}
         finally:
             await db.close()
 
@@ -272,6 +280,7 @@ class ATOApp(App[None]):
                 convergent_loop_max_rounds=self._convergent_loop_max_rounds,
                 pending_approval_records=self._pending_approval_records,
                 story_findings_summary=self._story_findings_summary,
+                story_task_counts=self._story_task_counts,
             )
         except NoMatches:
             pass  # DashboardScreen 尚未挂载
@@ -287,6 +296,37 @@ class ATOApp(App[None]):
             )
         except NoMatches:
             pass  # ThreeQuestionHeader 尚未挂载
+
+    async def load_story_detail(self, story_id: str) -> dict[str, object]:
+        """按需加载 Story 详情数据（不在 2s 轮询中执行）。
+
+        返回 tasks、cost_logs、findings 明细和 findings_summary。
+        使用短生命周期连接。
+        """
+        from ato.models.db import (
+            get_connection,
+            get_cost_logs_by_story,
+            get_findings_by_story,
+            get_story_findings_summary,
+            get_tasks_by_story,
+        )
+
+        db = await get_connection(self._db_path)
+        try:
+            tasks = await get_tasks_by_story(db, story_id)
+            cost_logs = await get_cost_logs_by_story(db, story_id)
+            findings = await get_findings_by_story(db, story_id)
+            all_summaries = await get_story_findings_summary(db)
+            findings_summary = all_summaries.get(story_id, {})
+        finally:
+            await db.close()
+
+        return {
+            "tasks": tasks,
+            "cost_logs": cost_logs,
+            "findings": findings,
+            "findings_summary": findings_summary,
+        }
 
     async def refresh_data(self) -> None:
         """定时轮询回调——重新加载 SQLite 数据。

@@ -14,6 +14,7 @@ import time
 from datetime import UTC, datetime
 from typing import ClassVar
 
+import structlog
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -31,6 +32,7 @@ from ato.approval_helpers import (
     resolve_multi_decision,
 )
 from ato.models.schemas import APPROVAL_TYPE_ICONS
+from ato.tui.story_detail import StoryDetailView
 from ato.tui.theme import (
     RICH_COLORS,
     format_status,
@@ -42,6 +44,8 @@ from ato.tui.widgets.approval_card import ApprovalCard
 from ato.tui.widgets.exception_approval_panel import ExceptionApprovalPanel
 from ato.tui.widgets.heartbeat_indicator import HeartbeatIndicator
 from ato.tui.widgets.story_status_line import StoryStatusLine, _format_elapsed
+
+logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 
 class _FocusablePanel(Vertical):
@@ -71,6 +75,8 @@ class DashboardScreen(Widget):
         ("d", "toggle_detail", "展开/折叠"),
         ("y", "approve", "批准"),
         ("n", "reject", "拒绝"),
+        ("enter", "drill_in", "详情"),
+        ("escape", "back", "返回"),
     ]
 
     def __init__(self) -> None:
@@ -112,6 +118,11 @@ class DashboardScreen(Widget):
         self._rebuild_gen_approvals_tab: int = 0
         # 每个模式最近聚焦的 widget id，用于切换时恢复焦点
         self._saved_focus: dict[str, str | None] = {}
+        # Story 详情钻入模式 (Story 6.4)
+        self._in_detail_mode: bool = False
+        self._detail_story_id: str | None = None
+        # Task 计数（轻量轮询）
+        self._story_task_counts: dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         with ContentSwitcher(initial="three-panel"):
@@ -131,6 +142,7 @@ class DashboardScreen(Widget):
                             id="right-top-content",
                         )
                         yield ExceptionApprovalPanel(id="right-top-exception")
+                        yield StoryDetailView(id="right-top-detail")
                     yield Static(
                         "",
                         id="right-bottom-content",
@@ -142,10 +154,17 @@ class DashboardScreen(Widget):
                     tab_approval_scroll = VerticalScroll(id="tab-approvals-container")
                     tab_approval_scroll.can_focus = False
                     yield tab_approval_scroll
-                with TabPane("[2]Stories", id="tab-stories"):
+                with (
+                    TabPane("[2]Stories", id="tab-stories"),
+                    ContentSwitcher(
+                        initial="tab-story-list-container",
+                        id="tab-stories-switcher",
+                    ),
+                ):
                     tab_scroll = VerticalScroll(id="tab-story-list-container")
                     tab_scroll.can_focus = False
                     yield tab_scroll
+                    yield StoryDetailView(id="tab-story-detail")
                 with TabPane("[3]成本", id="tab-cost"):
                     yield Static("成本面板（占位）", id="tab-cost-content")
                 with TabPane("[4]日志", id="tab-log"):
@@ -292,10 +311,14 @@ class DashboardScreen(Widget):
 
     def action_approve(self) -> None:
         """y 键：对当前选中的二选一审批提交 approve 方向决策。"""
+        if self._in_detail_mode:
+            return  # 详情模式下不消费审批键
         self._submit_decision("y")
 
     def action_reject(self) -> None:
         """n 键：对当前选中的二选一审批提交 reject 方向决策。"""
+        if self._in_detail_mode:
+            return  # 详情模式下不消费审批键
         self._submit_decision("n")
 
     def _submit_decision(self, key: str) -> None:
@@ -460,6 +483,8 @@ class DashboardScreen(Widget):
 
     def action_toggle_detail(self) -> None:
         """d 键：切换审批展开/折叠态。"""
+        if self._in_detail_mode:
+            return  # 详情模式下不消费审批键
         if not self._selected_item_id or not self._selected_item_id.startswith("approval:"):
             return
         aid = self._selected_item_id.removeprefix("approval:")
@@ -470,26 +495,180 @@ class DashboardScreen(Widget):
         self._update_detail_panel()
         self._update_action_panel()
 
+    # ------------------------------------------------------------------
+    # Enter / ESC 导航 (Story 6.4 — Task 4)
+    # ------------------------------------------------------------------
+
+    def action_drill_in(self) -> None:
+        """Enter 键：从主屏进入 Story 详情页（第 2 层）。"""
+        if self._in_detail_mode:
+            return
+        if not self._selected_item_id or not self._selected_item_id.startswith("story:"):
+            return
+        sid = self._selected_item_id.removeprefix("story:")
+        self._enter_detail_mode(sid)
+
+    def action_back(self) -> None:
+        """ESC 键：从详情页返回主屏。"""
+        if not self._in_detail_mode:
+            return
+        self._exit_detail_mode()
+
+    def _enter_detail_mode(self, story_id: str) -> None:
+        """进入 story 详情钻入模式。"""
+        self._in_detail_mode = True
+        self._detail_story_id = story_id
+
+        # 加载详情数据并更新视图
+        async def _load_and_show() -> None:
+            from ato.tui.app import ATOApp
+
+            app = self.app
+            if not isinstance(app, ATOApp):
+                return
+
+            detail_data = await app.load_story_detail(story_id)
+            story = self._stories_by_id.get(story_id, {})
+
+            # 确定当前活跃的布局模式
+            if app.layout_mode == "three-panel":
+                self._show_detail_three_panel(story, detail_data, story_id)
+            elif app.layout_mode == "tabbed":
+                self._show_detail_tabbed(story, detail_data, story_id)
+
+        self.run_worker(_load_and_show(), exclusive=False)
+
+    def _show_detail_three_panel(
+        self,
+        story: dict[str, object],
+        detail_data: dict[str, object],
+        story_id: str,
+    ) -> None:
+        """三面板模式：切换 #right-top-switcher 到 StoryDetailView。"""
+        try:
+            detail_view = self.query_one("#right-top-detail", StoryDetailView)
+            self._populate_detail_view(detail_view, story, detail_data, story_id)
+            switcher = self.query_one("#right-top-switcher", ContentSwitcher)
+            switcher.current = "right-top-detail"
+            detail_view.focus()
+        except Exception as exc:
+            logger.debug(
+                "detail_view_render_failed",
+                layout="three-panel",
+                story_id=story_id,
+                error=str(exc),
+                exc_info=True,
+            )
+
+    def _show_detail_tabbed(
+        self,
+        story: dict[str, object],
+        detail_data: dict[str, object],
+        story_id: str,
+    ) -> None:
+        """Tabbed 模式：在 tab-stories 内切换到 StoryDetailView。"""
+        try:
+            detail_view = self.query_one("#tab-story-detail", StoryDetailView)
+            self._populate_detail_view(detail_view, story, detail_data, story_id)
+            switcher = self.query_one("#tab-stories-switcher", ContentSwitcher)
+            switcher.current = "tab-story-detail"
+            detail_view.focus()
+        except Exception as exc:
+            logger.debug(
+                "detail_view_render_failed",
+                layout="tabbed",
+                story_id=story_id,
+                error=str(exc),
+                exc_info=True,
+            )
+
+    def _populate_detail_view(
+        self,
+        view: StoryDetailView,
+        story: dict[str, object],
+        detail_data: dict[str, object],
+        story_id: str,
+    ) -> None:
+        """填充 StoryDetailView 数据。"""
+        view.update_detail(
+            story=story,
+            findings_summary=detail_data.get("findings_summary", {}),  # type: ignore[arg-type]
+            findings_detail=detail_data.get("findings", []),  # type: ignore[arg-type]
+            cost_logs=detail_data.get("cost_logs", []),  # type: ignore[arg-type]
+            tasks=detail_data.get("tasks", []),  # type: ignore[arg-type]
+            cl_round=self._story_cl_rounds.get(story_id, 0),
+            cl_max_rounds=self._convergent_loop_max_rounds,
+            cost_usd=self._story_costs.get(story_id, 0.0),
+        )
+
+    def _exit_detail_mode(self) -> None:
+        """退出���情模式，返回主屏概览。"""
+        self._in_detail_mode = False
+        self._detail_story_id = None
+
+        from ato.tui.app import ATOApp
+
+        app = self.app
+        layout = app.layout_mode if isinstance(app, ATOApp) else "three-panel"
+
+        if layout == "three-panel":
+            # 切换回常规概览
+            self._show_right_top_static("选择左面板的 story 查看详情")
+            self._update_detail_panel()
+            self._restore_focus("three-panel")
+        elif layout == "tabbed":
+            try:
+                switcher = self.query_one("#tab-stories-switcher", ContentSwitcher)
+                switcher.current = "tab-story-list-container"
+            except Exception:
+                pass
+            # TabbedContent 自身不可聚焦，回退到其第一个可聚焦子控件。
+            self._restore_focus("tabbed")
+
+    def on_story_detail_view_back_requested(self, _: StoryDetailView.BackRequested) -> None:
+        """处理 StoryDetailView 发出的 ESC 返回请求。"""
+        self._exit_detail_mode()
+
     def _is_left_panel_focused(self) -> bool:
-        """检查左面板是否获焦。"""
+        """检查导航列表区域是否获焦（three-panel 或 tabbed 模式）。"""
         app = self.app
         if app is None:
             return False
         focused = app.focused
         if focused is None:
             return False
-        # 检查焦点是否在 panel-left 或其子控件中
-        try:
-            left_panel = self.query_one("#panel-left")
-            # 检查 focused 是 left_panel 本身或其子节点
-            node = focused
-            while node is not None:
-                if node is left_panel:
-                    return True
-                node = node.parent  # type: ignore[assignment]
+        layout = getattr(app, "layout_mode", "three-panel")
+
+        if layout == "three-panel":
+            with contextlib.suppress(Exception):
+                return self._is_widget_within_focus_path(focused, self.query_one("#panel-left"))
             return False
-        except Exception:
-            return False
+
+        if layout == "tabbed":
+            try:
+                tabbed = self.query_one(TabbedContent)
+                switcher = self.query_one("#tab-stories-switcher", ContentSwitcher)
+            except Exception:
+                return False
+
+            if tabbed.active != "tab-stories":
+                return False
+            if switcher.current != "tab-story-list-container":
+                return False
+
+            return self._is_widget_within_focus_path(focused, tabbed)
+
+        return False
+
+    @staticmethod
+    def _is_widget_within_focus_path(focused: object, container: object) -> bool:
+        """判断当前焦点是否位于指定容器子树内。"""
+        node: object = focused
+        while node is not None:
+            if node is container:
+                return True
+            node = getattr(node, "parent", None)
+        return False
 
     # ------------------------------------------------------------------
     # 数据更新接口
@@ -509,6 +688,7 @@ class DashboardScreen(Widget):
         convergent_loop_max_rounds: int | None = None,
         pending_approval_records: list[object] | None = None,
         story_findings_summary: dict[str, dict[str, int]] | None = None,
+        story_task_counts: dict[str, int] | None = None,
     ) -> None:
         """更新仪表盘数据（所有模式同步）。保持向后兼容。"""
         self._story_count = story_count
@@ -537,6 +717,8 @@ class DashboardScreen(Widget):
             self._submitted_approvals &= current_ids
         if story_findings_summary is not None:
             self._story_findings_summary = story_findings_summary
+        if story_task_counts is not None:
+            self._story_task_counts = story_task_counts
 
         self._refresh_placeholders()
 
@@ -837,6 +1019,9 @@ class DashboardScreen(Widget):
 
     def _update_detail_panel(self) -> None:
         """右上面板联动——区分审批和 story。"""
+        # 详情模式下跳过——轮询不应踢回概览
+        if self._in_detail_mode:
+            return
         if not self._selected_item_id:
             self._show_right_top_static("选择左面板的 story 查看详情")
             return
@@ -1006,7 +1191,7 @@ class DashboardScreen(Widget):
         )
 
     def _render_story_detail(self, story_id: str) -> None:
-        """渲染 story 详情到右上面板。"""
+        """渲染 story 概览到右上面板（第 1 层）。"""
         story = self._stories_by_id.get(story_id)
         if not story:
             self._show_right_top_static("选择左面板的 story 查看详情")
@@ -1034,12 +1219,46 @@ class DashboardScreen(Widget):
         detail.append(f"${cost:.2f}\n", style=RICH_COLORS["$text"])
         detail.append("耗时: ", style=RICH_COLORS["$muted"])
         detail.append(f"{_format_elapsed(elapsed)}\n", style=RICH_COLORS["$text"])
+
+        # Task 1.1: Findings 摘要
+        fs = self._story_findings_summary.get(sid, {})
+        b_open = fs.get("blocking_open", 0)
+        b_closed = fs.get("blocking_closed", 0)
+        s_open = fs.get("suggestion_open", 0)
+        s_closed = fs.get("suggestion_closed", 0)
+        total_findings = b_open + b_closed + s_open + s_closed
+        if total_findings > 0:
+            detail.append("Findings: ", style=RICH_COLORS["$muted"])
+            if b_open > 0:
+                detail.append(f"{b_open}B↑", style=RICH_COLORS["$error"])
+            if b_closed > 0:
+                detail.append(f" {b_closed}B↓", style=RICH_COLORS["$success"])
+            if s_open > 0:
+                detail.append(f" {s_open}S↑", style=RICH_COLORS["$warning"])
+            if s_closed > 0:
+                detail.append(f" {s_closed}S↓", style=RICH_COLORS["$success"])
+            detail.append("\n")
+
+        # Task 1.2: 执行记录轻量摘要
+        task_count = self._story_task_counts.get(sid, 0)
+        if task_count > 0:
+            detail.append("执行记录: ", style=RICH_COLORS["$muted"])
+            detail.append(f"{task_count} tasks\n", style=RICH_COLORS["$info"])
+
+        # Task 1.3: CL 收敛信息
         if cl_round > 0:
-            detail.append("CL 轮次: ", style=RICH_COLORS["$muted"])
+            detail.append("CL: ", style=RICH_COLORS["$muted"])
             detail.append(
                 f"R{cl_round}/{self._convergent_loop_max_rounds}",
                 style=RICH_COLORS["$info"],
             )
+            if total_findings > 0:
+                closed = b_closed + s_closed
+                rate = closed / total_findings * 100
+                detail.append(f"  收敛率 {rate:.0f}%", style=RICH_COLORS["$info"])
+            detail.append("\n")
+
+        detail.append("\n[Enter] 详情", style=RICH_COLORS["$muted"])
 
         self._show_right_top_static(detail)
 
@@ -1102,10 +1321,10 @@ class DashboardScreen(Widget):
                 action_text.append("[d] 详情", style=RICH_COLORS["$muted"])
             self._update_static("#right-bottom-content", action_text)
         else:
-            # 选中 story 时——通用提示（d 仅对审批生效，不在此暴露）
+            # 选中 story 时——通用提示 + Enter 钻入
             self._update_static(
                 "#right-bottom-content",
-                Text("↑↓ 选择  q 退出", style=RICH_COLORS["$muted"]),
+                Text("↑↓ 选择  [Enter] 详情  q 退出", style=RICH_COLORS["$muted"]),
             )
 
     def _update_approvals_tab(self) -> None:
