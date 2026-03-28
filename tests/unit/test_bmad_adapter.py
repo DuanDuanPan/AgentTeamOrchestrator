@@ -176,6 +176,22 @@ class TestDeterministicFastPath:
         assert result.parser_mode == "deterministic"
         assert result.verdict == "changes_requested"
 
+    async def test_story_validation_pass_english(self) -> None:
+        md = _load_fixture("bmad_story_validation_06.md")
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.STORY_VALIDATION, story_id="s1")
+        assert result.parser_mode == "deterministic"
+        assert result.verdict == "approved"
+        assert all(f.severity == "suggestion" for f in result.findings)
+
+    async def test_story_validation_fail_english(self) -> None:
+        md = _load_fixture("bmad_story_validation_07.md")
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.STORY_VALIDATION, story_id="s1")
+        assert result.parser_mode == "deterministic"
+        assert result.verdict == "changes_requested"
+        assert all(f.severity == "blocking" for f in result.findings)
+
     async def test_architecture_review_ready(self) -> None:
         md = _load_fixture("bmad_architecture_review_01.md")
         adapter = BmadAdapter()

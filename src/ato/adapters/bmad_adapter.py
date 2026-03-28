@@ -456,7 +456,7 @@ def _parse_code_review(markdown: str) -> list[BmadFinding] | None:
 # ---------------------------------------------------------------------------
 
 _SV_RESULT_RE = re.compile(
-    r"结果[：:]\s*(PASS|FAIL|INVALID)",
+    r"(?:结果|Result)[：:]\s*(PASS|FAIL|INVALID)",
     re.IGNORECASE,
 )
 
