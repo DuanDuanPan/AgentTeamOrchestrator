@@ -1783,3 +1783,147 @@ class TestRebaseConflictDecisions:
         orchestrator._tq.submit.assert_awaited_once()
         event = orchestrator._tq.submit.call_args[0][0]
         assert event.event_name == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# Story 8.1: _dispatch_batch_restart 透传 phase-derived model/sandbox
+# ---------------------------------------------------------------------------
+
+
+class TestBatchRestartPhaseOptions:
+    """验证 _dispatch_batch_restart 将 phase config 的 model/sandbox 传到 adapter。"""
+
+    async def test_batch_restart_passes_phase_model_and_sandbox(
+        self, initialized_db_path: Path
+    ) -> None:
+        """phase config 有 model/sandbox 时，dispatch options 应包含这两个字段。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={
+                "creator": {"cli": "claude", "model": "opus", "sandbox": None},
+            },
+            phases=[
+                {
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t1", story_id="s1"
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'creating', role = 'creator', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested' "
+                "WHERE task_id = 't1'"
+            )
+            await update_story_worktree_path(db, "s1", "/tmp/wt")
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="s1",
+            phase="creating",
+            role="creator",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with patch("ato.recovery._create_adapter", return_value=mock_adapter):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_adapter.execute.assert_called_once()
+        call_args = mock_adapter.execute.call_args
+        options = call_args[0][1]  # 第二个位置参数是 options
+        assert options["cwd"] == "/tmp/wt"
+        assert options["model"] == "opus"
+        # creator 角色 sandbox=None → 不应出现
+        assert "sandbox" not in options
+
+    async def test_batch_restart_no_model_no_sandbox_when_omitted(
+        self, initialized_db_path: Path
+    ) -> None:
+        """phase config 无 model/sandbox 时，dispatch options 不包含这两个字段。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={
+                "creator": {"cli": "claude"},  # 无 model 无 sandbox
+            },
+            phases=[
+                {
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t2", story_id="s2"
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'creating', role = 'creator', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested' "
+                "WHERE task_id = 't2'"
+            )
+            await update_story_worktree_path(db, "s2", "/tmp/wt2")
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t2",
+            story_id="s2",
+            phase="creating",
+            role="creator",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with patch("ato.recovery._create_adapter", return_value=mock_adapter):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_adapter.execute.assert_called_once()
+        call_args = mock_adapter.execute.call_args
+        options = call_args[0][1]
+        assert options["cwd"] == "/tmp/wt2"
+        assert "model" not in options
+        assert "sandbox" not in options

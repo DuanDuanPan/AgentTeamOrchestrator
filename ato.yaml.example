@@ -10,31 +10,25 @@
 # ---------------------------------------------------------------------------
 # 角色定义
 # ---------------------------------------------------------------------------
-# 每个角色指定使用的 CLI 工具（claude / codex）和默认模型。
-# sandbox 选项：read-only（只读沙箱）、workspace-write（可写）、省略（默认）。
+# 每个角色指定使用的 CLI 工具（claude / codex）。
+# model 和 sandbox 均为可选字段，省略时由 CLI 工具自身决定默认行为。
+# 仅在需要覆盖 CLI 默认行为时才显式填写：
+#   model: 指定模型名称（如 sonnet, opus, codex-mini-latest）
+#   sandbox: read-only（只读沙箱）或 workspace-write（可写沙箱）
 
 roles:
   creator:
     cli: claude
-    model: sonnet
   validator:
     cli: codex
-    model: codex-mini-latest
-    sandbox: read-only
   developer:
     cli: claude
-    model: sonnet
   reviewer:
     cli: codex
-    model: codex-mini-latest
-    sandbox: read-only
   fixer:
     cli: claude
-    model: sonnet
   qa:
     cli: codex
-    model: codex-mini-latest
-    sandbox: read-only
 
 # ---------------------------------------------------------------------------
 # 阶段序列
@@ -134,11 +128,12 @@ timeout:
 # ---------------------------------------------------------------------------
 # 模型覆盖映射（可选）
 # ---------------------------------------------------------------------------
-# 为特定阶段指定不同于角色默认的模型。
+# 为特定阶段指定模型，优先于角色级 model（含省略/None）。
 # key 必须是已定义的阶段名。
 # 示例：
-#   reviewing: opus
-#   qa: codex-mini-latest
+#   model_map:
+#     reviewing: opus
+#     qa_testing: codex-mini-latest
 
 # ---------------------------------------------------------------------------
 # Merge & Regression 配置
@@ -159,9 +154,5 @@ merge_rebase_timeout: 120
 
 # Agent 解决 rebase 冲突最大重试次数
 merge_conflict_resolution_max_attempts: 1
-
-# ---------------------------------------------------------------------------
-# 模型覆盖映射（可选）
-# ---------------------------------------------------------------------------
 
 model_map: {}

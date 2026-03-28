@@ -389,18 +389,23 @@ class RecoveryEngine:
 
     def _resolve_phase_config(self, phase: str) -> dict[str, Any]:
         """从 settings 读取 phase 级别的 model / timeout / sandbox / cli。"""
-        if self._settings is None:
+        return self._resolve_phase_config_static(self._settings, phase)
+
+    @staticmethod
+    def _resolve_phase_config_static(settings: Any, phase: str) -> dict[str, Any]:
+        """从 settings 读取 phase 级别配置（静态版本，供 core.py 复用）。"""
+        if settings is None:
             return {}
         from ato.config import build_phase_definitions
 
-        for pd in build_phase_definitions(self._settings):
+        for pd in build_phase_definitions(settings):
             if pd.name == phase:
                 return {
                     "cli_tool": pd.cli_tool,
                     "model": pd.model,
                     "sandbox": pd.sandbox,
                     "timeout_seconds": pd.timeout_seconds,
-                    "max_concurrent": self._settings.max_concurrent_agents,
+                    "max_concurrent": settings.max_concurrent_agents,
                 }
         return {}
 
@@ -415,14 +420,12 @@ class RecoveryEngine:
         if worktree_path:
             opts["cwd"] = worktree_path
 
-        # sandbox: 优先 phase config，fallback 按 cli_tool
+        # sandbox: 仅当 phase config 明确提供时才传
         sandbox = phase_cfg.get("sandbox")
         if sandbox:
             opts["sandbox"] = sandbox
-        elif task.cli_tool == "codex":
-            opts["sandbox"] = "workspace-write"
 
-        # model from phase config
+        # model: 仅当 phase config 明确提供时才传
         model = phase_cfg.get("model")
         if model:
             opts["model"] = model
@@ -451,6 +454,7 @@ class RecoveryEngine:
         *,
         worktree_path: str,
         max_concurrent: int,
+        reviewer_options: dict[str, Any] | None = None,
     ) -> None:
         """reviewing phase 恢复要区分 full review 与 scoped re-review。"""
         from ato.adapters.bmad_adapter import BmadAdapter
@@ -485,6 +489,7 @@ class RecoveryEngine:
                 else 10
             ),
             nudge=self._nudge,
+            reviewer_options=reviewer_options,
         )
 
         if previous_findings:
@@ -566,17 +571,25 @@ class RecoveryEngine:
                 return False
 
             if task.phase == "reviewing":
+                # 从 phase config 提取 reviewer 的显式 model/sandbox
+                reviewer_opts: dict[str, Any] = {}
+                if phase_cfg.get("model"):
+                    reviewer_opts["model"] = phase_cfg["model"]
+                if phase_cfg.get("sandbox"):
+                    reviewer_opts["sandbox"] = phase_cfg["sandbox"]
+
                 await self._dispatch_reviewing_convergent_loop(
                     task,
                     worktree_path=worktree_path,
                     max_concurrent=max_concurrent,
+                    reviewer_options=reviewer_opts or None,
                 )
                 return True
 
             # Dispatch CLI（使用 task 的原始 role 和 cli_tool）
             cli_tool = phase_cfg.get("cli_tool", task.cli_tool)
             role = task.role
-            sandbox = phase_cfg.get("sandbox", "read-only")
+            sandbox = phase_cfg.get("sandbox")
 
             adapter = _create_adapter(cli_tool)
             mgr = SubprocessManager(
@@ -598,13 +611,20 @@ class RecoveryEngine:
                     f"Perform a full {task.phase} on the worktree at {worktree_path}."
                 )
 
+            dispatch_opts: dict[str, Any] = {"cwd": worktree_path}
+            if sandbox:
+                dispatch_opts["sandbox"] = sandbox
+            model = phase_cfg.get("model")
+            if model:
+                dispatch_opts["model"] = model
+
             result = await mgr.dispatch_with_retry(
                 story_id=task.story_id,
                 phase=task.phase,
                 role=role,
                 cli_tool=cli_tool,
                 prompt=prompt,
-                options={"cwd": worktree_path, "sandbox": sandbox},
+                options=dispatch_opts,
                 task_id=task.task_id,
                 is_retry=True,
             )

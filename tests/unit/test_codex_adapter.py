@@ -319,24 +319,32 @@ class TestClassifyError:
 
 
 class TestBuildCommand:
-    def test_basic_command(self) -> None:
+    def test_basic_command_no_default_sandbox(self) -> None:
+        """无 options 时不应默认追加 --sandbox。"""
         adapter = CodexAdapter()
         cmd = adapter._build_command("review this code")
         assert cmd[:4] == ["codex", "exec", "review this code", "--json"]
-        assert "--sandbox" in cmd
-        assert "read-only" in cmd
+        assert "--sandbox" not in cmd
 
-    def test_default_sandbox_read_only(self) -> None:
+    def test_no_options_no_sandbox_flag(self) -> None:
+        """未传入 sandbox 选项时命令不包含 --sandbox。"""
         adapter = CodexAdapter()
         cmd = adapter._build_command("prompt")
-        idx = cmd.index("--sandbox")
-        assert cmd[idx + 1] == "read-only"
+        assert "--sandbox" not in cmd
 
-    def test_custom_sandbox(self) -> None:
+    def test_explicit_sandbox_passed(self) -> None:
+        """显式传入 sandbox 时仍追加 --sandbox。"""
         adapter = CodexAdapter()
         cmd = adapter._build_command("prompt", {"sandbox": "workspace-write"})
         idx = cmd.index("--sandbox")
         assert cmd[idx + 1] == "workspace-write"
+
+    def test_explicit_sandbox_read_only(self) -> None:
+        """显式传入 read-only sandbox 时追加 --sandbox read-only。"""
+        adapter = CodexAdapter()
+        cmd = adapter._build_command("prompt", {"sandbox": "read-only"})
+        idx = cmd.index("--sandbox")
+        assert cmd[idx + 1] == "read-only"
 
     def test_with_output_schema(self) -> None:
         adapter = CodexAdapter()
@@ -391,6 +399,11 @@ class TestCalculateCost:
         cost = calculate_cost("unknown-model", 1000, 500)
         assert cost == 0.0
 
+    def test_none_model_returns_zero(self) -> None:
+        """model=None 时返回 0.0（安全降级）。"""
+        cost = calculate_cost(None, 1_000_000, 1_000_000)
+        assert cost == 0.0
+
     def test_cached_exceeds_input(self) -> None:
         """cached > input 时 uncached 为 0。"""
         cost = calculate_cost("codex-mini-latest", 100, 0, cached_input_tokens=200)
@@ -416,7 +429,8 @@ def _mock_process(stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> Ma
 
 
 class TestCodexAdapterExecute:
-    async def test_success_execution(self, success_events_raw: str) -> None:
+    async def test_success_execution_no_model_default(self, success_events_raw: str) -> None:
+        """无 model 选项时 model_name 为 None，cost_usd 为 0.0。"""
         proc = _mock_process(success_events_raw.encode())
         adapter = CodexAdapter()
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
@@ -425,6 +439,18 @@ class TestCodexAdapterExecute:
         assert result.input_tokens == 26024
         assert result.output_tokens == 29
         assert result.cache_read_input_tokens == 10624
+        assert result.model_name is None
+        assert result.cost_usd == 0.0
+
+    async def test_success_execution_with_explicit_model(self, success_events_raw: str) -> None:
+        """显式传 model 时 model_name 正确、cost_usd 为正值。"""
+        proc = _mock_process(success_events_raw.encode())
+        adapter = CodexAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await adapter.execute(
+                "review this code", {"model": "codex-mini-latest"}
+            )
+        assert result.status == "success"
         assert result.model_name == "codex-mini-latest"
         assert result.cost_usd > 0
 

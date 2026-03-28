@@ -46,7 +46,7 @@ class RoleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cli: Literal["claude", "codex"]
-    model: str
+    model: str | None = None
     sandbox: Literal["read-only", "workspace-write"] | None = None
 
 
@@ -160,7 +160,7 @@ class PhaseDefinition:
     name: str
     role: str
     cli_tool: str
-    model: str
+    model: str | None
     sandbox: str | None
     phase_type: str
     next_on_success: str
