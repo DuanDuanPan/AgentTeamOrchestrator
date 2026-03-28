@@ -77,6 +77,45 @@ def remove_pid_file(pid_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase-aware interactive prompt 构造
+# ---------------------------------------------------------------------------
+
+# Interactive phase → prompt 模板映射
+# developing: 通过自然语言触发 bmad-dev-story skill
+# uat: 通用 interactive session prompt
+_INTERACTIVE_PHASE_PROMPTS: dict[str, str] = {
+    "developing": (
+        "Dev this story {story_id} "
+        "in the worktree at {worktree_path}. "
+        "Follow the story tasks strictly."
+    ),
+}
+
+
+def _build_interactive_prompt(
+    task: TaskRecord, worktree_path: str, story_ctx: str = ""
+) -> str:
+    """按 phase 构造 interactive session prompt。
+
+    developing 阶段使用专用模板触发 bmad-dev-story skill；
+    其他阶段使用通用 interactive restart prompt。
+    """
+    template = _INTERACTIVE_PHASE_PROMPTS.get(task.phase)
+    if template is not None:
+        prompt = template.format(
+            story_id=task.story_id,
+            worktree_path=worktree_path,
+        )
+    else:
+        prompt = (
+            f"Interactive session restart for story {task.story_id}, "
+            f"phase {task.phase}. "
+            f"Please continue the work for this phase."
+        )
+    return f"{prompt}{story_ctx}"
+
+
+# ---------------------------------------------------------------------------
 # Interactive Session 检测辅助
 # ---------------------------------------------------------------------------
 
@@ -714,15 +753,11 @@ class Orchestrator:
             finally:
                 await db2.close()
 
-            # 构建 prompt
+            # 构建 prompt（phase-aware：developing 触发 bmad-dev-story skill）
             story_ctx = ""
             if task.context_briefing:
                 story_ctx = f"\n\nPrevious context: {task.context_briefing}"
-            prompt = (
-                f"Interactive session restart for story {task.story_id}, "
-                f"phase {task.phase}. "
-                f"Please continue the work for this phase.{story_ctx}"
-            )
+            prompt = _build_interactive_prompt(task, worktree_path, story_ctx)
 
             ato_dir = self._db_path.parent
 
