@@ -194,6 +194,46 @@ ExceptionApprovalPanel {
     text-style: bold;
 }
 
+/* ===== SearchPanel (Story 6.5) ===== */
+
+#search-panel {
+    display: none;
+    dock: top;
+    height: auto;
+    max-height: 50%;
+    background: $surface;
+    padding: 1 2;
+    border-bottom: solid $accent;
+}
+
+#search-input {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#search-results {
+    height: auto;
+    max-height: 12;
+    background: $background;
+    border: solid $muted;
+}
+
+#search-results > .option-list--option-highlighted {
+    background: $accent 30%;
+}
+
+/* ===== 成本 Tab / 日志 Tab (Story 6.5) ===== */
+
+#tab-cost-content {
+    padding: 1 1;
+    height: auto;
+}
+
+#tab-log-content {
+    padding: 1 1;
+    height: auto;
+}
+
 /* ===== 空状态 (Story 6.2b) ===== */
 
 .empty-state {
