@@ -1410,3 +1410,98 @@ So that 可以量化系统改进效果。
 **Given** TUI 增强（FR47）
 **When** 渲染增强视图
 **Then** 包含成本面板（按 story/阶段/模型分类）、UAT 趋势图（通过率随时间变化）、finding 详情面板（分类统计+趋势）
+
+## Epic 9: 工作流阶段重构与设计产物持久化
+
+在现有 phase/workspace 重构基础上，将 `designing` 从“只存在于状态机中的阶段”扩展为“有稳定设计产物合同、可持久化、可 gate、可被后续开发消费”的完整交付链。
+
+### Story 9.1: 新增 Designing 阶段 — 可选的 UX 设计环节
+
+As a 操作者,  
+I want 工作流在 `creating` 之后、`validating` 之前显式增加可选的 `designing` 阶段，由 UX Designer 角色执行,  
+So that 涉及 UI 的 story 在进入 validate 之前有一个专门的 UX 设计环节，而纯后端 story 可以在后续 story 中被安全跳过。
+
+**Acceptance Criteria:**
+
+- `CANONICAL_PHASES` 顺序变为 `planning → creating → designing → validating → ...`
+- `create_done` 推进 `creating → designing`，新增 `design_done` 推进 `designing → validating`
+- `designing` 复用高层 `planning` 状态，不新增 StoryStatus
+- replay / recovery / config / tests 对齐 `designing`
+
+### Story 9.1a: 修正 Designing 设计产物合同与 `.pen` 基线
+
+As a 操作者,  
+I want `designing` 阶段的 prompt、模板与核心产物合同明确对齐 Pencil 的真实行为,  
+So that 后续实现不再依赖错误的“自动保存/加密格式”假设，设计阶段可以在正确的工程约束下落地。
+
+**Acceptance Criteria:**
+
+- designing prompt 不再宣称 `batch_design` 自动保存，也不再把 `.pen` 视为加密格式
+- 仓库中新增可版本化的 `.pen` 模板基线
+- 设计阶段核心工件路径被统一 helper 管理
+- 测试覆盖模板、路径 helper 与 prompt 合同修正
+
+### Story 9.1b: Designing 阶段强制落盘与设计快照链路
+
+As a 操作者,  
+I want designing 阶段在 Pencil 内存编辑完成后执行结构化强制落盘，并生成快照与保存报告,  
+So that `.pen` 设计稿真正存在于磁盘上，系统崩溃后仍可恢复，后续 gate 有可靠真相源。
+
+**Acceptance Criteria:**
+
+- 设计完成后通过 `batch_get(readDepth=99, includePathGeometry=true)` 抓取完整内存节点树
+- Python 在保留 `.pen` 顶层合同的前提下回写 `children`
+- 生成 `prototype.snapshot.json` 与 `prototype.save-report.json`
+- 保存后必须通过 JSON parse 与 MCP 回读验证
+
+### Story 9.1c: Design Gate V2 与持久化验证
+
+As a 操作者,  
+I want `design_done` 前的 design gate 升级为基于磁盘真相与内容校验的严格门控,  
+So that 空文件、假文件或只存在于内存中的设计状态不会被误判为已完成。
+
+**Acceptance Criteria:**
+
+- design gate 至少要求：`ux-spec.md`、`prototype.pen`、`prototype.snapshot.json`、`prototype.save-report.json`、至少 1 张 PNG
+- `.pen` 必须可被 `json.load`，且 `save-report` 中 `json_parse_verified` 与 `reopen_verified` 为真
+- failure payload 包含结构化 failure codes / missing files
+- core / recovery 两条路径复用同一套 gate helper
+
+### Story 9.1d: Prototype Manifest 与下游消费契约
+
+As a 操作者,  
+I want 每个 UI story 生成可供开发、验证、评审消费的 `prototype.manifest.yaml`,  
+So that 后续阶段有统一入口理解该 story 的设计文件、导出图、主 frame、查阅顺序与设计约束，而不是各自猜测 UX 工件如何使用。
+
+**Acceptance Criteria:**
+
+- designing 阶段生成 `prototype.manifest.yaml`
+- manifest 至少记录 story、spec、`.pen`、snapshot、save-report、PNG 导出、主 frame 与查阅顺序
+- 下游 validating / developing / reviewing prompt 或上下文显式带入 manifest / PNG / `.pen`
+- design gate 最终要求 manifest 存在且内容可校验
+
+### Story 9.2: Workspace 概念引入 — 区分 Main 与 Worktree 执行环境
+
+As a 操作者,  
+I want 每个工作流阶段明确标注其执行环境（main 分支 vs worktree 分支），系统根据 workspace 类型决定是否创建 worktree,  
+So that story 规格创建与主仓库控制阶段在 main 上执行，而真正修改代码的阶段在隔离 worktree 中执行，worktree 只在真正需要时才创建。
+
+**Acceptance Criteria:**
+
+- `PhaseConfig` / `PhaseDefinition` 新增 `workspace`
+- main/worktree 阶段归属在 `ato.yaml.example` 中显式标注
+- validating 走 `project_root`，reviewing / qa 继续走 `worktree`
+- worktree 仅在首次进入 `developing` 时创建
+
+### Story 9.3: 条件阶段跳过 + Story 规格自动提交主分支
+
+As a 操作者,  
+I want 系统在 story 不需要 UI 时自动跳过 `designing` 阶段，并在 story 规格验证通过进入 `dev_ready` 时自动将规格文件提交到本地 `main`,  
+So that 纯后端 story 不被不必要的 UX 设计阶段阻塞，且所有已验证的 story 规格在创建 worktree 前就对并行开发的其他 story 可见。
+
+**Acceptance Criteria:**
+
+- `PhaseConfig` / `PhaseDefinition` 新增 `skip_when`
+- `stories` 表新增 `has_ui`
+- `designing` 可在 post-commit hook 中被安全跳过
+- batch 内所有 story 到达 `dev_ready` 后执行单次本地 spec commit

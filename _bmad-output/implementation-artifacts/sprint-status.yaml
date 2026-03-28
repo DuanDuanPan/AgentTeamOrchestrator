@@ -36,6 +36,7 @@
 
 generated: 2026-03-24
 last_updated: 2026-03-28
+# Epic 9 corrective + persistence stories created: 2026-03-28
 # Story 9-1 review: 2026-03-28
 # Story 9-1 in-progress: 2026-03-28
 # Epic 9 stories created: 2026-03-28
@@ -138,7 +139,11 @@ development_status:
 
   # ===== Epic 9: 工作流阶段重构与 Workspace 分离 =====
   epic-9: in-progress
-  9-1-add-designing-phase: review
+  9-1-add-designing-phase: done
+  9-1a-correct-designing-artifact-contract: ready-for-dev
+  9-1b-designing-force-save-snapshot-chain: ready-for-dev
+  9-1c-design-gate-v2-persistence-verification: ready-for-dev
+  9-1d-prototype-manifest-downstream-consumption: ready-for-dev
   9-2-workspace-concept-worktree-timing: ready-for-dev
   9-3-conditional-skip-spec-commit: ready-for-dev
   epic-9-retrospective: optional
