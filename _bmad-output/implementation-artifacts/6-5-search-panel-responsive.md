@@ -1,6 +1,6 @@
 # Story 6.5: 搜索面板与响应式布局完善
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -53,74 +53,74 @@ so that 在多 story 场景下导航效率不降。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: SearchPanel 组件创建 (AC: #1, #3, #6)
-  - [ ] 1.1 创建 `src/ato/tui/widgets/search_panel.py`
-  - [ ] 1.2 实现 `Input` 搜索框 + 结果列表容器（`VerticalScroll` 或 `OptionList`）
-  - [ ] 1.3 实现搜索面板的显示/隐藏切换（overlay / mount toggle；动画仅在不增加焦点与测试复杂度时实现）
-  - [ ] 1.4 ESC 键关闭搜索面板并恢复焦点
+- [x] Task 1: SearchPanel 组件创建 (AC: #1, #3, #6)
+  - [x] 1.1 创建 `src/ato/tui/widgets/search_panel.py`
+  - [x] 1.2 实现 `Input` 搜索框 + 结果列表容器（`VerticalScroll` 或 `OptionList`）
+  - [x] 1.3 实现搜索面板的显示/隐藏切换（overlay / mount toggle；动画仅在不增加焦点与测试复杂度时实现）
+  - [x] 1.4 ESC 键关闭搜索面板并恢复焦点
 
-- [ ] Task 2: 搜索引擎实现 (AC: #1, #2)
-  - [ ] 2.1 实现模糊匹配算法（story ID 前缀匹配 + story title/phase 子串匹配）
-  - [ ] 2.2 支持搜索类型：story ID 直达（输入 `"6.3b"` / `"story-007"` / `"007"` 等原始 ID 形式）、审批项跳转、TUI 内部视图目标（如 approvals / stories / cost / log Tab）
-  - [ ] 2.3 实时过滤：每次 Input.Changed 事件触发重新过滤
-  - [ ] 2.4 结果排序：精确匹配 > 前缀匹配 > 子串匹配；同优先级内 story 结果对齐 `sort_stories_by_status()` / `VISUAL_STATUS_SORT_ORDER`，approval 结果对齐 `_sort_approvals()`
+- [x] Task 2: 搜索引擎实现 (AC: #1, #2)
+  - [x] 2.1 实现模糊匹配算法（story ID 前缀匹配 + story title/phase 子串匹配）
+  - [x] 2.2 支持搜索类型：story ID 直达（输入 `"6.3b"` / `"story-007"` / `"007"` 等原始 ID 形式）、审批项跳转、TUI 内部视图目标（如 approvals / stories / cost / log Tab）
+  - [x] 2.3 实时过滤：每次 Input.Changed 事件触发重新过滤
+  - [x] 2.4 结果排序：精确匹配 > 前缀匹配 > 子串匹配；同优先级内 story 结果对齐 `sort_stories_by_status()` / `VISUAL_STATUS_SORT_ORDER`，approval 结果对齐 `_sort_approvals()`
 
-- [ ] Task 3: 搜索结果交互 (AC: #2, #3)
-  - [ ] 3.1 结果列表支持 ↑↓ 键盘导航
-  - [ ] 3.2 Enter 选中结果：定位到对应 story / 审批时走现有选择刷新链路（更新 `_selected_item_id` + `_selected_index`，并调用 `_sync_selected_story_id()`、`_highlight_selected()`、`_update_detail_panel()`、`_update_action_panel()`）；内部视图目标委托到现有切页动作
-  - [ ] 3.3 Enter 后自动关闭搜索面板，焦点回到左面板
-  - [ ] 3.4 空搜索状态提示（"输入 story ID 或关键词搜索"）
-  - [ ] 3.5 无匹配结果提示（"未找到匹配项"）
+- [x] Task 3: 搜索结果交互 (AC: #2, #3)
+  - [x] 3.1 结果列表支持 ↑↓ 键盘导航
+  - [x] 3.2 Enter 选中结果：定位到对应 story / 审批时走现有选择刷新链路（更新 `_selected_item_id` + `_selected_index`，并调用 `_sync_selected_story_id()`、`_highlight_selected()`、`_update_detail_panel()`、`_update_action_panel()`）；内部视图目标委托到现有切页动作
+  - [x] 3.3 Enter 后自动关闭搜索面板，焦点回到左面板
+  - [x] 3.4 空搜索状态提示（"输入 story ID 或关键词搜索"）
+  - [x] 3.5 无匹配结果提示（"未找到匹配项"）
 
-- [ ] Task 4: DashboardScreen `/` 键集成 (AC: #1, #3)
-  - [ ] 4.1 在 DashboardScreen BINDINGS 增加 `/` → `action_search`
-  - [ ] 4.2 `/` 激活搜索面板（mount overlay 或 toggle visibility）
-  - [ ] 4.3 搜索面板激活时显式短路现有全局快捷键路径：`ATOApp` 的 `1-9` Tab 绑定、`DashboardScreen.on_key()` 异常审批数字键、以及 y/n/d/Enter 等审批/导航动作，避免输入查询时误切页或误提交审批
-  - [ ] 4.4 ESC 关闭后恢复上述快捷键与原焦点上下文
-  - [ ] 4.5 确保 6.4 详情页模式下 `/` 也可用（先返回主屏再搜索，或直接覆盖搜索）
+- [x] Task 4: DashboardScreen `/` 键集成 (AC: #1, #3)
+  - [x] 4.1 在 DashboardScreen BINDINGS 增加 `/` → `action_search`
+  - [x] 4.2 `/` 激活搜索面板（mount overlay 或 toggle visibility）
+  - [x] 4.3 搜索面板激活时显式短路现有全局快捷键路径：`ATOApp` 的 `1-9` Tab 绑定、`DashboardScreen.on_key()` 异常审批数字键、以及 y/n/d/Enter 等审批/导航动作，避免输入查询时误切页或误提交审批
+  - [x] 4.4 ESC 关闭后恢复上述快捷键与原焦点上下文
+  - [x] 4.5 确保 6.4 详情页模式下 `/` 也可用（先返回主屏再搜索，或直接覆盖搜索）
 
-- [ ] Task 5: 成本 Tab 内容完善 (AC: #4)
-  - [ ] 5.1 实现 [3]成本 Tab 内容：按 story 聚合的成本表（story ID + 总成本 + 调用次数），优先复用现有 `get_cost_by_story()` helper
-  - [ ] 5.2 底部显示今日总成本和累计总成本
-  - [ ] 5.3 在 `ATOApp._load_data()` 中补充 story 级成本聚合/调用次数快照，并继续复用 `_story_costs` 给现有列表/详情视图
+- [x] Task 5: 成本 Tab 内容完善 (AC: #4)
+  - [x] 5.1 实现 [3]成本 Tab 内容：按 story 聚合的成本表（story ID + 总成本 + 调用次数），优先复用现有 `get_cost_by_story()` helper
+  - [x] 5.2 底部显示今日总成本和累计总成本
+  - [x] 5.3 在 `ATOApp._load_data()` 中补充 story 级成本聚合/调用次数快照，并继续复用 `_story_costs` 给现有列表/详情视图
 
-- [ ] Task 6: 日志 Tab 内容完善 (AC: #4)
-  - [ ] 6.1 实现 [4]日志 Tab 内容：最近事件列表（基于当前 schema 中真实存在的 `tasks` + `approvals` 数据源组合，不依赖不存在的 `event_log` 表）
-  - [ ] 6.2 显示格式：时间戳 + 事件类型 + story ID + 摘要
-  - [ ] 6.3 自动滚动到最新事件
+- [x] Task 6: 日志 Tab 内容完善 (AC: #4)
+  - [x] 6.1 实现 [4]日志 Tab 内容：最近事件列表（基于当前 schema 中真实存在的 `tasks` + `approvals` 数据源组合，不依赖不存在的 `event_log` 表）
+  - [x] 6.2 显示格式：时间戳 + 事件类型 + story ID + 摘要
+  - [x] 6.3 自动滚动到最新事件
 
-- [ ] Task 7: 响应式布局完善 (AC: #6)
-  - [ ] 7.1 搜索面板在 three-panel 模式下作为顶部 overlay
-  - [ ] 7.2 搜索面板在 tabbed 模式下作为全宽 overlay
-  - [ ] 7.3 搜索面板宽度适配终端宽度（不超过可用宽度）
-  - [ ] 7.4 resize 过程中搜索状态保持
+- [x] Task 7: 响应式布局完善 (AC: #6)
+  - [x] 7.1 搜索面板在 three-panel 模式下作为顶部 overlay
+  - [x] 7.2 搜索面板在 tabbed 模式下作为全宽 overlay
+  - [x] 7.3 搜索面板宽度适配终端宽度（不超过可用宽度）
+  - [x] 7.4 resize 过程中搜索状态保持
 
-- [ ] Task 8: TCSS 样式 (AC: #1, #4, #6)
-  - [ ] 8.1 SearchPanel 样式（overlay 背景 + 搜索框 + 结果列表）
-  - [ ] 8.2 搜索结果项样式（选中高亮 + 类型图标）
-  - [ ] 8.3 成本 Tab / 日志 Tab 内容样式
-  - [ ] 8.4 搜索面板在不同断点下的样式适配
+- [x] Task 8: TCSS 样式 (AC: #1, #4, #6)
+  - [x] 8.1 SearchPanel 样式（overlay 背景 + 搜索框 + 结果列表）
+  - [x] 8.2 搜索结果项样式（选中高亮 + 类型图标）
+  - [x] 8.3 成本 Tab / 日志 Tab 内容样式
+  - [x] 8.4 搜索面板在不同断点下的样式适配
 
-- [ ] Task 9: widgets 模块导出
-  - [ ] 9.1 在 `src/ato/tui/widgets/__init__.py` 导出 SearchPanel
+- [x] Task 9: widgets 模块导出
+  - [x] 9.1 在 `src/ato/tui/widgets/__init__.py` 导出 SearchPanel
 
-- [ ] Task 10: 单元测试
-  - [ ] 10.1 SearchPanel 渲染测试（搜索框 + 结果列表）
-  - [ ] 10.2 模糊匹配算法测试（精确匹配、前缀匹配、子串匹配、无匹配）
-  - [ ] 10.3 结果排序测试（匹配优先级 + 现有 visual status / approval 排序语义）
-  - [ ] 10.4 成本 Tab 内容渲染测试
-  - [ ] 10.5 日志 Tab 内容渲染测试
+- [x] Task 10: 单元测试
+  - [x] 10.1 SearchPanel 渲染测试（搜索框 + 结果列表）
+  - [x] 10.2 模糊匹配算法测试（精确匹配、前缀匹配、子串匹配、无匹配）
+  - [x] 10.3 结果排序测试（匹配优先级 + 现有 visual status / approval 排序语义）
+  - [x] 10.4 成本 Tab 内容渲染测试
+  - [x] 10.5 日志 Tab 内容渲染测试
 
-- [ ] Task 11: 集成测试
-  - [ ] 11.1 `/` 键激活搜索面板
-  - [ ] 11.2 输入搜索词 → 结果实时过滤
-  - [ ] 11.3 搜索输入中的 `1-9` / `y` / `n` / `d` 不触发 Tab 切换或审批提交
-  - [ ] 11.4 Enter 跳转到 story / 审批 / 目标视图 + 面板关闭
-  - [ ] 11.5 ESC 取消搜索 + 焦点恢复
-  - [ ] 11.6 搜索面板在 three-panel 和 tabbed 模式下均可用
-  - [ ] 11.7 成本 Tab 数据正确显示
-  - [ ] 11.8 日志 Tab 数据正确显示
-  - [ ] 11.9 全量回归通过
+- [x] Task 11: 集成测试
+  - [x] 11.1 `/` 键激活搜索面板
+  - [x] 11.2 输入搜索词 → 结果实时过滤
+  - [x] 11.3 搜索输入中的 `1-9` / `y` / `n` / `d` 不触发 Tab 切换或审批提交
+  - [x] 11.4 Enter 跳转到 story / 审批 / 目标视图 + 面板关闭
+  - [x] 11.5 ESC 取消搜索 + 焦点恢复
+  - [x] 11.6 搜索面板在 three-panel 和 tabbed 模式下均可用
+  - [x] 11.7 成本 Tab 数据正确显示
+  - [x] 11.8 日志 Tab 数据正确显示
+  - [x] 11.9 全量回归通过
 
 ## Dev Notes
 
@@ -324,16 +324,46 @@ def fuzzy_match(query: str, items: list[SearchableItem]) -> list[SearchResult]:
 
 ## Change Log
 
+- 2026-03-28: Story 6.5 实现完成 — SearchPanel 搜索面板 + 模糊匹配 + 成本 Tab + 日志 Tab + 响应式 + 40 个新测试（28 单元 + 12 集成），1399 全量测试通过
 - 2026-03-28: `validate-create-story` 修订 —— 将“命令搜索/执行”收敛为当前 TUI 可支持的内部导航目标；补充 `search_active` 显式门控以避免与 `ATOApp` / `DashboardScreen` 现有全局按键冲突；将成本 Tab 数据源对齐到现有 `get_cost_by_story()` helper；移除不存在的 `event_log` 路径；把搜索结果排序与跳转流程对齐到当前 selection / status 排序合同；补回模板 validation note 并去除易漂移的精确测试总数
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+- SearchPanel Input 焦点窃取问题：SearchPanel 在 `display: none` 时其 Input 子组件仍被 Textual 自动聚焦，导致 DashboardScreen 的 `/` binding 无法触发。解决方案：on_mount 中显式 `panel.disabled = True`，open/close 时 toggle disabled 状态。
+- cost_log 表 schema：`tasks` 表无 `created_at` 列，日志 Tab 查询改用 `COALESCE(completed_at, started_at)`。
+- Textual binding key name：`/` 的 binding key 是 `"/"` 而非 `"slash"`（printable characters 直接使用字符本身）。
+
 ### Completion Notes List
 
+- ✅ Task 1: 创建 SearchPanel widget（Input + OptionList），dock:top overlay 模式，display toggle 显示/隐藏
+- ✅ Task 2: 实现 fuzzy_match() 算法——精确(0) > 前缀(1) > 子串(2)，支持 story ID/审批/Tab 目标搜索
+- ✅ Task 3: ↑↓ 导航 OptionList，Enter 选择发 Selected 消息，ESC 发 Dismissed 消息，空状态/无匹配提示
+- ✅ Task 4: DashboardScreen `"/"` binding → action_search，`_search_active` 门控所有现有快捷键（y/n/d/↑↓/1-9/on_key），ATOApp.action_switch_tab 也检查 search_active
+- ✅ Task 5: 成本 Tab 改为 Rich.Text 格式化表格（story ID + 调用次数 + 累计成本），复用 get_cost_by_story() helper，底部今日/累计总成本
+- ✅ Task 6: 日志 Tab 合并 tasks + approvals 事件流（UNION 两查询 → Python 合并排序），时间戳 + 图标 + story ID + 摘要
+- ✅ Task 7: SearchPanel dock:top 在 three-panel/tabbed 模式下均可用，CSS width:100% 适配终端宽度，resize 时 display 状态保持
+- ✅ Task 8: TCSS 增加 SearchPanel overlay 样式（$surface 背景 + $accent 边框）、搜索结果高亮、成本/日志 Tab padding
+- ✅ Task 9: widgets/__init__.py 导出 SearchPanel
+- ✅ Task 10: 28 个单元测试（19 个 fuzzy_match + 9 个 SearchPanel widget）
+- ✅ Task 11: 12 个集成测试覆盖所有 AC（/ 激活、过滤、Enter 跳转、ESC 关闭、键冲突隔离、成本/日志 Tab、双模式、回归安全）
+- 全量回归：1399 tests passed, 0 failed
+
 ### File List
+
+**新增文件：**
+- `src/ato/tui/widgets/search_panel.py` — SearchPanel Widget + fuzzy_match 算法 + SearchableItem/SearchResult 数据模型
+- `tests/unit/test_fuzzy_match.py` — 模糊匹配算法单元测试（19 个）
+- `tests/unit/test_search_panel.py` — SearchPanel Widget 单元测试（9 个）
+- `tests/integration/test_tui_search.py` — 搜索面板集成测试（12 个）
+
+**修改文件：**
+- `src/ato/tui/dashboard.py` — `/` 键绑定、SearchPanel 集成、search_active 门控、搜索结果跳转、成本 Tab 内容、日志 Tab 内容
+- `src/ato/tui/app.py` — search_active 门控 action_switch_tab、_load_data 增加 cost_by_story/call_count/total_cost/recent_events 数据加载
+- `src/ato/tui/app.tcss` — SearchPanel overlay 样式、搜索结果高亮、成本/日志 Tab 样式
+- `src/ato/tui/widgets/__init__.py` — 导出 SearchPanel

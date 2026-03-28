@@ -41,6 +41,7 @@ from ato.tui.theme import (
 from ato.tui.widgets.approval_card import ApprovalCard
 from ato.tui.widgets.exception_approval_panel import ExceptionApprovalPanel
 from ato.tui.widgets.heartbeat_indicator import HeartbeatIndicator
+from ato.tui.widgets.search_panel import SearchPanel
 from ato.tui.widgets.story_status_line import StoryStatusLine, _format_elapsed
 
 
@@ -66,6 +67,7 @@ class DashboardScreen(Widget):
     DEFAULT_CSS = ""
 
     BINDINGS: ClassVar[list[BindingType]] = [
+        ("/", "search", "搜索"),
         ("up", "select_prev", "上移"),
         ("down", "select_next", "下移"),
         ("d", "toggle_detail", "展开/折叠"),
@@ -112,8 +114,17 @@ class DashboardScreen(Widget):
         self._rebuild_gen_approvals_tab: int = 0
         # 每个模式最近聚焦的 widget id，用于切换时恢复焦点
         self._saved_focus: dict[str, str | None] = {}
+        # 搜索面板状态
+        self._search_active: bool = False
+        self._pre_search_widget: Widget | None = None
+        # 成本 Tab 数据
+        self._story_call_counts: dict[str, int] = {}
+        self._total_cost_usd: float = 0.0
+        # 日志 Tab 数据
+        self._recent_events: list[dict[str, str]] = []
 
     def compose(self) -> ComposeResult:
+        yield SearchPanel(id="search-panel")
         with ContentSwitcher(initial="three-panel"):
             # 三面板模式
             with Horizontal(id="three-panel", classes="three-panel-container"):
@@ -161,6 +172,13 @@ class DashboardScreen(Widget):
     def on_mount(self) -> None:
         """初始化时同步焦点链状态。"""
         self._sync_focus_chain("three-panel")
+        # SearchPanel 初始隐藏 + disabled，防止 Input 窃取焦点
+        try:
+            panel = self.query_one("#search-panel", SearchPanel)
+            panel.display = False
+            panel.disabled = True
+        except Exception:
+            pass
 
     def set_layout_mode(self, mode: str) -> None:
         """切换布局模式，保存/恢复焦点上下文。"""
@@ -257,6 +275,8 @@ class DashboardScreen(Widget):
 
     def action_select_prev(self) -> None:
         """左面板获焦时上移选中项。"""
+        if self._search_active:
+            return
         if not self._is_left_panel_focused():
             return
         if self._sorted_item_ids and self._selected_index > 0:
@@ -269,6 +289,8 @@ class DashboardScreen(Widget):
 
     def action_select_next(self) -> None:
         """左面板获焦时下移选中项。"""
+        if self._search_active:
+            return
         if not self._is_left_panel_focused():
             return
         if self._sorted_item_ids and self._selected_index < len(self._sorted_item_ids) - 1:
@@ -292,10 +314,14 @@ class DashboardScreen(Widget):
 
     def action_approve(self) -> None:
         """y 键：对当前选中的二选一审批提交 approve 方向决策。"""
+        if self._search_active:
+            return
         self._submit_decision("y")
 
     def action_reject(self) -> None:
         """n 键：对当前选中的二选一审批提交 reject 方向决策。"""
+        if self._search_active:
+            return
         self._submit_decision("n")
 
     def _submit_decision(self, key: str) -> None:
@@ -432,7 +458,10 @@ class DashboardScreen(Widget):
 
         仅在 three-panel 模式下、选中多选异常审批时生效。
         tabbed 模式下数字键由 ATOApp.action_switch_tab() 处理。
+        搜索面板激活时所有快捷键短路。
         """
+        if self._search_active:
+            return
         if event.key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
             # 检查是否在 three-panel 模式
             app = self.app
@@ -460,6 +489,8 @@ class DashboardScreen(Widget):
 
     def action_toggle_detail(self) -> None:
         """d 键：切换审批展开/折叠态。"""
+        if self._search_active:
+            return
         if not self._selected_item_id or not self._selected_item_id.startswith("approval:"):
             return
         aid = self._selected_item_id.removeprefix("approval:")
@@ -492,6 +523,123 @@ class DashboardScreen(Widget):
             return False
 
     # ------------------------------------------------------------------
+    # 搜索面板 (Story 6.5)
+    # ------------------------------------------------------------------
+
+    def action_search(self) -> None:
+        """``/`` 键：激活搜索面板。"""
+        if self._search_active:
+            return
+        self._search_active = True
+        # 保存当前焦点 widget 引用（而非 id，因为部分 widget 如 ContentTabs 无 id）
+        app = self.app
+        self._pre_search_widget = app.focused if app else None
+        # 刷新搜索面板数据并打开
+        self._refresh_search_items()
+        try:
+            panel = self.query_one("#search-panel", SearchPanel)
+            panel.disabled = False
+            panel.open()
+        except Exception:
+            self._search_active = False
+
+    def _close_search(self) -> None:
+        """关闭搜索面板并恢复焦点。"""
+        self._search_active = False
+        try:
+            panel = self.query_one("#search-panel", SearchPanel)
+            panel.close()
+            panel.disabled = True
+        except Exception:
+            pass
+        # 恢复焦点
+        app = self.app
+        if app and self._pre_search_widget is not None:
+            try:
+                if self._pre_search_widget.focusable:
+                    app.set_focus(self._pre_search_widget)
+                    self._pre_search_widget = None
+                    return
+            except Exception:
+                pass
+            self._pre_search_widget = None
+        # 回退：根据当前布局模式选择焦点目标
+        if app:
+            from ato.tui.app import ATOApp
+
+            layout = ""
+            if isinstance(app, ATOApp):
+                layout = app.layout_mode
+            if layout == "tabbed":
+                # tabbed 模式下聚焦 TabbedContent 内第一个可聚焦子控件
+                for tc in self.query(TabbedContent):
+                    for child in tc.query("*"):
+                        if child.focusable:
+                            app.set_focus(child)
+                            return
+            else:
+                try:
+                    left = self.query_one("#panel-left")
+                    if left.focusable:
+                        app.set_focus(left)
+                except Exception:
+                    pass
+
+    def on_search_panel_selected(self, message: SearchPanel.Selected) -> None:
+        """处理搜索结果选中——跳转到对应 story / 审批 / Tab。"""
+        self._close_search()
+
+        if message.item_type == "story":
+            item_id = f"story:{message.item_id}"
+            if item_id in self._sorted_item_ids:
+                self._selected_index = self._sorted_item_ids.index(item_id)
+                self._selected_item_id = item_id
+                self._sync_selected_story_id()
+                self._highlight_selected()
+                self._update_detail_panel()
+                self._update_action_panel()
+
+        elif message.item_type == "approval":
+            item_id = f"approval:{message.item_id}"
+            if item_id in self._sorted_item_ids:
+                self._selected_index = self._sorted_item_ids.index(item_id)
+                self._selected_item_id = item_id
+                self._sync_selected_story_id()
+                self._highlight_selected()
+                self._update_detail_panel()
+                self._update_action_panel()
+
+        elif message.item_type == "tab":
+            # tabbed 模式：直接激活目标 Tab（不走 action_switch_tab 避免 _handle_option_key）
+            # three-panel 模式：Tab 概念不存在于独立面板，保持布局不变
+            from ato.tui.app import ATOApp
+
+            app = self.app
+            if isinstance(app, ATOApp) and app.layout_mode == "tabbed":
+                tab_num = int(message.item_id)
+                try:
+                    tabbed = self.query_one(TabbedContent)
+                    tabs = list(tabbed.query("TabPane"))
+                    if 1 <= tab_num <= len(tabs):
+                        tabbed.active = tabs[tab_num - 1].id or ""
+                except Exception:
+                    pass
+
+    def on_search_panel_dismissed(self, message: SearchPanel.Dismissed) -> None:
+        """处理搜索面板关闭（ESC）。"""
+        self._close_search()
+
+    def _refresh_search_items(self) -> None:
+        """刷新搜索面板的可搜索条目列表。"""
+        try:
+            panel = self.query_one("#search-panel", SearchPanel)
+        except Exception:
+            return
+        sorted_stories = sort_stories_by_status(self._stories)
+        sorted_approvals = self._sort_approvals(self._approval_records)
+        panel.update_items(sorted_stories, sorted_approvals)
+
+    # ------------------------------------------------------------------
     # 数据更新接口
     # ------------------------------------------------------------------
 
@@ -509,6 +657,9 @@ class DashboardScreen(Widget):
         convergent_loop_max_rounds: int | None = None,
         pending_approval_records: list[object] | None = None,
         story_findings_summary: dict[str, dict[str, int]] | None = None,
+        story_call_counts: dict[str, int] | None = None,
+        total_cost_usd: float | None = None,
+        recent_events: list[dict[str, str]] | None = None,
     ) -> None:
         """更新仪表盘数据（所有模式同步）。保持向后兼容。"""
         self._story_count = story_count
@@ -537,6 +688,12 @@ class DashboardScreen(Widget):
             self._submitted_approvals &= current_ids
         if story_findings_summary is not None:
             self._story_findings_summary = story_findings_summary
+        if story_call_counts is not None:
+            self._story_call_counts = story_call_counts
+        if total_cost_usd is not None:
+            self._total_cost_usd = total_cost_usd
+        if recent_events is not None:
+            self._recent_events = recent_events
 
         self._refresh_placeholders()
 
@@ -568,15 +725,9 @@ class DashboardScreen(Widget):
         # Tab 模式 — [1]审批 Tab
         self._update_approvals_tab()
 
-        # Tab 模式 — 其他 Tab
-        self._update_static(
-            "#tab-cost-content",
-            f"今日成本: ${self._today_cost_usd:.2f}",
-        )
-        self._update_static(
-            "#tab-log-content",
-            f"更新: {self._last_updated}",
-        )
+        # Tab 模式 — [3]成本 Tab / [4]日志 Tab
+        self._update_cost_tab()
+        self._update_log_tab()
 
         # 降级模式
         self._update_static(
@@ -1177,6 +1328,54 @@ class DashboardScreen(Widget):
                 )
             except Exception:
                 pass
+
+    def _update_cost_tab(self) -> None:
+        """更新 [3]成本 Tab 内容——按 story 聚合成本表 + 底部总计。"""
+        text = Text()
+        text.append("  Story          调用次数    累计成本\n", style=RICH_COLORS["$muted"])
+        text.append("  " + "─" * 38 + "\n", style=RICH_COLORS["$muted"])
+
+        # 按成本降序排列
+        sorted_costs = sorted(self._story_costs.items(), key=lambda x: x[1], reverse=True)
+        for sid, cost in sorted_costs:
+            count = self._story_call_counts.get(sid, 0)
+            text.append(f"  {sid:<14}", style=RICH_COLORS["$accent"])
+            text.append(f" {count:>8}", style=RICH_COLORS["$text"])
+            text.append(f"    ${cost:>8.2f}\n", style=RICH_COLORS["$text"])
+
+        if not sorted_costs:
+            text.append("  暂无成本数据\n", style=RICH_COLORS["$muted"])
+
+        text.append("  " + "─" * 38 + "\n", style=RICH_COLORS["$muted"])
+        text.append(f"  今日: ${self._today_cost_usd:.2f}", style=RICH_COLORS["$info"])
+        text.append(f"    累计: ${self._total_cost_usd:.2f}\n", style=RICH_COLORS["$accent"])
+
+        self._update_static("#tab-cost-content", text)
+
+    def _update_log_tab(self) -> None:
+        """更新 [4]日志 Tab 内容——最近事件列表。"""
+        text = Text()
+
+        if not self._recent_events:
+            text.append("  暂无事件", style=RICH_COLORS["$muted"])
+            self._update_static("#tab-log-content", text)
+            return
+
+        for event in self._recent_events:
+            event_time = event.get("event_time", "")
+            # 提取 HH:MM:SS
+            time_display = event_time[11:19] if len(event_time) >= 19 else event_time
+            event_type = event.get("event_type", "")
+            story_id = event.get("story_id", "")
+            summary = event.get("summary", "")
+
+            type_icon = "⚡" if event_type == "task" else "◆"
+            text.append(f"  {time_display}  ", style=RICH_COLORS["$muted"])
+            text.append(f"{type_icon} ", style=RICH_COLORS["$info"])
+            text.append(f"{story_id}  ", style=RICH_COLORS["$accent"])
+            text.append(f"{summary}\n", style=RICH_COLORS["$text"])
+
+        self._update_static("#tab-log-content", text)
 
     def _build_exception_panel_payload(
         self,

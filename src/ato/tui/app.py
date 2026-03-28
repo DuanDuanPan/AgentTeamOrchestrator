@@ -75,6 +75,11 @@ class ATOApp(App[None]):
         self._pending_approval_records: list[object] = []
         # Story 级 findings 摘要（Story 6.3a AC2）
         self._story_findings_summary: dict[str, dict[str, int]] = {}
+        # 成本 Tab 数据（Story 6.5）
+        self._story_call_counts: dict[str, int] = {}
+        self._total_cost_usd: float = 0.0
+        # 日志 Tab 数据（Story 6.5）
+        self._recent_events: list[dict[str, str]] = []
 
     def compose(self) -> ComposeResult:
         """骨架布局：Header + ThreeQuestionHeader + DashboardScreen + Footer。"""
@@ -132,7 +137,16 @@ class ATOApp(App[None]):
         header.set_display_mode(mode)
 
     def action_switch_tab(self, tab_number: int) -> None:
-        """数字键切换 Tab（tabbed 模式）或异常审批选择（three-panel 模式）。"""
+        """数字键切换 Tab（tabbed 模式）或异常审批选择（three-panel 模式）。
+
+        搜索面板激活时短路，避免输入数字触发切页或审批。
+        """
+        try:
+            dashboard = self.query_one(DashboardScreen)
+            if dashboard._search_active:
+                return
+        except NoMatches:
+            pass
         if self.layout_mode == "three-panel":
             # 三面板模式下委托给 DashboardScreen 处理异常审批数字键
             try:
@@ -215,12 +229,21 @@ class ATOApp(App[None]):
             story_rows = await cursor.fetchall()
             self._stories = [dict(row) for row in story_rows]
 
-            # 6. 每个 story 的累计成本
-            cursor = await db.execute(
-                "SELECT story_id, COALESCE(SUM(cost_usd), 0.0) as total_cost "
-                "FROM cost_log GROUP BY story_id"
-            )
-            self._story_costs = {str(row[0]): float(row[1]) for row in await cursor.fetchall()}
+            # 6. 每个 story 的累计成本 + 调用次数（复用 get_cost_by_story）
+            from ato.models.db import get_cost_by_story
+
+            cost_data = await get_cost_by_story(db)
+            self._story_costs = {
+                str(r["story_id"]): float(str(r["total_cost_usd"])) for r in cost_data
+            }
+            self._story_call_counts = {
+                str(r["story_id"]): int(str(r["call_count"])) for r in cost_data
+            }
+
+            # 6b. 累计总成本
+            cursor = await db.execute("SELECT COALESCE(SUM(cost_usd), 0.0) FROM cost_log")
+            total_row = await cursor.fetchone()
+            self._total_cost_usd = float(total_row[0]) if total_row else 0.0
 
             # 7. 与 story.current_phase 对齐的最新 running task started_at
             cursor = await db.execute(
@@ -247,6 +270,43 @@ class ATOApp(App[None]):
 
             # 10. Story 级 findings 摘要（Story 6.3a AC2 — QA 结果）
             self._story_findings_summary = await get_story_findings_summary(db)
+
+            # 11. 最近事件（tasks + approvals 合并，日志 Tab 用）
+            cursor = await db.execute(
+                "SELECT COALESCE(completed_at, started_at) as event_time, "
+                "'task' as event_type, story_id, "
+                "COALESCE(phase, '') || ' → ' || status as summary "
+                "FROM tasks WHERE started_at IS NOT NULL "
+                "ORDER BY event_time DESC LIMIT 50"
+            )
+            task_events = [
+                {
+                    "event_time": str(r[0] or ""),
+                    "event_type": str(r[1]),
+                    "story_id": str(r[2] or ""),
+                    "summary": str(r[3] or ""),
+                }
+                for r in await cursor.fetchall()
+            ]
+            cursor = await db.execute(
+                "SELECT COALESCE(decided_at, created_at) as event_time, "
+                "'approval' as event_type, story_id, "
+                "approval_type || ' ' || status as summary "
+                "FROM approvals "
+                "ORDER BY event_time DESC LIMIT 50"
+            )
+            approval_events = [
+                {
+                    "event_time": str(r[0] or ""),
+                    "event_type": str(r[1]),
+                    "story_id": str(r[2] or ""),
+                    "summary": str(r[3] or ""),
+                }
+                for r in await cursor.fetchall()
+            ]
+            all_events = task_events + approval_events
+            all_events.sort(key=lambda e: e["event_time"], reverse=True)
+            self._recent_events = all_events[:50]
         finally:
             await db.close()
 
@@ -272,6 +332,9 @@ class ATOApp(App[None]):
                 convergent_loop_max_rounds=self._convergent_loop_max_rounds,
                 pending_approval_records=self._pending_approval_records,
                 story_findings_summary=self._story_findings_summary,
+                story_call_counts=self._story_call_counts,
+                total_cost_usd=self._total_cost_usd,
+                recent_events=self._recent_events,
             )
         except NoMatches:
             pass  # DashboardScreen 尚未挂载

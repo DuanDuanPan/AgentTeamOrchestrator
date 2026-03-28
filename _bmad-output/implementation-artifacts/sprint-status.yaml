@@ -36,6 +36,7 @@
 
 generated: 2026-03-24
 last_updated: 2026-03-28
+# Story 6-5 started: 2026-03-28
 # Stories 6-4, 6-5 created: 2026-03-28
 # Story 6-3b done: 2026-03-27
 # Story 5-2 started: 2026-03-27
@@ -111,7 +112,7 @@ development_status:
   6-3a-standard-approval-interaction: done
   6-3b-exception-approval-multi-select: done
   6-4-story-detail-drill-navigation: ready-for-dev
-  6-5-search-panel-responsive: ready-for-dev
+  6-5-search-panel-responsive: done
   epic-6-retrospective: optional
 
   # ===== Epic 7: Growth — 多项目并行与系统智能 (Phase 2) =====
