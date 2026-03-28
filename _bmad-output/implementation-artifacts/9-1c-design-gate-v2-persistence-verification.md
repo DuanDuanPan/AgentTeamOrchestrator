@@ -1,6 +1,6 @@
 # Story 9.1c: Design Gate V2 与持久化验证
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- Depends on: Story 9.1a, Story 9.1b -->
@@ -82,26 +82,26 @@ And 旧的宽松通过测试被移除或重写
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 重构 design gate 结果模型 (AC: #1, #2, #3)
-  - [ ] 1.1 扩展 `DesignGateResult`
-  - [ ] 1.2 增加 `failure_codes` / `missing_files` / 内容校验字段
-  - [ ] 1.3 保持 structlog 事件可追踪
+- [x] Task 1: 重构 design gate 结果模型 (AC: #1, #2, #3)
+  - [x] 1.1 扩展 `DesignGateResult`
+  - [x] 1.2 增加 `failure_codes` / `missing_files` / 内容校验字段
+  - [x] 1.3 保持 structlog 事件可追踪
 
-- [ ] Task 2: 实现严格 gate 逻辑 (AC: #1, #2)
-  - [ ] 2.1 在 `src/ato/core.py::check_design_gate()` 中读取核心工件
-  - [ ] 2.2 验证 `.pen` JSON 结构
-  - [ ] 2.3 验证 save-report 字段
-  - [ ] 2.4 验证 PNG 导出数量
+- [x] Task 2: 实现严格 gate 逻辑 (AC: #1, #2)
+  - [x] 2.1 在 `src/ato/core.py::check_design_gate()` 中读取核心工件
+  - [x] 2.2 验证 `.pen` JSON 结构
+  - [x] 2.3 验证 save-report 字段
+  - [x] 2.4 验证 PNG 导出数量
 
-- [ ] Task 3: 对齐 core / recovery 调用路径 (AC: #4)
-  - [ ] 3.1 更新 `src/ato/recovery.py::_check_design_gate()`
-  - [ ] 3.2 更新 `src/ato/core.py` 正常 success-event 路径
-  - [ ] 3.3 将 approval payload 构建提取为共享 helper（当前分散在 core.py 和 recovery.py 两处），core 和 recovery 都调用它
+- [x] Task 3: 对齐 core / recovery 调用路径 (AC: #4)
+  - [x] 3.1 更新 `src/ato/recovery.py::_check_design_gate()`
+  - [x] 3.2 更新 `src/ato/core.py` 正常 success-event 路径
+  - [x] 3.3 将 approval payload 构建提取为共享 helper（当前分散在 core.py 和 recovery.py 两处），core 和 recovery 都调用它
 
-- [ ] Task 4: 重写相关测试 (AC: #5)
-  - [ ] 4.1 更新 `tests/unit/test_core.py`
-  - [ ] 4.2 如有需要补 `tests/unit/test_recovery.py`
-  - [ ] 4.3 删除或重写旧的宽松通过断言
+- [x] Task 4: 重写相关测试 (AC: #5)
+  - [x] 4.1 更新 `tests/unit/test_core.py`
+  - [x] 4.2 recovery 路径已通过共享 helper 覆盖，无需独立测试
+  - [x] 4.3 删除或重写旧的宽松通过断言
 
 ## Dev Notes
 
@@ -140,10 +140,28 @@ And 旧的宽松通过测试被移除或重写
 
 ### Agent Model Used
 
-待 dev-story 填写
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
+无调试问题。全部 25 个 design gate 测试一次通过。
+
 ### Completion Notes List
 
+- ✅ `DesignGateResult` 扩展为 V2：新增 `failure_codes`, `missing_files`, `ux_spec_exists`, `exports_png_count`, `save_report_summary` 字段
+- ✅ `check_design_gate()` 升级为严格 gate：不再使用 artifact_count > 0 作为通过条件，改为逐项检查 6 个核心工件（story spec / ux-spec.md / prototype.pen / snapshot.json / save-report.json / exports/*.png）
+- ✅ 每个检查项失败时生成具体 failure_code（如 `PEN_MISSING`, `UX_SPEC_MISSING`, `EXPORTS_PNG_MISSING`）和 missing_files 路径
+- ✅ save-report 存在时无论验证是否通过都提取关键状态摘要（json_parse_verified / reopen_verified / children_count）供 payload 使用
+- ✅ 新增 `build_design_gate_payload()` 共享 helper，core.py 和 recovery.py 都调用它构建 approval payload，结构一致
+- ✅ structlog 事件增加 `ux_spec_exists`, `exports_png_count`, `failure_codes` 字段
+- ✅ 测试从 20 个重写为 25 个，覆盖 AC#5 要求的全部通过/失败矩阵 + payload 结构测试
+
+### Change Log
+
+- 2026-03-28: Story 9.1c 完成 — Design Gate V2 严格校验 + 结构化失败 payload + core/recovery 共享 helper
+
 ### File List
+
+- src/ato/core.py (modified) — DesignGateResult V2 + check_design_gate 严格逻辑 + build_design_gate_payload 共享 helper
+- src/ato/recovery.py (modified) — _check_design_gate 调用共享 payload helper
+- tests/unit/test_core.py (modified) — TestDesignGate 重写为 25 个 V2 测试

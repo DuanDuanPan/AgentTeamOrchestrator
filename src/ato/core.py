@@ -85,16 +85,26 @@ def derive_project_root(db_path: Path) -> Path:
 
 @dataclass(frozen=True)
 class DesignGateResult:
-    """Design gate 检查结果。"""
+    """Design gate V2 检查结果 (Story 9.1c)。
+
+    严格校验核心工件的存在性与内容完整性。
+    ``failure_codes`` 和 ``missing_files`` 为可操作的诊断信息，
+    供 approval payload 和 TUI/CLI 直接展示。
+    """
 
     passed: bool
     story_spec_exists: bool
     artifact_count: int
     artifact_dir: str
     reason: str
+    failure_codes: tuple[str, ...] = ()
+    missing_files: tuple[str, ...] = ()
     pen_integrity_ok: bool = False
     snapshot_valid: bool = False
     save_report_valid: bool = False
+    ux_spec_exists: bool = False
+    exports_png_count: int = 0
+    save_report_summary: dict[str, object] | None = None
 
 
 async def check_design_gate(
@@ -102,28 +112,30 @@ async def check_design_gate(
     task_id: str,
     project_root: Path,
 ) -> DesignGateResult:
-    """验证 designing 阶段产出物的存在性与完整性。
+    """验证 designing 阶段产出物的存在性与内容完整性 (Gate V2, Story 9.1c)。
 
-    使用 ``design_artifacts`` helper 推导路径，按已知核心工件名匹配。
+    严格核心工件校验——全部满足才 pass:
+    1. Story spec 位于 ``{ARTIFACTS_REL}/{story_id}.md``
+    2. ``ux-spec.md`` 必须存在 (AC#1)
+    3. ``prototype.pen`` 必须存在且 JSON 合法、含 ``version`` 和 ``children`` (AC#1, AC#2)
+    4. ``prototype.snapshot.json`` 必须存在且为合法 JSON (AC#1)
+    5. ``prototype.save-report.json`` 必须存在且 ``json_parse_verified=true`` +
+       ``reopen_verified=true`` (AC#1, AC#2)
+    6. ``exports/`` 下至少存在 1 个 ``.png`` (AC#1)
 
-    检查条件（全部满足才 pass）:
-    1. Story spec 仍位于 ``{ARTIFACTS_REL}/{story_id}.md``
-    2. ``prototype.pen`` 必须存在且 JSON 合法、含必需顶层字段 (AC#1, AC#4)
-    3. ``prototype.snapshot.json`` 必须存在且为合法 JSON (AC#3)
-    4. ``prototype.save-report.json`` 必须存在且验证标志均为 True (AC#3, AC#4)
-
-    ``artifact_count`` 为信息性统计（含 ux-spec.md / exports 等），
-    不作为独立通过条件。
+    不再使用"目录中任意文件数量 > 0"作为通过条件。
 
     Returns:
-        DesignGateResult 包含 passed 状态和具体失败原因。
+        DesignGateResult 包含 passed 状态、failure_codes、missing_files 和诊断信息。
     """
+    import json as _json
+
     from ato.design_artifacts import (
         ARTIFACTS_REL,
         DESIGN_ARTIFACT_NAMES,
+        SAVE_REPORT_REQUIRED_KEYS,
         derive_design_artifact_paths,
         verify_pen_integrity,
-        verify_save_report,
         verify_snapshot,
     )
 
@@ -134,8 +146,9 @@ async def check_design_gate(
     story_spec_exists = story_spec.is_file()
 
     ux_dir = paths["ux_dir"]
-    artifact_count = 0
 
+    # --- 信息性统计（不作为通过条件）---
+    artifact_count = 0
     if ux_dir.is_dir():
         for name in DESIGN_ARTIFACT_NAMES:
             if name == "exports":
@@ -148,43 +161,103 @@ async def check_design_gate(
                 if (ux_dir / name).is_file():
                     artifact_count += 1
 
-    # --- 强制持久化校验 (Story 9.1b AC#1, AC#3, AC#4) ---
-    # 三个核心产出物均为强制前置条件，不存在 = 校验未通过。
+    # --- 严格 gate 校验 (Story 9.1c) ---
+    failure_codes: list[str] = []
+    missing_files: list[str] = []
+
+    # 1. Story spec
+    if not story_spec_exists:
+        failure_codes.append("STORY_SPEC_MISSING")
+        missing_files.append(str(story_spec))
+
+    # 2. ux-spec.md (AC#1)
+    ux_spec_path = paths["ux_spec"]
+    ux_spec_exists = ux_spec_path.is_file()
+    if not ux_spec_exists:
+        failure_codes.append("UX_SPEC_MISSING")
+        missing_files.append(str(ux_spec_path))
+
+    # 3. prototype.pen (AC#1, AC#2)
     pen_path = paths["prototype_pen"]
     pen_integrity_ok = False
-    if pen_path.is_file():
+    if not pen_path.is_file():
+        failure_codes.append("PEN_MISSING")
+        missing_files.append(str(pen_path))
+    else:
         pen_result = verify_pen_integrity(pen_path)
-        pen_integrity_ok = pen_result.json_parse_ok and pen_result.required_keys_present
+        if not pen_result.json_parse_ok:
+            failure_codes.append("PEN_INVALID_JSON")
+        elif not pen_result.required_keys_present:
+            failure_codes.append("PEN_MISSING_KEYS")
+        else:
+            pen_integrity_ok = True
 
+    # 4. prototype.snapshot.json (AC#1)
     snapshot_path = paths["snapshot_json"]
     snapshot_valid = verify_snapshot(snapshot_path)
+    if not snapshot_path.is_file():
+        failure_codes.append("SNAPSHOT_MISSING")
+        missing_files.append(str(snapshot_path))
+    elif not snapshot_valid:
+        failure_codes.append("SNAPSHOT_INVALID")
 
+    # 5. prototype.save-report.json (AC#1, AC#2)
     save_report_path = paths["save_report_json"]
     save_report_valid = False
-    if save_report_path.is_file():
-        save_report_valid = verify_save_report(save_report_path)
-
-    passed = (
-        story_spec_exists and pen_integrity_ok and snapshot_valid and save_report_valid
-    )
-
-    # Reason: 按优先级报告最重要的失败原因
-    if passed:
-        reason = "all checks passed"
-    elif not story_spec_exists:
-        reason = f"Story spec missing: {story_spec}"
-    elif not pen_path.is_file():
-        reason = f"prototype.pen not found: {pen_path}"
-    elif not pen_integrity_ok:
-        reason = f"prototype.pen JSON integrity check failed: {pen_path}"
-    elif not snapshot_valid:
-        reason = f"prototype.snapshot.json missing or invalid: {snapshot_path}"
-    elif not save_report_path.is_file():
-        reason = f"prototype.save-report.json not found: {save_report_path}"
-    elif not save_report_valid:
-        reason = f"save-report verification flags indicate failure: {save_report_path}"
+    save_report_summary: dict[str, object] | None = None
+    if not save_report_path.is_file():
+        failure_codes.append("SAVE_REPORT_MISSING")
+        missing_files.append(str(save_report_path))
     else:
-        reason = "unknown failure"
+        # 细分校验：坏 JSON / 非 dict / 缺键 / 布尔位失败 各给独立 failure_code (AC#3)
+        _sr_raw: object = None
+        _sr_parsed = False
+        try:
+            with open(save_report_path, encoding="utf-8") as _f:
+                _sr_raw = _json.load(_f)
+            _sr_parsed = True
+        except (ValueError, OSError) as _exc:
+            failure_codes.append("SAVE_REPORT_INVALID_JSON")
+            save_report_summary = {"parse_error": str(_exc)}
+
+        if _sr_parsed and not isinstance(_sr_raw, dict):
+            failure_codes.append("SAVE_REPORT_INVALID_JSON")
+            save_report_summary = {
+                "parse_error": f"Root is {type(_sr_raw).__name__}, expected object",
+            }
+        elif _sr_parsed and isinstance(_sr_raw, dict):
+            save_report_summary = {
+                "json_parse_verified": _sr_raw.get("json_parse_verified"),
+                "reopen_verified": _sr_raw.get("reopen_verified"),
+                "children_count": _sr_raw.get("children_count"),
+                "exported_png_count": _sr_raw.get("exported_png_count"),
+            }
+            if not SAVE_REPORT_REQUIRED_KEYS.issubset(_sr_raw.keys()):
+                failure_codes.append("SAVE_REPORT_MISSING_KEYS")
+            elif (
+                _sr_raw.get("json_parse_verified") is not True
+                or _sr_raw.get("reopen_verified") is not True
+            ):
+                failure_codes.append("SAVE_REPORT_VERIFICATION_FAILED")
+            else:
+                save_report_valid = True
+
+    # 6. exports/*.png >= 1 (AC#1)
+    exports_dir = paths["exports_dir"]
+    exports_png_count = 0
+    if exports_dir.is_dir():
+        for p in exports_dir.iterdir():
+            if p.is_file() and p.suffix == ".png":
+                exports_png_count += 1
+    if exports_png_count == 0:
+        failure_codes.append("EXPORTS_PNG_MISSING")
+        if not exports_dir.is_dir():
+            missing_files.append(str(exports_dir))
+
+    # --- 通过条件：所有核心工件均通过 ---
+    passed = len(failure_codes) == 0
+
+    reason = "all checks passed" if passed else "; ".join(failure_codes)
 
     logger.info(
         "design_gate_check",
@@ -197,6 +270,9 @@ async def check_design_gate(
         pen_integrity_ok=pen_integrity_ok,
         snapshot_valid=snapshot_valid,
         save_report_valid=save_report_valid,
+        ux_spec_exists=ux_spec_exists,
+        exports_png_count=exports_png_count,
+        failure_codes=failure_codes,
         result="pass" if passed else "fail",
     )
 
@@ -206,10 +282,35 @@ async def check_design_gate(
         artifact_count=artifact_count,
         artifact_dir=str(ux_dir),
         reason=reason,
+        failure_codes=tuple(failure_codes),
+        missing_files=tuple(missing_files),
         pen_integrity_ok=pen_integrity_ok,
         snapshot_valid=snapshot_valid,
         save_report_valid=save_report_valid,
+        ux_spec_exists=ux_spec_exists,
+        exports_png_count=exports_png_count,
+        save_report_summary=save_report_summary,
     )
+
+
+def build_design_gate_payload(
+    task_id: str,
+    gate_result: DesignGateResult,
+) -> dict[str, object]:
+    """构建 design gate 失败时的 approval payload (Story 9.1c AC#3, AC#4)。
+
+    core 和 recovery 共享此 helper，确保 payload 结构不分叉。
+    """
+    payload: dict[str, object] = {
+        "task_id": task_id,
+        "artifact_dir": gate_result.artifact_dir,
+        "failure_codes": list(gate_result.failure_codes),
+        "missing_files": list(gate_result.missing_files),
+        "reason": f"Design gate failed: {gate_result.reason}",
+    }
+    if gate_result.save_report_summary is not None:
+        payload["save_report_summary"] = gate_result.save_report_summary
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1138,19 +1239,14 @@ class Orchestrator:
                             from ato.approval_helpers import create_approval as _ca
                             from ato.nudge import send_user_notification as _sun
 
+                            payload = build_design_gate_payload(task.task_id, gate_result)
                             db_gate = await get_connection(self._db_path)
                             try:
                                 await _ca(
                                     db_gate,
                                     story_id=task.story_id,
                                     approval_type="needs_human_review",
-                                    payload_dict={
-                                        "task_id": task.task_id,
-                                        "artifact_dir": gate_result.artifact_dir,
-                                        "artifact_count": gate_result.artifact_count,
-                                        "story_spec_exists": gate_result.story_spec_exists,
-                                        "reason": (f"Design gate failed: {gate_result.reason}"),
-                                    },
+                                    payload_dict=payload,
                                 )
                             finally:
                                 await db_gate.close()

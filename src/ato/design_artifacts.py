@@ -32,8 +32,8 @@ DESIGN_ARTIFACT_NAMES: frozenset[str] = frozenset(
     }
 )
 
-_PEN_REQUIRED_KEYS: frozenset[str] = frozenset({"version", "children", "variables"})
-""".pen 文件必须包含的顶层键。"""
+_PEN_REQUIRED_KEYS: frozenset[str] = frozenset({"version", "children"})
+""".pen 文件必须包含的顶层键 (AC#2: 至少含 version 与 children)。"""
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +292,14 @@ def verify_pen_integrity(pen_path: Path) -> PenVerifyResult:
             error=str(exc),
         )
 
+    if not isinstance(data, dict):
+        return PenVerifyResult(
+            json_parse_ok=True,
+            required_keys_present=False,
+            children_count=0,
+            error=f"Root is {type(data).__name__}, expected dict",
+        )
+
     required_present = _PEN_REQUIRED_KEYS.issubset(data.keys())
     children_count = len(data.get("children", []))
 
@@ -361,6 +369,9 @@ def verify_save_report(report_path: Path) -> bool:
         with open(report_path, encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(data, dict):
         return False
 
     if not SAVE_REPORT_REQUIRED_KEYS.issubset(data.keys()):

@@ -36,6 +36,8 @@
 
 generated: 2026-03-24
 last_updated: 2026-03-28
+# Story 9-1c review: 2026-03-28
+# Story 9-1f created (validating artifact-file fallback): 2026-03-28
 # Story 9-1e created (correct-course): 2026-03-28
 # Story 9-1b review: 2026-03-28
 # Story 9-1a done: 2026-03-28
@@ -145,9 +147,10 @@ development_status:
   9-1-add-designing-phase: done
   9-1a-correct-designing-artifact-contract: done
   9-1b-designing-force-save-snapshot-chain: review
-  9-1c-design-gate-v2-persistence-verification: ready-for-dev
+  9-1c-design-gate-v2-persistence-verification: review
   9-1d-prototype-manifest-downstream-consumption: ready-for-dev
   9-1e-creating-phase-prompt-validation-feedback: ready-for-dev
+  9-1f-validating-artifact-file-fallback-parse: ready-for-dev
   9-2-workspace-concept-worktree-timing: ready-for-dev
   9-3-conditional-skip-spec-commit: ready-for-dev
   epic-9-retrospective: optional

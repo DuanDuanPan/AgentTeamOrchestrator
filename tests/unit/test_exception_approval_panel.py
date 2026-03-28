@@ -166,6 +166,31 @@ def test_format_context_needs_human_review_includes_task_id() -> None:
     assert "skill_type: code_review" in impact
 
 
+def test_format_context_needs_human_review_design_gate_payload() -> None:
+    """needs_human_review 收到 design gate payload 时展示 failure_codes/missing_files/reason。"""
+    payload = {
+        "task_id": "t-99",
+        "artifact_dir": "/tmp/proj/s1-ux",
+        "failure_codes": ["PEN_MISSING", "EXPORTS_PNG_MISSING"],
+        "missing_files": ["/tmp/proj/s1-ux/prototype.pen"],
+        "reason": "Design gate failed: PEN_MISSING; EXPORTS_PNG_MISSING",
+        "save_report_summary": {
+            "json_parse_verified": True,
+            "reopen_verified": False,
+        },
+    }
+    what, impact = get_exception_context("needs_human_review", payload)
+    assert "Design gate" in what
+    assert "BMAD" not in what
+    assert "task_id: t-99" in impact
+    assert "PEN_MISSING" in impact
+    assert "EXPORTS_PNG_MISSING" in impact
+    assert "missing_files:" in impact
+    assert "prototype.pen" in impact
+    assert "save_report_summary:" in impact
+    assert "reason:" in impact
+
+
 def test_format_context_rebase_conflict_includes_worktree_path_when_present() -> None:
     """rebase_conflict 若有 story.worktree_path，则展示到影响范围。"""
     payload = {

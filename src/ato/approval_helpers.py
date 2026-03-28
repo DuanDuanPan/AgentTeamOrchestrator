@@ -243,15 +243,34 @@ def get_exception_context(approval_type: str, payload: dict[str, object]) -> tup
             if payload.get("error_output"):
                 parts.append(f"error_output: {payload['error_output']}")
         case "needs_human_review":
-            what = "BMAD 解析失败，需要人工决定是否重试或升级。"
-            if "skill_type" in payload:
-                parts.append(f"skill_type: {payload['skill_type']}")
-            if "parser_mode" in payload:
-                parts.append(f"parser_mode: {payload['parser_mode']}")
-            if payload.get("raw_output_preview"):
-                parts.append(f"preview: {payload['raw_output_preview']}")
-            if "task_id" in payload:
-                parts.append(f"task_id: {payload['task_id']}")
+            # Design gate 失败 vs BMAD 解析失败：通过 failure_codes 区分
+            if "failure_codes" in payload:
+                what = "Design gate 校验失败，设计阶段产出物不完整或无效。"
+                if "task_id" in payload:
+                    parts.append(f"task_id: {payload['task_id']}")
+                if payload.get("reason"):
+                    parts.append(f"reason: {payload['reason']}")
+                if "artifact_dir" in payload:
+                    parts.append(f"artifact_dir: {payload['artifact_dir']}")
+                fc = payload.get("failure_codes")
+                if fc:
+                    parts.append(f"failure_codes: {', '.join(fc) if isinstance(fc, list) else fc}")
+                mf = payload.get("missing_files")
+                if mf:
+                    parts.append(f"missing_files: {', '.join(mf) if isinstance(mf, list) else mf}")
+                sr = payload.get("save_report_summary")
+                if isinstance(sr, dict):
+                    parts.append(f"save_report_summary: {sr}")
+            else:
+                what = "BMAD 解析失败，需要人工决定是否重试或升级。"
+                if "skill_type" in payload:
+                    parts.append(f"skill_type: {payload['skill_type']}")
+                if "parser_mode" in payload:
+                    parts.append(f"parser_mode: {payload['parser_mode']}")
+                if payload.get("raw_output_preview"):
+                    parts.append(f"preview: {payload['raw_output_preview']}")
+                if "task_id" in payload:
+                    parts.append(f"task_id: {payload['task_id']}")
         case "convergent_loop_escalation":
             what = "Convergent Loop 达到上限仍未收敛。"
             if "rounds_completed" in payload:
@@ -259,9 +278,7 @@ def get_exception_context(approval_type: str, payload: dict[str, object]) -> tup
             if "open_blocking_count" in payload:
                 parts.append(f"open_blocking_count: {payload['open_blocking_count']}")
             if "final_convergence_rate" in payload:
-                parts.append(
-                    f"final_convergence_rate: {payload['final_convergence_rate']}"
-                )
+                parts.append(f"final_convergence_rate: {payload['final_convergence_rate']}")
             if "unresolved_findings" in payload:
                 findings = payload["unresolved_findings"]
                 count = len(findings) if isinstance(findings, list) else findings

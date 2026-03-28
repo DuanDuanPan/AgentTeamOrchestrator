@@ -449,6 +449,18 @@ class TestVerifyPenIntegrity:
         assert result.required_keys_present is True
         assert result.children_count == 0
 
+    def test_non_dict_root_returns_keys_missing(self, tmp_path: Path) -> None:
+        """合法 JSON 但根非 dict 时: json_parse_ok=True, required_keys_present=False。"""
+        from ato.design_artifacts import verify_pen_integrity
+
+        pen = tmp_path / "array.pen"
+        pen.write_text("[1, 2, 3]")
+        result = verify_pen_integrity(pen)
+        assert result.json_parse_ok is True
+        assert result.required_keys_present is False
+        assert result.error is not None
+        assert "list" in result.error
+
 
 class TestVerifySnapshot:
     """验证 snapshot 结构校验 (9.1b AC#3, AC#4)。"""
@@ -506,6 +518,14 @@ class TestVerifySaveReport:
 
         report_path = tmp_path / "partial.json"
         report_path.write_text(json.dumps({"story_id": "s1"}))
+        assert verify_save_report(report_path) is False
+
+    def test_non_dict_root_fails(self, tmp_path: Path) -> None:
+        """合法 JSON 但根非 dict（如 array）时 verify_save_report 返回 False。"""
+        from ato.design_artifacts import verify_save_report
+
+        report_path = tmp_path / "array.json"
+        report_path.write_text("[1, 2, 3]")
         assert verify_save_report(report_path) is False
 
     def test_json_parse_verified_false_fails(self, tmp_path: Path) -> None:

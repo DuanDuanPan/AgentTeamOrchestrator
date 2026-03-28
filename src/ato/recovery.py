@@ -119,7 +119,7 @@ _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
         "   d. 调用 batch_design(operations=...) 在已打开文件上创建线框图/高保真原型\n"
         "   e. 调用 get_screenshot 验证设计结果是否正确\n"
         "5. **强制落盘（抓树 → 回写）** — 设计完成后执行结构化持久化：\n"
-        "   a. 调用 batch_get(filePath=\"{prototype_pen}\", readDepth=99, "
+        '   a. 调用 batch_get(filePath="{prototype_pen}", readDepth=99, '
         "includePathGeometry=true) 抓取完整内存节点树\n"
         "   b. 读取磁盘上的 `{prototype_pen}` 文件（json.load）\n"
         "   c. 保留磁盘文件的所有顶层字段（至少 version、variables），"
@@ -131,7 +131,7 @@ _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
         "json_parse_verified, reopen_verified, exported_png_count\n"
         "6. **落盘验证** — 必须通过以下两类验证，任一失败即中止：\n"
         "   a. 本地验证：对写回的 `{prototype_pen}` 执行 json.load，确认解析成功\n"
-        "   b. MCP 回读验证：再次调用 batch_get(filePath=\"{prototype_pen}\") "
+        '   b. MCP 回读验证：再次调用 batch_get(filePath="{prototype_pen}") '
         "重新打开并读取，确认内容正确\n"
         "   c. 将验证结果写入 {save_report_json} 的 "
         "json_parse_verified / reopen_verified 字段\n"
@@ -921,14 +921,15 @@ class RecoveryEngine:
                 limiter.release()
 
     async def _check_design_gate(self, task: TaskRecord) -> bool:
-        """Designing artifact gate：验证 UX 产出物存在性。
+        """Designing artifact gate V2：严格验证 UX 产出物存在性与内容完整性。
 
-        验证失败时创建 needs_human_review approval，不自动推进。
+        验证失败时创建 needs_human_review approval（使用共享 payload helper），
+        不自动推进。
 
         Returns:
             True 表示通过，False 表示失败（已创建 approval）。
         """
-        from ato.core import check_design_gate, derive_project_root
+        from ato.core import build_design_gate_payload, check_design_gate, derive_project_root
 
         project_root = derive_project_root(self._db_path)
 
@@ -943,19 +944,14 @@ class RecoveryEngine:
             from ato.models.db import get_connection
             from ato.nudge import send_user_notification
 
+            payload = build_design_gate_payload(task.task_id, result)
             db = await get_connection(self._db_path)
             try:
                 await create_approval(
                     db,
                     story_id=task.story_id,
                     approval_type="needs_human_review",
-                    payload_dict={
-                        "task_id": task.task_id,
-                        "artifact_dir": result.artifact_dir,
-                        "artifact_count": result.artifact_count,
-                        "story_spec_exists": result.story_spec_exists,
-                        "reason": f"Design gate failed: {result.reason}",
-                    },
+                    payload_dict=payload,
                 )
             finally:
                 await db.close()
