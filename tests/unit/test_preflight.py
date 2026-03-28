@@ -403,8 +403,8 @@ class TestLayer2:
         statuses = {r.check_item: r.status for r in results}
         assert statuses["bmad_skills"] == "PASS"
 
-    async def test_missing_ato_yaml_returns_halt(self, tmp_path: Path) -> None:
-        """缺少 ato.yaml 返回 HALT。"""
+    async def test_missing_ato_yaml_returns_info(self, tmp_path: Path) -> None:
+        """缺少 ato.yaml 返回 INFO（init 时将自动生成）。"""
         from ato.preflight import check_project_structure
 
         project = self._make_project(tmp_path, ato_yaml=False, skills_claude=True)
@@ -412,8 +412,8 @@ class TestLayer2:
         with patch("asyncio.create_subprocess_exec", return_value=proc):
             results = await check_project_structure(project)
         statuses = {r.check_item: r.status for r in results}
-        assert statuses["ato_yaml"] == "HALT"
-        assert "ato.yaml.example" in results[-1].message  # 提示复制模板
+        assert statuses["ato_yaml"] == "INFO"
+        assert "ato.yaml.example" in results[-1].message  # 提示自动生成来源
 
 
 # ---------------------------------------------------------------------------
