@@ -887,6 +887,132 @@ class TestConfigTemplate:
 
 
 # ---------------------------------------------------------------------------
+# Story 8.4: 多命令 regression 配置
+# ---------------------------------------------------------------------------
+
+
+class TestRegressionMultiCommand:
+    """AC1/AC2: regression_test_commands 多命令配置加载与优先级。"""
+
+    def test_plural_commands_loaded_in_order(self, tmp_path: Path) -> None:
+        """regression_test_commands 列表按声明顺序保留。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+regression_test_commands:
+  - "uv run pytest tests/unit/"
+  - "uv run pytest tests/integration/"
+  - "uv run pytest tests/smoke/"
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.regression_test_commands == [
+            "uv run pytest tests/unit/",
+            "uv run pytest tests/integration/",
+            "uv run pytest tests/smoke/",
+        ]
+
+    def test_get_regression_commands_returns_plural_when_both_set(self, tmp_path: Path) -> None:
+        """plural 和 singular 同时存在时，get_regression_commands() 优先返回 plural。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+regression_test_command: "echo old"
+regression_test_commands:
+  - "uv run pytest tests/unit/"
+  - "uv run pytest tests/integration/"
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        cmds = config.get_regression_commands()
+        assert cmds == ["uv run pytest tests/unit/", "uv run pytest tests/integration/"]
+
+    def test_get_regression_commands_fallback_to_singular(self, tmp_path: Path) -> None:
+        """仅配置 singular 时，get_regression_commands() 回退为包含该单命令的列表。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+regression_test_command: "uv run pytest"
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        cmds = config.get_regression_commands()
+        assert cmds == ["uv run pytest"]
+
+    def test_get_regression_commands_default_when_neither_set(self, tmp_path: Path) -> None:
+        """两者都未显式配置时，使用 singular 的默认值。"""
+        p = _write_yaml(tmp_path, _MINIMAL_VALID_YAML)
+        config = load_config(p)
+        cmds = config.get_regression_commands()
+        assert cmds == ["uv run pytest"]
+
+    def test_plural_commands_preserves_order(self, tmp_path: Path) -> None:
+        """验证顺序严格等于声明顺序。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+regression_test_commands:
+  - "cmd-c"
+  - "cmd-a"
+  - "cmd-b"
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.get_regression_commands() == ["cmd-c", "cmd-a", "cmd-b"]
+
+    def test_empty_plural_falls_back_to_singular(self, tmp_path: Path) -> None:
+        """regression_test_commands: [] 不能绕过 regression gate，必须回退到 singular。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+    model: sonnet
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+regression_test_commands: []
+regression_test_command: "uv run pytest"
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        cmds = config.get_regression_commands()
+        assert cmds == ["uv run pytest"], (
+            "Empty plural list must fall back to singular to prevent "
+            "silently skipping regression gate"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 显式路径加载
 # ---------------------------------------------------------------------------
 

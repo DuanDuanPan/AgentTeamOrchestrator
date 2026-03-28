@@ -114,8 +114,18 @@ class ATOSettings(BaseSettings):
     cost: CostConfig = CostConfig()
     model_map: dict[str, str] = {}
     regression_test_command: str = "uv run pytest"
+    regression_test_commands: list[str] | None = None
     merge_rebase_timeout: int = 120
     merge_conflict_resolution_max_attempts: int = 1
+
+    def get_regression_commands(self) -> list[str]:
+        """返回 regression 测试命令列表。
+
+        优先使用 regression_test_commands（plural），否则回退为 [regression_test_command]。
+        """
+        if self.regression_test_commands:
+            return list(self.regression_test_commands)
+        return [self.regression_test_command]
 
     @classmethod
     def settings_customise_sources(

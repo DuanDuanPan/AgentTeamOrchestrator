@@ -28,6 +28,43 @@ _EARLIER = _NOW - timedelta(minutes=5)
 
 
 # ---------------------------------------------------------------------------
+# Helper: mock subprocess 兼容 drain 架构
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_proc(
+    returncode: int = 0,
+    stdout_data: bytes = b"",
+    stderr_data: bytes = b"",
+) -> MagicMock:
+    """创建兼容 drain 架构的 mock subprocess。
+
+    新的 _run_regression_test 使用 proc.wait() + StreamReader drain，
+    而不是 proc.communicate()。此 helper 正确模拟两种 pipe 读取路径。
+    """
+    import asyncio as _aio
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = returncode
+
+    # proc.wait() 返回 future（立即完成）
+    wait_future: _aio.Future[int] = _aio.get_event_loop().create_future()
+    wait_future.set_result(returncode)
+    mock_proc.wait = MagicMock(return_value=wait_future)
+
+    # stdout/stderr 作为 StreamReader（drain tasks 读取）
+    mock_proc.stdout = _aio.StreamReader()
+    mock_proc.stdout.feed_data(stdout_data)
+    mock_proc.stdout.feed_eof()
+
+    mock_proc.stderr = _aio.StreamReader()
+    mock_proc.stderr.feed_data(stderr_data)
+    mock_proc.stderr.feed_eof()
+
+    return mock_proc
+
+
+# ---------------------------------------------------------------------------
 # Helper: 插入 story 以满足外键约束
 # ---------------------------------------------------------------------------
 
@@ -235,6 +272,7 @@ class TestMergeQueueClass:
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 1
         settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
         settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
@@ -526,6 +564,7 @@ class TestStaleLockRecovery:
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 1
         settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
         settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
@@ -720,6 +759,7 @@ class TestCrashRecoveryScenarios:
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 1
         settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
         settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
@@ -895,6 +935,7 @@ class TestRegressionTestExecution:
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 1
         settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
         settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
@@ -935,9 +976,7 @@ class TestRegressionTestExecution:
             await db.close()
 
         # Mock subprocess to succeed quickly
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        mock_proc = _make_mock_proc(returncode=0, stdout_data=b"ok")
 
         with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
             await queue._run_regression_test("s1", task_id)
@@ -964,6 +1003,9 @@ class TestRegressionTestExecution:
 
         queue, _, _ = self._make_queue(initialized_db_path)
         queue._settings.regression_test_command = 'pytest --cov="src dir" "tests/unit/test file.py"'
+        queue._settings.get_regression_commands = MagicMock(
+            return_value=['pytest --cov="src dir" "tests/unit/test file.py"']
+        )
         await _insert_test_story(initialized_db_path, "s1")
 
         task_id = "test-regression-task-quoted"
@@ -984,9 +1026,7 @@ class TestRegressionTestExecution:
         finally:
             await db.close()
 
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 0
-        mock_proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        mock_proc = _make_mock_proc(returncode=0, stdout_data=b"ok")
 
         with patch(
             "ato.merge_queue.asyncio.create_subprocess_exec",
@@ -1199,6 +1239,7 @@ class TestHappyPathMergeRegressionPassToDone:
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 1
         settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
         settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
@@ -1285,6 +1326,7 @@ class TestRebaseConflictDoesNotFreezeQueue:
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 0
         settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
         settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
@@ -1333,6 +1375,7 @@ class TestRegressionFailurePayloadContent:
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 1
         settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
         settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
@@ -1491,10 +1534,9 @@ class TestRegressionFailurePayloadContent:
         finally:
             await db.close()
 
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 1
-        mock_proc.communicate = AsyncMock(
-            return_value=(b"", b"FAILED test_bar.py::test_x - AssertionError")
+        mock_proc = _make_mock_proc(
+            returncode=1,
+            stderr_data=b"FAILED test_bar.py::test_x - AssertionError",
         )
 
         with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -1544,10 +1586,9 @@ class TestRegressionFailurePayloadContent:
             await db.close()
 
         # pytest 把失败详情输出到 stdout，stderr 为空
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 1
-        mock_proc.communicate = AsyncMock(
-            return_value=(b"FAILED tests/test_foo.py::test_bar - assert 1 == 2", b"")
+        mock_proc = _make_mock_proc(
+            returncode=1,
+            stdout_data=b"FAILED tests/test_foo.py::test_bar - assert 1 == 2",
         )
 
         with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -1599,10 +1640,10 @@ class TestRegressionFailurePayloadContent:
         finally:
             await db.close()
 
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 1
-        mock_proc.communicate = AsyncMock(
-            return_value=(b"FAILED test_bar", b"ERROR: coverage below threshold")
+        mock_proc = _make_mock_proc(
+            returncode=1,
+            stdout_data=b"FAILED test_bar",
+            stderr_data=b"ERROR: coverage below threshold",
         )
 
         with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -1620,5 +1661,307 @@ class TestRegressionFailurePayloadContent:
             # 两个来源都应该出现
             assert "coverage below threshold" in row[0]
             assert "FAILED test_bar" in row[0]
+        finally:
+            await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Story 8.4: 多命令 regression runner 测试
+# ---------------------------------------------------------------------------
+
+
+class TestMultiCommandRegression:
+    """AC3-AC5: 多命令 regression 顺序执行、失败中止、独立超时。"""
+
+    def _make_queue(self, db_path: Path) -> tuple[Any, Any, Any]:
+        from ato.merge_queue import MergeQueue
+
+        worktree_mgr = AsyncMock()
+        worktree_mgr.project_root = Path("/fake/repo")
+
+        tq = AsyncMock()
+        settings = MagicMock()
+        settings.merge_rebase_timeout = 120
+        settings.merge_conflict_resolution_max_attempts = 1
+        settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
+        settings.timeout.structured_job = 1800
+        # 使用 get_regression_commands 返回多命令
+        settings.get_regression_commands = MagicMock(return_value=[
+            "uv run pytest tests/unit/",
+            "uv run pytest tests/integration/",
+            "uv run pytest tests/smoke/",
+        ])
+
+        queue = MergeQueue(
+            db_path=db_path,
+            worktree_mgr=worktree_mgr,
+            transition_queue=tq,
+            settings=settings,
+        )
+        return queue, worktree_mgr, tq
+
+    async def _setup_task(self, db_path: Path, story_id: str = "s1") -> str:
+        """辅助：创建 story 和 running 状态的 regression task。"""
+        from ato.models.db import get_connection, insert_task
+        from ato.models.schemas import TaskRecord
+
+        await _insert_test_story(db_path, story_id)
+        task_id = f"task-multi-{story_id}"
+        now = datetime.now(tz=UTC)
+        task = TaskRecord(
+            task_id=task_id,
+            story_id=story_id,
+            phase="regression",
+            role="qa",
+            cli_tool="codex",
+            status="running",
+            expected_artifact="regression_test",
+            started_at=now,
+        )
+        db = await get_connection(db_path)
+        try:
+            await insert_task(db, task)
+        finally:
+            await db.close()
+        return task_id
+
+    async def test_all_commands_succeed(self, initialized_db_path: Path) -> None:
+        """AC3/AC5: 所有命令成功 → task completed, exit_code=0。"""
+        queue, _, _ = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        call_count = 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            return _make_mock_proc(returncode=0, stdout_data=b"ok")
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await queue._run_regression_test("s1", task_id)
+
+        assert call_count == 3, "All 3 commands should be executed"
+
+        from ato.models.db import get_tasks_by_story
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db, "s1")
+            reg_task = next(t for t in tasks if t.task_id == task_id)
+            assert reg_task.status == "completed"
+            assert reg_task.exit_code == 0
+            assert reg_task.error_message is None
+        finally:
+            await db.close()
+
+    async def test_second_command_fails_short_circuits(self, initialized_db_path: Path) -> None:
+        """AC4: 第 2 条命令失败 → 第 3 条不执行，error_message 包含序号和命令。"""
+        queue, _, _ = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        call_count = 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                return _make_mock_proc(
+                    returncode=1, stdout_data=b"FAILED test_x", stderr_data=b"err output",
+                )
+            return _make_mock_proc(returncode=0, stdout_data=b"ok")
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await queue._run_regression_test("s1", task_id)
+
+        assert call_count == 2, "Third command should NOT be executed"
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "completed"  # status
+            assert row[1] != 0  # exit_code
+            error_msg = row[2]
+            assert error_msg is not None
+            # AC4: error_message 包含失败命令的 1-based 序号和命令文本
+            assert "2" in error_msg
+            assert "uv run pytest tests/integration/" in error_msg
+        finally:
+            await db.close()
+
+    async def test_each_command_uses_independent_shlex_split(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC5: 每条命令独立使用 shlex.split() 解析。"""
+        queue, _, _ = self._make_queue(initialized_db_path)
+        queue._settings.get_regression_commands = MagicMock(
+            return_value=['pytest --cov="src dir"', 'pytest "tests/unit/test file.py"']
+        )
+        task_id = await self._setup_task(initialized_db_path)
+
+        exec_calls: list[tuple[Any, ...]] = []
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+            exec_calls.append(args)
+            return _make_mock_proc(returncode=0, stdout_data=b"ok")
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await queue._run_regression_test("s1", task_id)
+
+        assert len(exec_calls) == 2
+        # 第一条命令
+        assert exec_calls[0] == ("pytest", "--cov=src dir")
+        # 第二条命令
+        assert exec_calls[1] == ("pytest", "tests/unit/test file.py")
+
+    async def test_singular_fallback_still_works(self, initialized_db_path: Path) -> None:
+        """AC2: 仅 singular 配置时行为不变。"""
+        queue, _, _ = self._make_queue(initialized_db_path)
+        queue._settings.get_regression_commands = MagicMock(return_value=["echo ok"])
+        task_id = await self._setup_task(initialized_db_path)
+
+        call_count = 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            return _make_mock_proc(returncode=0, stdout_data=b"ok")
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await queue._run_regression_test("s1", task_id)
+
+        assert call_count == 1
+
+        from ato.models.db import get_tasks_by_story
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db, "s1")
+            reg_task = next(t for t in tasks if t.task_id == task_id)
+            assert reg_task.status == "completed"
+            assert reg_task.exit_code == 0
+        finally:
+            await db.close()
+
+    async def test_error_message_within_1000_chars(self, initialized_db_path: Path) -> None:
+        """AC4: 失败摘要遵循 <=1000 字符截断合同。"""
+        queue, _, _ = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+            # 生成超长输出
+            return _make_mock_proc(
+                returncode=1, stdout_data=b"X" * 2000, stderr_data=b"Y" * 2000,
+            )
+
+        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await queue._run_regression_test("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] is not None
+            assert len(row[0]) <= 1000
+        finally:
+            await db.close()
+
+    async def test_timeout_captures_partial_output_via_drain(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC4/AC5: 超时 → error_message 包含 drain 缓冲区中的部分输出。
+
+        架构：_drain tasks 在超时前持续累积 pipe 数据到外部 bytearray，
+        超时后取消 task 但 bytearray 已有数据可用。不依赖超时后读 pipe。
+        """
+        import asyncio as _aio
+
+        queue, _, _ = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        exec_count = 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+            nonlocal exec_count
+            exec_count += 1
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = None
+
+            # 模拟 stdout/stderr pipe：先输出部分数据，然后挂起
+            # 这模拟了真实场景：子进程已输出部分内容但未退出
+            async def make_reader(data: bytes) -> _aio.StreamReader:
+                reader = _aio.StreamReader()
+                reader.feed_data(data)
+                # 不 feed_eof → read 会在读完 data 后等待
+                return reader
+
+            mock_proc.stdout = _aio.StreamReader()
+            mock_proc.stdout.feed_data(b"partial test output")
+            # 不 feed_eof，模拟进程仍在运行
+
+            mock_proc.stderr = _aio.StreamReader()
+            mock_proc.stderr.feed_data(b"partial error log")
+
+            # proc.wait() 永不返回（模拟超时）
+            wait_future: _aio.Future[int] = _aio.get_event_loop().create_future()
+            mock_proc.wait = MagicMock(return_value=wait_future)
+
+            # kill 后标记退出 + 关闭 pipe
+            def do_kill() -> None:
+                mock_proc.returncode = -9
+                mock_proc.stdout.feed_eof()
+                mock_proc.stderr.feed_eof()
+                if not wait_future.done():
+                    wait_future.set_result(-9)
+
+            mock_proc.kill = MagicMock(side_effect=do_kill)
+            mock_proc.terminate = MagicMock(side_effect=do_kill)
+
+            return mock_proc
+
+        with (
+            patch(
+                "ato.merge_queue.asyncio.create_subprocess_exec",
+                side_effect=fake_exec,
+            ),
+            patch("ato.adapters.base.cleanup_process", new_callable=AsyncMock),
+        ):
+            # 设置极短超时触发 timeout
+            queue._settings.timeout.structured_job = 0.1
+            await queue._run_regression_test("s1", task_id)
+
+        assert exec_count == 1, "Timed out on first → second should NOT run"
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "failed"
+            assert row[1] == -1
+            error_msg = row[2]
+            # AC4: 序号 + 命令文本
+            assert "1" in error_msg
+            assert "timed out" in error_msg.lower()
+            # AC4: 超时前已累积的 stdout/stderr 摘要
+            assert "partial test output" in error_msg, (
+                f"Drain buffer should capture partial stdout. Got: {error_msg}"
+            )
+            assert "partial error log" in error_msg, (
+                f"Drain buffer should capture partial stderr. Got: {error_msg}"
+            )
         finally:
             await db.close()
