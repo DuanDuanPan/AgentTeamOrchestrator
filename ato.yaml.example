@@ -145,7 +145,14 @@ timeout:
 # ---------------------------------------------------------------------------
 
 # 回归测试命令（merge 到 main 后在仓库根目录执行）
-regression_test_command: "uv run pytest"
+# 多命令格式：按声明顺序依次执行，任一失败即中止
+regression_test_commands:
+  - "uv run pytest tests/unit/"
+  - "uv run pytest tests/integration/"
+  - "uv run pytest tests/smoke/"
+
+# 向后兼容：单命令格式（当 regression_test_commands 存在时此字段被忽略）
+# regression_test_command: "uv run pytest"
 
 # Rebase 超时时间（秒）
 merge_rebase_timeout: 120

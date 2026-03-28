@@ -511,67 +511,128 @@ class MergeQueue:
         return task_id
 
     async def _run_regression_test(self, story_id: str, task_id: str) -> None:
-        """在 main 分支上执行 regression 测试命令。"""
+        """在 main 分支上按顺序执行 regression 测试命令链。
+
+        多命令共用同一条 regression task 记录；任一命令失败或超时立即中止后续。
+        """
         from ato.adapters.base import cleanup_process
         from ato.models.db import get_connection, update_task_status
 
-        cmd = self._settings.regression_test_command
+        commands = self._settings.get_regression_commands()
         repo_root = self._worktree_mgr.project_root
 
         try:
-            argv = shlex.split(cmd)
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=str(repo_root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _stdout_bytes, _stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=self._settings.timeout.structured_job,
+            for cmd_index, cmd in enumerate(commands, start=1):
+                argv = shlex.split(cmd)
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=str(repo_root),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-            except TimeoutError:
-                await cleanup_process(proc)
-                db = await get_connection(self._db_path)
-                try:
-                    await update_task_status(
-                        db,
-                        task_id,
-                        "failed",
-                        exit_code=-1,
-                        error_message="Regression test timed out",
-                        completed_at=datetime.now(tz=UTC),
-                    )
-                finally:
-                    await db.close()
-                return
-            finally:
-                await cleanup_process(proc)
 
-            exit_code = proc.returncode or 0
-            # 失败时保留 stdout + stderr 摘要供 approval payload 使用（AC3）
-            # 很多测试框架（pytest 等）把失败详情输出到 stdout，不能只看 stderr
-            error_msg: str | None = None
-            if exit_code != 0:
-                stdout_text = _stdout_bytes.decode(errors="replace") if _stdout_bytes else ""
-                stderr_text = _stderr_bytes.decode(errors="replace") if _stderr_bytes else ""
-                combined = ""
-                if stderr_text.strip():
-                    combined += stderr_text.strip()
-                if stdout_text.strip():
-                    if combined:
-                        combined += "\n---\n"
-                    combined += stdout_text.strip()
-                error_msg = combined[:1000] or "Regression test failed"
+                # 持续将 pipe 数据累积到外部缓冲区；超时取消 task 时
+                # 缓冲区已有的数据自然可用（不依赖取消后读 pipe）
+                stdout_buf = bytearray()
+                stderr_buf = bytearray()
+
+                async def _drain(
+                    stream: asyncio.StreamReader | None,
+                    buf: bytearray,
+                ) -> None:
+                    if stream is None:
+                        return
+                    while True:
+                        chunk = await stream.read(8192)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+
+                stdout_task = asyncio.create_task(_drain(proc.stdout, stdout_buf))
+                stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_buf))
+
+                timed_out = False
+                try:
+                    await asyncio.wait_for(
+                        proc.wait(),
+                        timeout=self._settings.timeout.structured_job,
+                    )
+                    # 进程正常退出，等待 reader 读完剩余数据
+                    await asyncio.gather(
+                        stdout_task, stderr_task, return_exceptions=True,
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    stdout_task.cancel()
+                    stderr_task.cancel()
+                    await cleanup_process(proc)
+                finally:
+                    if not timed_out:
+                        await cleanup_process(proc)
+
+                if timed_out:
+                    header = (
+                        f"Regression command {cmd_index}/{len(commands)}"
+                        f" timed out: {cmd}"
+                    )
+                    combined = header
+                    stderr_text = bytes(stderr_buf).decode(errors="replace").strip()
+                    stdout_text = bytes(stdout_buf).decode(errors="replace").strip()
+                    if stderr_text:
+                        combined += "\n" + stderr_text
+                    if stdout_text:
+                        combined += "\n---\n" + stdout_text
+                    error_msg = combined[:1000]
+                    db = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(
+                            db,
+                            task_id,
+                            "failed",
+                            exit_code=-1,
+                            error_message=error_msg,
+                            completed_at=datetime.now(tz=UTC),
+                        )
+                    finally:
+                        await db.close()
+                    return
+
+                exit_code = proc.returncode or 0
+                if exit_code != 0:
+                    # 失败即中止：构造包含序号和命令文本的错误摘要
+                    stdout_text = bytes(stdout_buf).decode(errors="replace")
+                    stderr_text = bytes(stderr_buf).decode(errors="replace")
+                    combined = f"Command {cmd_index}/{len(commands)} failed: {cmd}\n"
+                    if stderr_text.strip():
+                        combined += stderr_text.strip()
+                    if stdout_text.strip():
+                        if len(combined) > 1:
+                            combined += "\n---\n"
+                        combined += stdout_text.strip()
+                    error_msg = combined[:1000] or "Regression test failed"
+                    db = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(
+                            db,
+                            task_id,
+                            "completed",
+                            exit_code=exit_code,
+                            error_message=error_msg,
+                            completed_at=datetime.now(tz=UTC),
+                        )
+                    finally:
+                        await db.close()
+                    return
+
+            # 所有命令均成功
             db = await get_connection(self._db_path)
             try:
                 await update_task_status(
                     db,
                     task_id,
                     "completed",
-                    exit_code=exit_code,
-                    error_message=error_msg,
+                    exit_code=0,
+                    error_message=None,
                     completed_at=datetime.now(tz=UTC),
                 )
             finally:
