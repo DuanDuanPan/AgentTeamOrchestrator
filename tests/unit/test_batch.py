@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ato.batch import (
     BatchProposal,
     EpicInfo,
+    LLMBatchRecommender,
+    LLMRecommendError,
     LocalBatchRecommender,
     _normalize_short_key,
     _parse_dependency_table,
     build_canonical_key_map,
+    build_llm_recommend_prompt,
     confirm_batch,
     load_epics,
 )
 from ato.models.db import get_batch_stories, get_connection, get_story
-from ato.models.schemas import StoryRecord, StoryStatus
+from ato.models.schemas import (
+    ClaudeOutput,
+    CLIAdapterError,
+    ErrorCategory,
+    StoryRecord,
+    StoryStatus,
+)
 
 _NOW = datetime.now(tz=UTC)
 
@@ -748,3 +759,272 @@ class TestConfirmBatchHasUi:
             assert links[0][1].has_ui is True
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# build_llm_recommend_prompt (Story 2B.5a)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildLlmRecommendPrompt:
+    def test_contains_candidate_keys(self) -> None:
+        candidates = [
+            _make_epic("1-1", "1-1-scaffolding", "Scaffolding"),
+            _make_epic("1-2", "1-2-sqlite", "SQLite", ["1-1"]),
+        ]
+        prompt = build_llm_recommend_prompt(candidates, {}, 5)
+        assert "1-1-scaffolding" in prompt
+        assert "1-2-sqlite" in prompt
+
+    def test_contains_max_stories_constraint(self) -> None:
+        candidates = [_make_epic("1-1", "1-1-a", "A")]
+        prompt = build_llm_recommend_prompt(candidates, {}, 3)
+        assert "3" in prompt
+
+    def test_includes_status_info(self) -> None:
+        candidates = [_make_epic("1-1", "1-1-a", "A")]
+        existing = {"1-1-a": _make_story("1-1-a", "ready", "idle")}
+        prompt = build_llm_recommend_prompt(candidates, existing, 5)
+        assert "ready" in prompt
+
+
+# ---------------------------------------------------------------------------
+# LLMBatchRecommender (Story 2B.5a)
+# ---------------------------------------------------------------------------
+
+_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "claude_batch_recommend.json"
+
+
+def _load_fixture() -> dict:
+    return json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _make_mock_adapter(fixture_data: dict | None = None) -> AsyncMock:
+    """创建 mock ClaudeAdapter，返回 fixture 数据。"""
+    adapter = AsyncMock()
+    if fixture_data is not None:
+        output = ClaudeOutput.from_json(fixture_data, exit_code=0)
+        adapter.execute.return_value = output
+    return adapter
+
+
+class TestLLMBatchRecommender:
+    async def test_success_returns_llm_ordered_stories(self) -> None:
+        """LLM 成功返回时按 LLM 排序构造 proposal。"""
+        epics = [
+            _make_epic("1-1", "1-1-scaffolding", "Scaffolding"),
+            _make_epic("1-2", "1-2-sqlite", "SQLite", ["1-1"]),
+        ]
+        existing = {"1-1-scaffolding": _make_story("1-1-scaffolding", "done")}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-2-sqlite"],
+            "reason": "1-2 is the next priority.",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        proposal = await recommender.recommend(epics, existing, 5)
+
+        assert len(proposal.stories) == 1
+        assert proposal.stories[0].story_key == "1-2-sqlite"
+        assert "LLM" in proposal.reason
+        adapter.execute.assert_called_once()
+
+    async def test_unknown_key_raises(self) -> None:
+        """LLM 返回集合外 key 时抛出 LLMRecommendError（fail-closed）。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding", "nonexistent-story"],
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+
+        with pytest.raises(LLMRecommendError, match="集合外"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_duplicate_key_raises(self) -> None:
+        """LLM 返回重复 key 时抛出 LLMRecommendError（fail-closed）。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding", "1-1-scaffolding"],
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+
+        with pytest.raises(LLMRecommendError, match="重复"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_exceeds_max_stories_raises(self) -> None:
+        """LLM 返回超过 max_stories 数量时抛出 LLMRecommendError（fail-closed）。"""
+        epics = [
+            _make_epic("1-1", "1-1-a", "A"),
+            _make_epic("1-2", "1-2-b", "B"),
+            _make_epic("1-3", "1-3-c", "C"),
+        ]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-a", "1-2-b", "1-3-c"],
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+
+        with pytest.raises(LLMRecommendError, match="超过上限"):
+            await recommender.recommend(epics, existing, 2)
+
+    async def test_empty_story_keys_raises(self) -> None:
+        """LLM 返回空 story_keys 时抛出 LLMRecommendError。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": [],
+            "reason": "nothing to recommend",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+
+        with pytest.raises(LLMRecommendError, match="空"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_adapter_error_raises(self) -> None:
+        """ClaudeAdapter 抛错时传播为 LLMRecommendError。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        adapter = AsyncMock()
+        adapter.execute.side_effect = CLIAdapterError(
+            "Claude CLI failed",
+            category=ErrorCategory.TIMEOUT,
+            retryable=True,
+        )
+
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+
+        with pytest.raises(LLMRecommendError, match="调用失败"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_no_structured_output_raises(self) -> None:
+        """structured_output 为 None 时抛出 LLMRecommendError。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = None
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+
+        with pytest.raises(LLMRecommendError, match="structured_output"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_schema_validation_failure_raises(self) -> None:
+        """structured_output schema 不匹配时抛出 LLMRecommendError。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {"invalid": "data"}
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+
+        with pytest.raises(LLMRecommendError, match="schema"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_empty_candidates_skips_llm_call(self) -> None:
+        """无 eligible candidates 时不调用 Claude。"""
+        epics = [_make_epic("1-1", "1-1-done", "Done")]
+        existing = {"1-1-done": _make_story("1-1-done", "done")}
+
+        adapter = AsyncMock()
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        proposal = await recommender.recommend(epics, existing, 5)
+
+        assert len(proposal.stories) == 0
+        adapter.execute.assert_not_called()
+
+    async def test_cwd_set_to_project_root(self) -> None:
+        """Claude 调用的 cwd 设置为项目根目录。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding"],
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        project_root = Path("/my/project/root")
+        recommender = LLMBatchRecommender(adapter, project_root)
+        await recommender.recommend(epics, existing, 5)
+
+        call_args = adapter.execute.call_args
+        options = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("options")
+        assert options["cwd"] == str(project_root)
+
+    async def test_full_pool_not_truncated_by_max_stories(self) -> None:
+        """LLM 收到完整 eligible pool，不被 max_stories 截断。"""
+        epics = [
+            _make_epic("1-1", "1-1-a", "A"),
+            _make_epic("1-2", "1-2-b", "B"),
+            _make_epic("1-3", "1-3-c", "C"),
+        ]
+        existing: dict[str, StoryRecord] = {}
+
+        # LLM 选择第 3 个 story（如果 pool 被 max_stories=2 截断则不可能）
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-3-c"],
+            "reason": "1-3 is most valuable",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        proposal = await recommender.recommend(epics, existing, 2)
+
+        # 如果 pool 被截断，1-3-c 不在 pool 内会被视为集合外 key 而抛错
+        # 修复后 LLM 能看到全部 3 个候选并成功选中 1-3-c
+        assert len(proposal.stories) == 1
+        assert proposal.stories[0].story_key == "1-3-c"
+
+    async def test_valid_subset_within_max_stories(self) -> None:
+        """LLM 返回合法子集（数量 <= max_stories）时成功。"""
+        epics = [
+            _make_epic("1-1", "1-1-a", "A"),
+            _make_epic("1-2", "1-2-b", "B"),
+            _make_epic("1-3", "1-3-c", "C"),
+        ]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-2-b", "1-1-a"],
+            "reason": "1-2 first, then 1-1",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        proposal = await recommender.recommend(epics, existing, 3)
+
+        assert len(proposal.stories) == 2
+        assert proposal.stories[0].story_key == "1-2-b"
+        assert proposal.stories[1].story_key == "1-1-a"

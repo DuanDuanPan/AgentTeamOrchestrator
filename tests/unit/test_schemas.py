@@ -8,9 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from ato.models.schemas import (
+    BATCH_RECOMMEND_JSON_SCHEMA,
     SCHEMA_VERSION,
     ApprovalRecord,
     ATOError,
+    BatchRecommendOutput,
     BmadFinding,
     BmadParseResult,
     BmadSkillType,
@@ -660,3 +662,42 @@ class TestValidationResult:
         result = ValidationResult(passed=False, errors=errors)
         assert result.passed is False
         assert len(result.errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# BatchRecommendOutput (Story 2B.5a)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchRecommendOutput:
+    def test_valid_output(self) -> None:
+        output = BatchRecommendOutput(
+            story_keys=["1-1-scaffolding", "1-2-sqlite"],
+            reason="Foundational stories first.",
+        )
+        assert output.story_keys == ["1-1-scaffolding", "1-2-sqlite"]
+        assert output.reason == "Foundational stories first."
+
+    def test_empty_keys_valid(self) -> None:
+        """空 keys 列表在 schema 层面合法（Python 侧二次校验处理）。"""
+        output = BatchRecommendOutput(story_keys=[], reason="No stories recommended.")
+        assert output.story_keys == []
+
+    def test_missing_story_keys_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BatchRecommendOutput.model_validate({"reason": "no keys"})
+
+    def test_missing_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BatchRecommendOutput.model_validate({"story_keys": ["a"]})
+
+    def test_extra_fields_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BatchRecommendOutput.model_validate(
+                {"story_keys": ["a"], "reason": "test", "extra": True}
+            )
+
+    def test_json_schema_has_required_fields(self) -> None:
+        assert "story_keys" in BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[operator]
+        assert "reason" in BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[operator]
+        assert set(BATCH_RECOMMEND_JSON_SCHEMA["required"]) == {"story_keys", "reason"}  # type: ignore[arg-type]

@@ -405,6 +405,36 @@ class BatchRecord(_StrictBase):
     completed_at: datetime | None = None
 
 
+class BatchRecommendOutput(_StrictBase):
+    """LLM batch 推荐的结构化输出模型 (Story 2B.5a)。
+
+    Claude 返回的 structured_output 必须严格匹配此 schema。
+    story_keys 必须是 eligible candidate pool 中的有效 key 子集。
+    """
+
+    story_keys: list[str]
+    reason: str
+
+
+# JSON Schema 用于 Claude CLI --json-schema 参数
+BATCH_RECOMMEND_JSON_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "story_keys": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "推荐的 story keys 列表，按优先级排序",
+        },
+        "reason": {
+            "type": "string",
+            "description": "推荐理由",
+        },
+    },
+    "required": ["story_keys", "reason"],
+    "additionalProperties": False,
+}
+
+
 class BatchStoryLink(_StrictBase):
     """batch_stories 关联表对应的 Pydantic 模型。"""
 

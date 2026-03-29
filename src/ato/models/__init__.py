@@ -12,9 +12,11 @@ from ato.models.db import (
     insert_preflight_results,
 )
 from ato.models.schemas import (
+    BATCH_RECOMMEND_JSON_SCHEMA,
     SCHEMA_VERSION,
     ApprovalRecord,
     ATOError,
+    BatchRecommendOutput,
     BatchRecord,
     BatchStoryLink,
     CheckResult,
@@ -28,10 +30,12 @@ from ato.models.schemas import (
 )
 
 __all__ = [
+    "BATCH_RECOMMEND_JSON_SCHEMA",
     "SCHEMA_VERSION",
     "ATOError",
     "ApprovalRecord",
     "BatchProgress",
+    "BatchRecommendOutput",
     "BatchRecord",
     "BatchStoryLink",
     "CLIAdapterError",

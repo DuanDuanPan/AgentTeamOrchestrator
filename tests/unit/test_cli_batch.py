@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
@@ -421,3 +422,111 @@ class TestBatchStatusMapping:
         result = runner.invoke(app, ["batch", "status", "--db-path", str(db_path)])
         assert result.exit_code == 0
         assert first_key in result.output
+
+
+# ---------------------------------------------------------------------------
+# ato batch select --llm (Story 2B.5a)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSelectLlmFlag:
+    def test_without_llm_flag_uses_local(self, tmp_path: Path) -> None:
+        """不传 --llm 时使用本地推荐（默认行为不变）。"""
+        db_path = _create_db(tmp_path)
+        epics = _create_epics(tmp_path)
+
+        # 使用 --story-ids 避免交互提示
+        result = runner.invoke(
+            app,
+            [
+                "batch",
+                "select",
+                "--db-path",
+                str(db_path),
+                "--epics-file",
+                str(epics),
+                "--story-ids",
+                "1-1",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Batch 已创建" in result.output
+
+    def test_story_ids_takes_priority_over_llm(self, tmp_path: Path) -> None:
+        """--story-ids 优先级最高，即使传了 --llm 也不进入 LLM 推荐。"""
+        db_path = _create_db(tmp_path)
+        epics = _create_epics(tmp_path)
+
+        result = runner.invoke(
+            app,
+            [
+                "batch",
+                "select",
+                "--db-path",
+                str(db_path),
+                "--epics-file",
+                str(epics),
+                "--story-ids",
+                "1-1",
+                "--llm",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Batch 已创建" in result.output
+
+    def test_llm_flag_fallback_on_error(self, tmp_path: Path) -> None:
+        """--llm 路径下 LLMRecommendError 时回退并输出提示。"""
+        db_path = _create_db(tmp_path)
+        epics = _create_epics(tmp_path)
+
+        from ato.batch import LLMBatchRecommender, LLMRecommendError
+
+        async def mock_recommend(*_args, **_kwargs):
+            raise LLMRecommendError("Claude CLI 调用失败")
+
+        with patch.object(LLMBatchRecommender, "recommend", side_effect=mock_recommend):
+            result = runner.invoke(
+                app,
+                [
+                    "batch",
+                    "select",
+                    "--db-path",
+                    str(db_path),
+                    "--epics-file",
+                    str(epics),
+                    "--llm",
+                ],
+                input="\n",
+            )
+        assert result.exit_code == 0
+        assert "LLM 推荐失败" in result.output
+        assert "Batch 已创建" in result.output
+
+    def test_llm_flag_success_with_mock(self, tmp_path: Path) -> None:
+        """--llm 路径成功时正确创建 batch（mock Claude adapter）。"""
+        db_path = _create_db(tmp_path)
+        epics = _create_epics(tmp_path)
+
+        from ato.batch import BatchProposal, LLMBatchRecommender
+
+        async def mock_recommend(self, epics_info, existing_stories, max_stories):
+            return BatchProposal(
+                stories=[epics_info[0]],
+                reason="LLM 推荐: test",
+            )
+
+        with patch.object(LLMBatchRecommender, "recommend", mock_recommend):
+            result = runner.invoke(
+                app,
+                [
+                    "batch",
+                    "select",
+                    "--db-path",
+                    str(db_path),
+                    "--epics-file",
+                    str(epics),
+                    "--llm",
+                ],
+                input="\n",
+            )
+        assert result.exit_code == 0

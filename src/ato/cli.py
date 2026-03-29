@@ -319,6 +319,11 @@ def batch_select(
         "--story-ids",
         help="直接指定 story keys（逗号分隔），跳过推荐",
     ),
+    use_llm: bool = typer.Option(
+        False,
+        "--llm",
+        help="使用 LLM 智能推荐（基于 Claude 分析仓库现状）",
+    ),
 ) -> None:
     """选择要执行的 story batch。"""
     resolved_db = db_path or _DEFAULT_DB_PATH
@@ -344,7 +349,9 @@ def batch_select(
         raise typer.Exit(code=EXIT_ENV_ERROR)
 
     try:
-        asyncio.run(_batch_select_async(resolved_db, resolved_epics, max_stories, story_ids))
+        asyncio.run(
+            _batch_select_async(resolved_db, resolved_epics, max_stories, story_ids, use_llm)
+        )
     except click.exceptions.Exit:
         raise
     except Exception as exc:
@@ -357,6 +364,7 @@ async def _batch_select_async(
     epics_path: Path,
     max_stories: int,
     story_ids: str | None,
+    use_llm: bool = False,
 ) -> None:
     from ato.batch import (
         BatchProposal,
@@ -435,8 +443,29 @@ async def _batch_select_async(
             proposal = BatchProposal(stories=selected_infos, reason="用户直接指定")
         else:
             # 推荐模式
-            recommender = LocalBatchRecommender()
-            proposal = recommender.recommend(epics_info, existing_stories, max_stories)
+            if use_llm:
+                from ato.adapters.claude_cli import ClaudeAdapter
+                from ato.batch import LLMBatchRecommender, LLMRecommendError
+
+                project_root = _derive_project_root(db_path)
+                adapter = ClaudeAdapter()
+                llm_recommender = LLMBatchRecommender(adapter, project_root)
+                try:
+                    proposal = await llm_recommender.recommend(
+                        epics_info, existing_stories, max_stories,
+                    )
+                except LLMRecommendError as exc:
+                    logger.warning(
+                        "llm_batch_recommend_cli_fallback",
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    typer.echo("⚠️ LLM 推荐失败，已回退到本地推荐。")
+                    recommender = LocalBatchRecommender()
+                    proposal = recommender.recommend(epics_info, existing_stories, max_stories)
+            else:
+                recommender = LocalBatchRecommender()
+                proposal = recommender.recommend(epics_info, existing_stories, max_stories)
 
             if not proposal.stories:
                 typer.echo("没有可推荐的 stories（所有 stories 已完成或依赖未满足）。")
@@ -633,7 +662,7 @@ def start_cmd(
 
     configure_logging(log_dir=str(resolved_db.parent / "logs"))
 
-    # 从 db_path 推���项目根（而非硬编码 cwd）
+    # 从 db_path 推导项目根（而非硬编码 cwd）
     project_root = _derive_project_root(resolved_db)
 
     # Preflight 快速检查

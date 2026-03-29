@@ -36,6 +36,8 @@
 
 generated: 2026-03-24
 last_updated: 2026-03-29
+# Story 2B.5a review: 2026-03-29
+# Story 2B.5a created (correct-course: LLM batch recommend): 2026-03-29
 # Story 9-3 done: 2026-03-29
 # Story 9-3 review: 2026-03-29
 # Story 9-3 in-progress: 2026-03-29
@@ -101,6 +103,7 @@ development_status:
   2b-3-bmad-skill-parsing: done
   2b-4-worktree-isolation: done
   2b-5-batch-select-status: done
+  2b-5a-llm-batch-recommend: done
   2b-6-interactive-session: done
   epic-2b-retrospective: optional
 
