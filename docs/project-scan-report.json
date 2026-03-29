@@ -1,0 +1,78 @@
+{
+  "project_type": "cli",
+  "classification": {
+    "type": "monolith",
+    "language": "python",
+    "framework": ["typer", "textual", "pydantic", "aiosqlite", "python-statemachine"],
+    "purpose": "Multi-role AI team orchestrator for software development lifecycle"
+  },
+  "scan_status": "completed",
+  "scan_progress": {
+    "core_modules": {
+      "status": "done",
+      "files_scanned": [
+        "src/ato/core.py",
+        "src/ato/state_machine.py",
+        "src/ato/transition_queue.py",
+        "src/ato/recovery.py",
+        "src/ato/merge_queue.py",
+        "src/ato/convergent_loop.py",
+        "src/ato/subprocess_mgr.py",
+        "src/ato/config.py",
+        "src/ato/worktree_mgr.py",
+        "src/ato/preflight.py",
+        "src/ato/nudge.py",
+        "src/ato/approval_helpers.py",
+        "src/ato/batch.py",
+        "src/ato/validation.py",
+        "src/ato/design_artifacts.py",
+        "src/ato/logging.py",
+        "src/ato/recovery_summary.py",
+        "src/ato/cli.py"
+      ]
+    },
+    "models": {
+      "status": "done",
+      "files_scanned": [
+        "src/ato/models/schemas.py",
+        "src/ato/models/db.py",
+        "src/ato/models/migrations.py"
+      ]
+    },
+    "adapters": {
+      "status": "done",
+      "files_scanned": [
+        "src/ato/adapters/base.py",
+        "src/ato/adapters/claude_cli.py",
+        "src/ato/adapters/codex_cli.py",
+        "src/ato/adapters/bmad_adapter.py"
+      ]
+    },
+    "tui": {
+      "status": "done",
+      "files_scanned": [
+        "src/ato/tui/app.py",
+        "src/ato/tui/dashboard.py",
+        "src/ato/tui/story_detail.py",
+        "src/ato/tui/theme.py",
+        "src/ato/tui/app.tcss"
+      ]
+    },
+    "config_files": {
+      "status": "done",
+      "files_scanned": [
+        "pyproject.toml",
+        "ato.yaml.example",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ]
+    }
+  },
+  "documentation_generated": {
+    "architecture.md": "completed",
+    "api-contracts.md": "completed",
+    "dev-guide.md": "completed",
+    "index.md": "completed"
+  },
+  "last_updated": "2026-03-29T03:07:00Z"
+}
