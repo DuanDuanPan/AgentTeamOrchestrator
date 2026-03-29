@@ -1222,3 +1222,157 @@ max_concurrent_agents: 6
         assert "b" in c2.roles
         assert c1.max_concurrent_agents == 2
         assert c2.max_concurrent_agents == 6
+
+
+# ---------------------------------------------------------------------------
+# Story 9.2: workspace 字段
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseConfigWorkspace:
+    """PhaseConfig / PhaseDefinition workspace 字段解析与默认值。"""
+
+    def test_phase_config_workspace_omitted_is_none(self, tmp_path: Path) -> None:
+        """PhaseConfig 不指定 workspace 时原始值为 None（由 build_phase_definitions 推断）。"""
+        p = _write_yaml(tmp_path, _MINIMAL_VALID_YAML)
+        config = load_config(p)
+        assert config.phases[0].workspace is None
+
+    def test_phase_config_workspace_main_parsed(self, tmp_path: Path) -> None:
+        """PhaseConfig 显式指定 workspace: main 被正确解析。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: planning
+    role: dev
+    type: structured_job
+    next_on_success: done
+    workspace: main
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.phases[0].workspace == "main"
+
+    def test_phase_definition_propagates_workspace(self, tmp_path: Path) -> None:
+        """build_phase_definitions() 将 workspace 从 PhaseConfig 传播到 PhaseDefinition。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: planning
+    role: dev
+    type: structured_job
+    next_on_success: developing
+    workspace: main
+  - name: developing
+    role: dev
+    type: structured_job
+    next_on_success: done
+    workspace: worktree
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        defs = build_phase_definitions(config)
+        assert defs[0].workspace == "main"
+        assert defs[1].workspace == "worktree"
+
+    def test_phase_definition_workspace_inferred_from_name(self, tmp_path: Path) -> None:
+        """workspace 省略时 build_phase_definitions 按 phase 名推断。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+  rev:
+    cli: codex
+phases:
+  - name: planning
+    role: dev
+    type: structured_job
+    next_on_success: reviewing
+  - name: reviewing
+    role: rev
+    type: convergent_loop
+    next_on_success: done
+    next_on_failure: planning
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        defs = build_phase_definitions(config)
+        # planning 在已知 main phase 列表中
+        assert defs[0].workspace == "main"
+        # reviewing 不在已知 main phase 列表中 → worktree
+        assert defs[1].workspace == "worktree"
+
+    def test_legacy_config_all_phases_inferred_correctly(self, tmp_path: Path) -> None:
+        """旧 YAML 不写 workspace：已知 main phase 推断 main，其余推断 worktree。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+  rev:
+    cli: codex
+phases:
+  - name: planning
+    role: dev
+    type: structured_job
+    next_on_success: creating
+  - name: creating
+    role: dev
+    type: structured_job
+    next_on_success: fixing
+  - name: fixing
+    role: dev
+    type: structured_job
+    next_on_success: reviewing
+  - name: reviewing
+    role: rev
+    type: convergent_loop
+    next_on_success: done
+    next_on_failure: fixing
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        defs = build_phase_definitions(config)
+        ws = {d.name: d.workspace for d in defs}
+        assert ws["planning"] == "main"
+        assert ws["creating"] == "main"
+        assert ws["fixing"] == "worktree"
+        assert ws["reviewing"] == "worktree"
+
+    def test_explicit_workspace_overrides_inference(self, tmp_path: Path) -> None:
+        """显式 workspace 覆盖按名推断的值。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: planning
+    role: dev
+    type: structured_job
+    next_on_success: done
+    workspace: worktree
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        defs = build_phase_definitions(config)
+        assert defs[0].workspace == "worktree"
+
+    def test_invalid_workspace_value_rejected(self, tmp_path: Path) -> None:
+        """workspace 非 'main' 或 'worktree' 时验证失败。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+    workspace: invalid
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError):
+            load_config(p)

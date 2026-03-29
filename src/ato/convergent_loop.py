@@ -610,10 +610,18 @@ class ConvergentLoop:
         self,
         story_id: str,
         explicit_path: str | None,
+        *,
+        allow_project_root: bool = False,
     ) -> str:
-        """解析 worktree 路径，不允许退化到仓库根目录。
+        """解析执行路径。
 
-        优先级：explicit_path > stories.worktree_path > 报错
+        优先级：explicit_path > stories.worktree_path > project_root(仅 allow_project_root) > 报错
+
+        Args:
+            story_id: Story 唯一标识。
+            explicit_path: 显式传入的路径。
+            allow_project_root: 是否允许回退到 project_root
+                （workspace: main 的阶段使用）。
         """
         if explicit_path is not None:
             return explicit_path
@@ -628,6 +636,11 @@ class ConvergentLoop:
 
         if story is not None and story.worktree_path is not None:
             return story.worktree_path
+
+        if allow_project_root:
+            from ato.core import derive_project_root
+
+            return str(derive_project_root(self._db_path))
 
         msg = (
             f"Cannot resolve worktree path for story '{story_id}': "

@@ -82,7 +82,7 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
         "If no issues found, state: Clean review - no findings."
     ),
     "validating": (
-        "Validate the story artifacts in the worktree at {worktree_path}. "
+        "Validate the story artifacts at {worktree_path}. "
         "Story: {story_id}. Perform a full story validation.\n\n"
         "Output format: Start with 结果: PASS or 结果: FAIL. "
         "Include sections: ## 摘要, ## 发现的关键问题, "
@@ -535,6 +535,21 @@ class RecoveryEngine:
         return self._resolve_phase_config_static(self._settings, phase)
 
     @staticmethod
+    def _resolve_dispatch_workspace(
+        phase_cfg: dict[str, Any],
+        worktree_path: str | None,
+    ) -> Literal["main", "worktree"]:
+        """解析 recovery dispatch 的有效 workspace。
+
+        显式 phase config 优先；当 settings 缺失导致 phase_cfg 为空时，
+        沿用 legacy fallback：有 worktree_path 则视为 worktree，否则回退 main。
+        """
+        workspace = phase_cfg.get("workspace")
+        if workspace in {"main", "worktree"}:
+            return workspace
+        return "worktree" if worktree_path else "main"
+
+    @staticmethod
     def _resolve_phase_config_static(settings: Any, phase: str) -> dict[str, Any]:
         """从 settings 读取 phase 级别配置（静态版本，供 core.py 复用）。"""
         if settings is None:
@@ -549,6 +564,7 @@ class RecoveryEngine:
                     "sandbox": pd.sandbox,
                     "timeout_seconds": pd.timeout_seconds,
                     "max_concurrent": settings.max_concurrent_agents,
+                    "workspace": pd.workspace,
                 }
         return {}
 
@@ -560,17 +576,28 @@ class RecoveryEngine:
     ) -> dict[str, Any] | None:
         """构建 dispatch options（cwd, sandbox, model, max_turns 等）。
 
-        Pre-worktree phases（worktree_path=None）使用 project root 作为 cwd，
-        确保 agent 在正确的目录下读写 _bmad-output/ 等相对路径。
+        workspace-aware cwd 分流：
+        - workspace: "main"（默认）→ project_root
+        - workspace: "worktree" → worktree_path；若为 None 返回 None
+
+        当 phase_cfg 为空（settings=None recovery 场景），workspace 不在 dict 中，
+        回退到 worktree_path 或 project_root。
+
+        Returns:
+            dispatch options dict，或 None 表示 workspace: worktree 但缺少 worktree_path。
         """
         opts: dict[str, Any] = {}
-        if worktree_path:
-            opts["cwd"] = worktree_path
-        else:
-            # Pre-worktree fallback: derive project root from db_path
+        workspace = self._resolve_dispatch_workspace(phase_cfg, worktree_path)
+        if workspace == "main":
             from ato.core import derive_project_root
 
             opts["cwd"] = str(derive_project_root(self._db_path))
+        else:
+            # workspace == "worktree"
+            if worktree_path:
+                opts["cwd"] = worktree_path
+            else:
+                return None
 
         # sandbox: 仅当 phase config 明确提供时才传
         sandbox = phase_cfg.get("sandbox")
@@ -599,6 +626,32 @@ class RecoveryEngine:
             return story.worktree_path if story else None
         finally:
             await db.close()
+
+    async def _try_create_worktree(self, story_id: str) -> str | None:
+        """尝试为 story 创建 worktree（recovery 场景：worktree 丢失或首次进入）。
+
+        Returns:
+            成功时返回 worktree_path，失败时返回 None。
+        """
+        try:
+            from ato.core import derive_project_root
+            from ato.worktree_mgr import WorktreeManager
+
+            project_root = derive_project_root(self._db_path)
+            mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+            worktree_path = await mgr.create(story_id, base_ref="HEAD")
+            logger.info(
+                "recovery_worktree_created",
+                story_id=story_id,
+                worktree_path=str(worktree_path),
+            )
+            return str(worktree_path)
+        except Exception:
+            logger.exception(
+                "recovery_worktree_creation_failed",
+                story_id=story_id,
+            )
+            return None
 
     async def _dispatch_reviewing_convergent_loop(
         self,
@@ -713,14 +766,28 @@ class RecoveryEngine:
                 finally:
                     await db.close()
 
-            if worktree_path is None:
-                logger.error(
-                    "recovery_convergent_loop_no_worktree",
-                    task_id=task.task_id,
-                    story_id=task.story_id,
-                )
-                await self._mark_dispatch_failed(task)
-                return False
+            workspace = self._resolve_dispatch_workspace(phase_cfg, worktree_path)
+
+            # workspace: worktree 的阶段要求 worktree 存在
+            if worktree_path is None and workspace == "worktree":
+                # 尝试创建 worktree（recovery 场景：worktree 丢失）
+                worktree_path = await self._try_create_worktree(task.story_id)
+                if worktree_path is None:
+                    logger.error(
+                        "recovery_convergent_loop_no_worktree",
+                        task_id=task.task_id,
+                        story_id=task.story_id,
+                    )
+                    await self._mark_dispatch_failed(task)
+                    return False
+
+            # workspace: main 时使用 project_root 作为 effective_path
+            if workspace == "main":
+                from ato.core import derive_project_root
+
+                effective_path = str(derive_project_root(self._db_path))
+            else:
+                effective_path = worktree_path  # type: ignore[assignment]
 
             if task.phase == "reviewing":
                 # 从 phase config 提取 reviewer 的显式 model/sandbox
@@ -732,7 +799,7 @@ class RecoveryEngine:
 
                 await self._dispatch_reviewing_convergent_loop(
                     task,
-                    worktree_path=worktree_path,
+                    worktree_path=effective_path,
                     max_concurrent=max_concurrent,
                     reviewer_options=reviewer_opts or None,
                 )
@@ -758,7 +825,7 @@ class RecoveryEngine:
                     f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
                 )
                 prompt = prompt_template.format(
-                    worktree_path=worktree_path,
+                    worktree_path=effective_path,
                     story_id=task.story_id,
                     validation_report_path=validation_report_path,
                 )
@@ -766,7 +833,7 @@ class RecoveryEngine:
                 prompt = (
                     f"Recovery re-dispatch for story {task.story_id}, "
                     f"phase {task.phase}. "
-                    f"Perform a full {task.phase} on the worktree at {worktree_path}."
+                    f"Perform a full {task.phase} on the path at {effective_path}."
                 )
 
             # Story 9.1d: 附加 UX 上下文（manifest 存在时）
@@ -779,7 +846,7 @@ class RecoveryEngine:
             if ux_ctx:
                 prompt = f"{prompt}{ux_ctx}"
 
-            dispatch_opts: dict[str, Any] = {"cwd": worktree_path}
+            dispatch_opts: dict[str, Any] = {"cwd": effective_path}
             if sandbox:
                 dispatch_opts["sandbox"] = sandbox
             model = phase_cfg.get("model")
@@ -807,11 +874,11 @@ class RecoveryEngine:
 
             if parse_result.verdict == "parse_failed":
                 # Story 9.1f: validating-only artifact-file fallback
-                if task.phase == "validating" and worktree_path is not None:
+                if task.phase == "validating" and effective_path is not None:
                     report_rel = (
                         f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
                     )
-                    report_abs = Path(worktree_path) / report_rel
+                    report_abs = Path(effective_path) / report_rel
                     if report_abs.is_file():
                         logger.info(
                             "convergent_loop_file_fallback_triggered",
@@ -939,14 +1006,29 @@ class RecoveryEngine:
         Pre-worktree phases（planning/creating/designing）在 project_root 上执行，
         通过共享 main-path limiter（max=1）保证同一时刻最多 1 个 story 占用 project_root。
         """
-        from ato.core import PRE_WORKTREE_PHASES, get_main_path_limiter
+        phase_cfg = self._resolve_phase_config(task.phase)
+        worktree_path = await self._get_story_worktree(task.story_id)
+        workspace = self._resolve_dispatch_workspace(phase_cfg, worktree_path)
 
-        limiter = get_main_path_limiter() if task.phase in PRE_WORKTREE_PHASES else None
+        from ato.core import get_main_path_limiter
+
+        limiter = get_main_path_limiter() if workspace == "main" else None
         if limiter is not None:
             await limiter.acquire()
         try:
-            worktree_path = await self._get_story_worktree(task.story_id)
-            phase_cfg = self._resolve_phase_config(task.phase)
+            # 显式 workspace: worktree 但缺 worktree → 尝试创建，失败则 dispatch_failed
+            if workspace == "worktree" and worktree_path is None:
+                worktree_path = await self._try_create_worktree(task.story_id)
+                if worktree_path is None:
+                    logger.error(
+                        "recovery_structured_job_no_worktree",
+                        task_id=task.task_id,
+                        story_id=task.story_id,
+                        phase=task.phase,
+                    )
+                    await self._mark_dispatch_failed(task)
+                    return
+
             max_concurrent = phase_cfg.get("max_concurrent", 4)
             options = self._build_dispatch_options(task, worktree_path, phase_cfg)
 

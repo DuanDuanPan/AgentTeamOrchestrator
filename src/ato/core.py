@@ -31,13 +31,11 @@ from ato.worktree_mgr import WorktreeManager
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 # ---------------------------------------------------------------------------
-# Pre-worktree structured_job 串行控制
+# Main-path (workspace: main) structured_job 串行控制
 # ---------------------------------------------------------------------------
 
-# Phases that execute on project_root (no worktree yet) — must run at most 1 at a time.
-PRE_WORKTREE_PHASES: frozenset[str] = frozenset({"planning", "creating", "designing"})
-
-# Shared single-instance limiter for pre-worktree structured_jobs.
+# Shared single-instance limiter for workspace: main structured_jobs.
+# Callers check phase_cfg["workspace"] == "main" to decide whether to acquire.
 # Created lazily by get_main_path_limiter() inside the running event loop.
 _main_path_limiter: asyncio.Semaphore | None = None
 
@@ -1222,9 +1220,15 @@ class Orchestrator:
         """
         from ato.models.db import get_connection as _gc
         from ato.models.db import get_story
+
+        # 从 phase config 获取 workspace，决定 limiter 策略
+        from ato.recovery import RecoveryEngine
         from ato.subprocess_mgr import SubprocessManager
 
-        limiter = get_main_path_limiter() if task.phase in PRE_WORKTREE_PHASES else None
+        phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, task.phase)
+        workspace = phase_cfg.get("workspace", "main")
+
+        limiter = get_main_path_limiter() if workspace == "main" else None
         if limiter is not None:
             await limiter.acquire()
         try:
@@ -1235,6 +1239,37 @@ class Orchestrator:
                 await db.close()
 
             worktree_path = story.worktree_path if story else None
+
+            # workspace: worktree 但缺 worktree → 尝试创建
+            if workspace == "worktree" and worktree_path is None:
+                try:
+                    project_root = derive_project_root(self._db_path)
+                    wt_mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+                    wt_path = await wt_mgr.create(task.story_id, base_ref="HEAD")
+                    worktree_path = str(wt_path)
+                    logger.info(
+                        "batch_restart_worktree_created",
+                        story_id=task.story_id,
+                        worktree_path=worktree_path,
+                    )
+                except Exception:
+                    logger.exception(
+                        "batch_restart_worktree_creation_failed",
+                        story_id=task.story_id,
+                    )
+                    worktree_path = None
+
+                if worktree_path is None:
+                    logger.error(
+                        "batch_restart_no_worktree",
+                        task_id=task.task_id,
+                        story_id=task.story_id,
+                        phase=task.phase,
+                    )
+                    await self._mark_dispatch_failed(
+                        task, error_message="dispatch_failed:worktree_missing"
+                    )
+                    return
 
             # 创建 adapter + SubprocessManager
             from ato.recovery import _create_adapter
@@ -1278,16 +1313,11 @@ class Orchestrator:
                     prompt, task.story_id, self._db_path
                 )
 
-            # 从 phase config 获取 model / sandbox，确保 restart 路径也透传
-            from ato.recovery import RecoveryEngine
-
-            phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, task.phase)
             options: dict[str, object] = {}
-            if worktree_path:
-                options["cwd"] = worktree_path
-            else:
-                # Pre-worktree fallback: derive project root from db_path
+            if workspace == "main":
                 options["cwd"] = str(derive_project_root(self._db_path))
+            else:
+                options["cwd"] = worktree_path  # guaranteed non-None by guard above
             phase_model = phase_cfg.get("model")
             if phase_model:
                 options["model"] = phase_model

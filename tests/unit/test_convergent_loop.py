@@ -4160,3 +4160,71 @@ class TestReviewPromptManifestInjection:
         prompt = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
         assert "UX Design Context" in prompt
         assert "prototype.manifest.yaml" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Story 9.2: Workspace-aware _resolve_worktree_path
+# ---------------------------------------------------------------------------
+
+
+class TestResolveWorktreePathWorkspace:
+    """Story 9.2 AC#3/AC#6: _resolve_worktree_path workspace-aware 扩展。"""
+
+    async def test_explicit_path_returned_as_is(self, initialized_db_path: Path) -> None:
+        """显式传入的路径直接返回，不查 DB。"""
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        result = await loop._resolve_worktree_path("any-story", "/explicit/path")
+        assert result == "/explicit/path"
+
+    async def test_allow_project_root_fallback(self, initialized_db_path: Path) -> None:
+        """allow_project_root=True 时，worktree_path=None 回退到 project_root。"""
+        from ato.core import derive_project_root
+
+        expected_root = str(derive_project_root(initialized_db_path))
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-main-ws", worktree_path=None))
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        result = await loop._resolve_worktree_path(
+            "s-main-ws", None, allow_project_root=True
+        )
+        assert result == expected_root
+
+    async def test_default_raises_without_worktree(self, initialized_db_path: Path) -> None:
+        """默认（allow_project_root=False）worktree_path=None 时报错。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-no-wt", worktree_path=None))
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        with pytest.raises(ValueError, match="Cannot resolve worktree path"):
+            await loop._resolve_worktree_path("s-no-wt", None)
+
+    async def test_validating_uses_project_root(self, initialized_db_path: Path) -> None:
+        """validating（workspace: main）通过 allow_project_root=True 使用 project_root。"""
+        from ato.core import derive_project_root
+
+        expected_root = str(derive_project_root(initialized_db_path))
+
+        db = await get_connection(initialized_db_path)
+        try:
+            # story 无 worktree（validating 在 worktree 创建前运行）
+            await insert_story(db, _make_story("s-val", worktree_path=None))
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        # validating 使用 allow_project_root=True（workspace: main 语义）
+        result = await loop._resolve_worktree_path(
+            "s-val", None, allow_project_root=True
+        )
+        assert result == expected_root
+        # reviewing 不允许回退（workspace: worktree 语义）
+        with pytest.raises(ValueError):
+            await loop._resolve_worktree_path("s-val", None)

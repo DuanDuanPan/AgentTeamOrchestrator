@@ -1850,7 +1850,10 @@ class TestBatchRestartPhaseOptions:
         mock_adapter.execute.assert_called_once()
         call_args = mock_adapter.execute.call_args
         options = call_args[0][1]  # 第二个位置参数是 options
-        assert options["cwd"] == "/tmp/wt"
+        # creating phase defaults to workspace: main → cwd = project_root
+        from ato.core import derive_project_root
+
+        assert options["cwd"] == str(derive_project_root(initialized_db_path))
         assert options["model"] == "opus"
         # creator 角色 sandbox=None → 不应出现
         assert "sandbox" not in options
@@ -1916,7 +1919,10 @@ class TestBatchRestartPhaseOptions:
         mock_adapter.execute.assert_called_once()
         call_args = mock_adapter.execute.call_args
         options = call_args[0][1]
-        assert options["cwd"] == "/tmp/wt2"
+        # creating phase defaults to workspace: main → cwd = project_root
+        from ato.core import derive_project_root
+
+        assert options["cwd"] == str(derive_project_root(initialized_db_path))
         assert "model" not in options
         assert "sandbox" not in options
 
@@ -1939,16 +1945,34 @@ class TestPreWorktreeSerialControl:
         assert lim1 is lim2
         reset_main_path_limiter()
 
-    async def test_pre_worktree_phases_include_designing(self) -> None:
-        """PRE_WORKTREE_PHASES 包含 planning、creating、designing。"""
-        from ato.core import PRE_WORKTREE_PHASES
+    async def test_workspace_main_phases_use_limiter(self) -> None:
+        """workspace: main 阶段通过 phase_cfg 驱动 limiter（不再依赖硬编码集合）。"""
+        from ato.config import ATOSettings
+        from ato.recovery import RecoveryEngine
 
-        assert "planning" in PRE_WORKTREE_PHASES
-        assert "creating" in PRE_WORKTREE_PHASES
-        assert "designing" in PRE_WORKTREE_PHASES
-        # 非 pre-worktree phases 不应在集合中
-        assert "developing" not in PRE_WORKTREE_PHASES
-        assert "reviewing" not in PRE_WORKTREE_PHASES
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "planning",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "developing",
+                    "workspace": "main",
+                },
+                {
+                    "name": "developing",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+        planning_cfg = RecoveryEngine._resolve_phase_config_static(settings, "planning")
+        developing_cfg = RecoveryEngine._resolve_phase_config_static(settings, "developing")
+        assert planning_cfg["workspace"] == "main"  # should use limiter
+        assert developing_cfg["workspace"] == "worktree"  # should NOT use limiter
 
     async def test_only_one_pre_worktree_job_at_a_time(self) -> None:
         """同一时刻最多只有 1 个 pre-worktree structured_job 在执行。"""
@@ -2854,3 +2878,197 @@ class TestBatchRestartCreatingFindings:
         prompt = mock_adapter.execute.call_args[0][0]
         assert "/bmad-create-story" in prompt
         assert "human approved retry: fix scope" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Story 9.2: _dispatch_batch_restart workspace 分支
+# ---------------------------------------------------------------------------
+
+
+class TestBatchRestartWorkspaceBranches:
+    """直接测试 _dispatch_batch_restart 的 workspace-aware 逻辑。
+
+    确保 restart 路径和 recovery 路径的 workspace 行为一致——
+    防止两条路径实现漂移。
+    """
+
+    async def test_batch_restart_main_workspace_uses_project_root(
+        self, initialized_db_path: Path
+    ) -> None:
+        """workspace: main 的 restart dispatch 使用 project_root 作为 cwd。"""
+        from ato.config import ATOSettings
+        from ato.core import derive_project_root
+        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        expected_root = str(derive_project_root(initialized_db_path))
+
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "dev_ready",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t-ws1", story_id="s-ws1"
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'dev_ready', role = 'dev', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested' "
+                "WHERE task_id = 't-ws1'"
+            )
+            # story 有 worktree，但 dev_ready 是 main → cwd 应该是 project_root
+            await update_story_worktree_path(db, "s-ws1", "/tmp/wt-should-ignore")
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t-ws1",
+            story_id="s-ws1",
+            phase="dev_ready",
+            role="dev",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with patch("ato.recovery._create_adapter", return_value=mock_adapter):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_adapter.execute.assert_called_once()
+        options = mock_adapter.execute.call_args[0][1]
+        assert options["cwd"] == expected_root
+
+    async def test_batch_restart_worktree_workspace_missing_worktree_dispatch_failed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """workspace: worktree 且无 worktree_path 时尝试创建失败 → dispatch_failed。"""
+        from ato.config import ATOSettings
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={"fixer": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t-ws2", story_id="s-ws2"
+        )
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t-ws2",
+            story_id="s-ws2",
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        # WorktreeManager.create 会失败（非 git 仓库）→ dispatch_failed
+        with patch("ato.recovery._create_adapter", return_value=mock_adapter):
+            await orchestrator._dispatch_batch_restart(task)
+
+        # 不应调用 adapter（worktree 创建失败 → 不在 main 上执行 fixing）
+        mock_adapter.execute.assert_not_called()
+
+    async def test_batch_restart_worktree_workspace_with_worktree_uses_it(
+        self, initialized_db_path: Path
+    ) -> None:
+        """workspace: worktree 且 worktree_path 存在时使用 worktree_path 作为 cwd。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={"fixer": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t-ws3", story_id="s-ws3"
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'fixing', role = 'fixer', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested' "
+                "WHERE task_id = 't-ws3'"
+            )
+            await update_story_worktree_path(db, "s-ws3", "/tmp/wt-fix")
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t-ws3",
+            story_id="s-ws3",
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with patch("ato.recovery._create_adapter", return_value=mock_adapter):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_adapter.execute.assert_called_once()
+        options = mock_adapter.execute.call_args[0][1]
+        assert options["cwd"] == "/tmp/wt-fix"

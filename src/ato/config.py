@@ -60,6 +60,7 @@ class PhaseConfig(BaseModel):
     type: Literal["structured_job", "convergent_loop", "interactive_session"]
     next_on_success: str
     next_on_failure: str | None = None
+    workspace: Literal["main", "worktree"] | None = None
 
 
 class ConvergentLoopConfig(BaseModel):
@@ -166,6 +167,7 @@ class PhaseDefinition:
     next_on_success: str
     next_on_failure: str | None
     timeout_seconds: int
+    workspace: str = "main"
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +320,28 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
 # ---------------------------------------------------------------------------
 
 
+# 已知的 main-workspace phase 名（省略 workspace 时用于向后兼容推断）。
+# 这些 phase 在 workspace 字段出现前就在 project_root 上执行：
+# - planning/creating/designing: pre-worktree structured_job
+# - validating: convergent_loop 但 gate 在 main 上运行
+# - dev_ready: worktree 创建前的最后一个 main phase
+# - merging/regression: merge_queue 控制流，在 main 上执行
+_KNOWN_MAIN_PHASES: frozenset[str] = frozenset(
+    {"planning", "creating", "designing", "validating", "dev_ready", "merging", "regression"}
+)
+
+
+def _resolve_workspace(phase: PhaseConfig) -> str:
+    """解析 phase 的 workspace 值。
+
+    显式配置优先；省略时按 phase 名推断（向后兼容旧 YAML）。
+    未知 phase 名默认 ``"worktree"``（安全侧：需要隔离的假设）。
+    """
+    if phase.workspace is not None:
+        return phase.workspace
+    return "main" if phase.name in _KNOWN_MAIN_PHASES else "worktree"
+
+
 def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
     """将 PhaseConfig + RoleConfig 合并为 PhaseDefinition 列表。
 
@@ -348,6 +372,7 @@ def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
                 next_on_success=phase.next_on_success,
                 next_on_failure=phase.next_on_failure,
                 timeout_seconds=timeout_seconds,
+                workspace=_resolve_workspace(phase),
             )
         )
 

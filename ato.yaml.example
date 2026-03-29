@@ -47,66 +47,78 @@ phases:
     role: planner
     type: structured_job
     next_on_success: creating
+    workspace: main
 
   - name: creating
     role: creator
     type: structured_job
     next_on_success: designing
+    workspace: main
 
   - name: designing
     role: ux_designer
     type: structured_job
     next_on_success: validating
+    workspace: main
 
   - name: validating
     role: validator
     type: convergent_loop
     next_on_success: dev_ready
     next_on_failure: creating
+    workspace: main
 
   - name: dev_ready
     role: developer
     type: structured_job
     next_on_success: developing
+    workspace: main
 
   - name: developing
     role: developer
     type: structured_job
     next_on_success: reviewing
+    workspace: worktree
 
   - name: reviewing
     role: reviewer
     type: convergent_loop
     next_on_success: qa_testing
     next_on_failure: fixing
+    workspace: worktree
 
   - name: fixing
     role: fixer
     type: structured_job
     next_on_success: reviewing
+    workspace: worktree
 
   - name: qa_testing
     role: qa
     type: convergent_loop
     next_on_success: uat
     next_on_failure: fixing
+    workspace: worktree
 
   - name: uat
     role: developer
     type: interactive_session
     next_on_success: merging
     next_on_failure: fixing
+    workspace: worktree
 
   - name: merging
     role: developer
     type: structured_job
     next_on_success: regression
+    workspace: main
 
   - name: regression
     role: qa
     type: structured_job
     next_on_success: done
     next_on_failure: fixing
+    workspace: main
 
 # ---------------------------------------------------------------------------
 # 并发控制

@@ -524,3 +524,56 @@ class TestTransitionQueueNudge:
         # （consumer 可能已经在处理，但 notify 发生在 put 后立即执行）
         await tq._queue.join()
         await tq.stop()
+
+
+# ---------------------------------------------------------------------------
+# Story 9.2: Worktree creation on developing
+# ---------------------------------------------------------------------------
+
+
+class TestWorktreeCreationOnDeveloping:
+    async def test_start_dev_creates_worktree_once(self, initialized_db_path: Path) -> None:
+        """start_dev → developing 时调用 WorktreeManager.create()（首次进入）。"""
+        from unittest.mock import AsyncMock, patch
+
+        await _insert_story_at_phase(initialized_db_path, "s1", "dev_ready")
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        mock_create = AsyncMock(return_value=Path("/tmp/.worktrees/s1"))
+        with patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls:
+            mock_wm_cls.return_value.create = mock_create
+            await tq.submit(_make_event("s1", "start_dev"))
+            await tq._queue.join()
+
+        # 验证 create 被调用
+        mock_create.assert_called_once_with("s1", base_ref="HEAD")
+        await tq.stop()
+
+    async def test_start_dev_skips_if_worktree_exists(self, initialized_db_path: Path) -> None:
+        """story 已有 worktree_path 时不再重复创建。"""
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import update_story_worktree_path
+
+        await _insert_story_at_phase(initialized_db_path, "s2", "dev_ready")
+
+        # 预设 worktree_path
+        db = await get_connection(initialized_db_path)
+        try:
+            await update_story_worktree_path(db, "s2", "/existing/worktree")
+        finally:
+            await db.close()
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        mock_create = AsyncMock()
+        with patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls:
+            mock_wm_cls.return_value.create = mock_create
+            await tq.submit(_make_event("s2", "start_dev"))
+            await tq._queue.join()
+
+        # 不应创建
+        mock_create.assert_not_called()
+        await tq.stop()

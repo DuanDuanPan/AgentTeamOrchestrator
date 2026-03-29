@@ -775,6 +775,22 @@ class TestRecoveryActions:
 class TestDispatchOptions:
     """验证 dispatch 传递正确的 options（worktree、sandbox、model）。"""
 
+    def test_build_dispatch_options_without_settings_prefers_existing_worktree(self) -> None:
+        """phase_cfg 为空时应保留传入的 worktree_path，而不是强制回退 project_root。"""
+        engine = RecoveryEngine(
+            db_path=Path("/tmp/project/.ato/state.db"),
+            subprocess_mgr=None,
+            transition_queue=MagicMock(),
+        )
+
+        options = engine._build_dispatch_options(
+            _make_task("t1", "s1", phase="creating"),
+            "/tmp/existing-worktree",
+            {},
+        )
+
+        assert options == {"cwd": "/tmp/existing-worktree"}
+
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
     async def test_dispatch_no_sandbox_when_not_configured(
@@ -819,6 +835,7 @@ class TestDispatchOptions:
         call_args = _mock_recovery_adapter.execute.call_args
         options = call_args[0][1]  # 第二个位置参数是 options
         assert options is not None
+        # no settings → phase_cfg={} → legacy fallback 保留已有 worktree_path
         assert options["cwd"] == "/tmp/test-worktree"
         assert "sandbox" not in options, "未显式配置时不应默认传 sandbox"
 
@@ -894,7 +911,10 @@ class TestDispatchOptions:
         call_args = _mock_recovery_adapter.execute.call_args
         options = call_args[0][1]
         assert options is not None
-        assert options["cwd"] == "/tmp/test-worktree"
+        # creating phase defaults to workspace: main → cwd = project_root
+        from ato.core import derive_project_root
+
+        assert options["cwd"] == str(derive_project_root(initialized_db_path))
         assert options.get("model") == "opus"
         # creator 角色无 sandbox → 不传
         assert "sandbox" not in options
@@ -1834,7 +1854,10 @@ class TestConvergentLoopGenericBranchModelPassthrough:
         options = call_args[0][1]  # 第二个位置参数
         assert options["model"] == "codex-mini-latest"
         assert options["sandbox"] == "read-only"
-        assert options["cwd"] == "/tmp/wt"
+        # validating phase defaults to workspace: main → cwd = project_root
+        from ato.core import derive_project_root
+
+        assert options["cwd"] == str(derive_project_root(initialized_db_path))
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
@@ -1869,13 +1892,13 @@ class TestConvergentLoopGenericBranchModelPassthrough:
             parsed_at=_NOW,
         )
 
+        # 无 settings → _resolve_phase_config 返回 {}
         engine = RecoveryEngine(
             db_path=initialized_db_path,
             subprocess_mgr=None,
             transition_queue=mock_tq,
             interactive_phases={"uat"},
             convergent_loop_phases={"reviewing", "validating", "qa_testing"},
-            # 无 settings → _resolve_phase_config 返回 {}
         )
 
         with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
@@ -1889,6 +1912,7 @@ class TestConvergentLoopGenericBranchModelPassthrough:
         _mock_recovery_adapter.execute.assert_called_once()
         call_args = _mock_recovery_adapter.execute.call_args
         options = call_args[0][1]
+        # no settings → phase_cfg={} → legacy fallback 保留已有 worktree_path
         assert options["cwd"] == "/tmp/wt"
         assert "model" not in options
         assert "sandbox" not in options
@@ -2535,11 +2559,28 @@ class TestValidatingFileFallback:
     def _make_engine(
         self, db_path: Path, tq: AsyncMock | None = None
     ) -> RecoveryEngine:
+        from ato.config import ATOSettings
+
+        # validating tests need workspace: worktree so file fallback reads from worktree path
+        settings = ATOSettings(
+            roles={"validator": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "validating",
+                    "role": "validator",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "validating",
+                    "workspace": "worktree",
+                },
+            ],
+        )
         return RecoveryEngine(
             db_path=db_path,
             subprocess_mgr=None,
             transition_queue=tq or AsyncMock(),
             convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=settings,
         )
 
     def _approved_parse(self) -> object:
@@ -3010,3 +3051,289 @@ class TestValidatingFileFallback:
         mock_rpf.assert_called_once()
         # 不应提交 transition
         mock_tq.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Story 9.2: Workspace-aware dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceAwareDispatch:
+    """Story 9.2 AC#3: workspace: main dispatch 不要求 worktree。"""
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_main_workspace_dispatch_without_worktree(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """workspace: main 阶段在 worktree_path=None 时仍可 dispatch，cwd=project_root。"""
+        from ato.config import ATOSettings
+        from ato.core import derive_project_root
+
+        expected_root = str(derive_project_root(initialized_db_path))
+
+        settings = ATOSettings(
+            roles={
+                "planner": {"cli": "claude"},
+            },
+            phases=[
+                {
+                    "name": "planning",
+                    "role": "planner",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            # story 无 worktree_path
+            await insert_story(db, _make_story("s-ws", worktree_path=None))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-ws",
+                    "s-ws",
+                    status="running",
+                    pid=999,
+                    phase="planning",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            convergent_loop_phases=set(),
+            settings=settings,
+        )
+        await engine.run_recovery()
+        await engine.await_background_tasks()
+
+        _mock_recovery_adapter.execute.assert_called_once()
+        call_args = _mock_recovery_adapter.execute.call_args
+        options = call_args[0][1]
+        assert options is not None
+        assert options["cwd"] == expected_root
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_resolve_phase_config_includes_workspace(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """_resolve_phase_config_static 返回值包含 workspace 字段。"""
+        from ato.config import ATOSettings
+
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "developing",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        result = RecoveryEngine._resolve_phase_config_static(settings, "developing")
+        assert result["workspace"] == "worktree"
+
+        settings_main = ATOSettings(
+            roles={"planner": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "planning",
+                    "role": "planner",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        result_main = RecoveryEngine._resolve_phase_config_static(settings_main, "planning")
+        assert result_main["workspace"] == "main"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_dev_ready_main_workspace_dispatch_uses_project_root(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """dev_ready（workspace: main）恢复时 cwd 应使用 project_root 而非 worktree。"""
+        from ato.config import ATOSettings
+        from ato.core import derive_project_root
+
+        expected_root = str(derive_project_root(initialized_db_path))
+
+        settings = ATOSettings(
+            roles={
+                "dev": {"cli": "claude"},
+            },
+            phases=[
+                {
+                    "name": "dev_ready",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            # story 有 worktree，但 dev_ready 是 workspace: main
+            await insert_story(db, _make_story("s-dr", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-dr",
+                    "s-dr",
+                    status="running",
+                    pid=999,
+                    phase="dev_ready",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            convergent_loop_phases=set(),
+            settings=settings,
+        )
+        await engine.run_recovery()
+        await engine.await_background_tasks()
+
+        _mock_recovery_adapter.execute.assert_called_once()
+        call_args = _mock_recovery_adapter.execute.call_args
+        options = call_args[0][1]
+        assert options is not None
+        # workspace: main → cwd 必须精确等于 project_root，不是 worktree
+        assert options["cwd"] == expected_root
+        assert options["cwd"] != "/tmp/wt"
+
+    async def test_regression_phase_config_workspace_main(
+        self,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """regression phase config 包含 workspace: main（通过 resolve_phase_config 验证）。"""
+        from ato.config import ATOSettings
+
+        settings = ATOSettings(
+            roles={
+                "qa": {"cli": "codex"},
+                "dev": {"cli": "claude"},
+            },
+            phases=[
+                {
+                    "name": "merging",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "regression",
+                    "workspace": "main",
+                },
+                {
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "merging",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        cfg = RecoveryEngine._resolve_phase_config_static(settings, "regression")
+        assert cfg["workspace"] == "main"
+        cfg_merge = RecoveryEngine._resolve_phase_config_static(settings, "merging")
+        assert cfg_merge["workspace"] == "main"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_fixing_without_worktree_tries_create_then_fails(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """fixing（workspace: worktree）缺 worktree 时先尝试创建，创建失败则 dispatch_failed。
+
+        不应静默回退到 project_root。
+        """
+        from ato.config import ATOSettings
+
+        settings = ATOSettings(
+            roles={
+                "fixer": {"cli": "claude"},
+            },
+            phases=[
+                {
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            # story 无 worktree_path
+            await insert_story(db, _make_story("s-fix", worktree_path=None))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-fix",
+                    "s-fix",
+                    status="running",
+                    pid=999,
+                    phase="fixing",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            convergent_loop_phases=set(),
+            settings=settings,
+        )
+
+        # Mock _try_create_worktree 返回 None（创建失败）
+        with patch.object(engine, "_try_create_worktree", return_value=None) as mock_create:
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        # 应尝试创建 worktree
+        mock_create.assert_called_once_with("s-fix")
+        # 不应调用 adapter（不应在 project_root 上执行 fixing）
+        _mock_recovery_adapter.execute.assert_not_called()

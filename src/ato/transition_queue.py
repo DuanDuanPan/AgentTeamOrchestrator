@@ -212,8 +212,10 @@ class TransitionQueue:
                 await save_story_state(db, event.story_id, new_state)
                 await db.commit()
 
-                # Post-commit hook: story 完成里程碑通知 + batch 完成检测
-                if new_state == "done":
+                # Post-commit hooks
+                if new_state == "developing":
+                    await self._on_enter_developing(db, event.story_id)
+                elif new_state == "done":
                     await self._on_story_done(db, event.story_id)
 
                 latency_ms = (time.monotonic() - t_start) * 1000
@@ -233,6 +235,42 @@ class TransitionQueue:
             finally:
                 self._queue.task_done()
                 clear_contextvars()
+
+    async def _on_enter_developing(self, db: aiosqlite.Connection, story_id: str) -> None:
+        """Story 首次进入 developing 时的 post-commit hook：创建 worktree。
+
+        幂等：WorktreeManager.create() 已有幂等逻辑——worktree 已存在则跳过。
+        """
+        story = await get_story(db, story_id)
+        if story is None:
+            return
+
+        # 已有 worktree 则跳过
+        if story.worktree_path is not None:
+            logger.info(
+                "worktree_already_exists",
+                story_id=story_id,
+                worktree_path=story.worktree_path,
+            )
+            return
+
+        try:
+            from ato.core import derive_project_root
+            from ato.worktree_mgr import WorktreeManager
+
+            project_root = derive_project_root(self._db_path)
+            mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+            worktree_path = await mgr.create(story_id, base_ref="HEAD")
+            logger.info(
+                "worktree_created_on_developing",
+                story_id=story_id,
+                worktree_path=str(worktree_path),
+            )
+        except Exception:
+            logger.exception(
+                "worktree_creation_failed_on_developing",
+                story_id=story_id,
+            )
 
     async def _on_story_done(self, db: aiosqlite.Connection, story_id: str) -> None:
         """Story 完成后的 post-commit hook：里程碑通知 + batch 完成检测。"""
