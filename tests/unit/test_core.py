@@ -2687,3 +2687,170 @@ class TestDevelopingPromptUxContext:
         )
         prompt = _build_interactive_prompt(task, "/worktree", project_root=root)
         assert "UX Design Context" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Story 9.1e: _dispatch_batch_restart creating 路径使用 findings helper
+# ---------------------------------------------------------------------------
+
+
+class TestBatchRestartCreatingFindings:
+    """验证 _dispatch_batch_restart creating 路径经过 _build_creating_prompt_with_findings。"""
+
+    async def test_batch_restart_creating_includes_findings(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC4: core._dispatch_batch_restart creating 路径追加 validation findings。"""
+        from ato.config import ATOSettings
+        from ato.models.db import (
+            get_connection,
+            insert_findings_batch,
+            update_story_worktree_path,
+        )
+        from ato.models.schemas import (
+            AdapterResult,
+            FindingRecord,
+            TaskRecord,
+            compute_dedup_hash,
+        )
+
+        settings = ATOSettings(
+            roles={"creator": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t-cr", story_id="s-cr"
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'creating', role = 'creator', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested' "
+                "WHERE task_id = 't-cr'"
+            )
+            await update_story_worktree_path(db, "s-cr", "/tmp/wt-cr")
+            now = datetime.now(tz=UTC)
+            await insert_findings_batch(
+                db,
+                [
+                    FindingRecord(
+                        finding_id="f-core-1",
+                        story_id="s-cr",
+                        round_num=1,
+                        severity="blocking",  # type: ignore[arg-type]
+                        description="missing acceptance criteria",
+                        status="open",  # type: ignore[arg-type]
+                        file_path="story.md",
+                        rule_id="SV001",
+                        dedup_hash=compute_dedup_hash(
+                            "story.md", "SV001", "blocking",
+                            "missing acceptance criteria",
+                        ),
+                        created_at=now,
+                    ),
+                ],
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t-cr",
+            story_id="s-cr",
+            phase="creating",
+            role="creator",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with patch("ato.recovery._create_adapter", return_value=mock_adapter):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_adapter.execute.assert_called_once()
+        prompt = mock_adapter.execute.call_args[0][0]
+        assert "## Validation Feedback" in prompt
+        assert "missing acceptance criteria" in prompt
+        assert "/bmad-create-story" in prompt
+
+    async def test_batch_restart_creating_preserves_context_briefing(
+        self, initialized_db_path: Path
+    ) -> None:
+        """core._dispatch_batch_restart creating 模板分支保留 context_briefing。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={"creator": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t-cb", story_id="s-cb"
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'creating', role = 'creator', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested' "
+                "WHERE task_id = 't-cb'"
+            )
+            await update_story_worktree_path(db, "s-cb", "/tmp/wt-cb")
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t-cb",
+            story_id="s-cb",
+            phase="creating",
+            role="creator",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+            context_briefing="human approved retry: fix scope",
+        )
+
+        with patch("ato.recovery._create_adapter", return_value=mock_adapter):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_adapter.execute.assert_called_once()
+        prompt = mock_adapter.execute.call_args[0][0]
+        assert "/bmad-create-story" in prompt
+        assert "human approved retry: fix scope" in prompt

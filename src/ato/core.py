@@ -1251,6 +1251,7 @@ class Orchestrator:
             # 构建 prompt（优先使用 phase-specific 模板）
             from ato.recovery import (
                 _STRUCTURED_JOB_PROMPTS,
+                _build_creating_prompt_with_findings,
                 _format_structured_job_prompt,
             )
 
@@ -1265,6 +1266,16 @@ class Orchestrator:
                     f"Restart for story {task.story_id}, phase {task.phase}. "
                     f"The previous task needs to be retried. "
                     f"Please perform the work for this phase.{story_ctx}"
+                )
+
+            # 模板分支也保留 context_briefing（restart 上下文不丢失）
+            if prompt_template is not None and task.context_briefing:
+                prompt = f"{prompt}\n\nPrevious context: {task.context_briefing}"
+
+            # Story 9.1e: creating phase 追加 validation findings
+            if task.phase == "creating":
+                prompt = await _build_creating_prompt_with_findings(
+                    prompt, task.story_id, self._db_path
                 )
 
             # 从 phase config 获取 model / sandbox，确保 restart 路径也透传

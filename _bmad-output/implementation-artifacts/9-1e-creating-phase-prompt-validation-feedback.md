@@ -1,6 +1,6 @@
 # Story 9.1e: 修复 validate_fail → creating 回退路径 prompt 与验证反馈注入
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- Depends on: Story 9.1 (designing phase 引入了完整的 phase 链) -->
@@ -77,26 +77,26 @@ Then 至少覆盖：
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 在 `recovery.py` 中新增 creating prompt 与 findings helper (AC: #1, #2, #3)
-  - [ ] 1.1 在 `src/ato/recovery.py` 的 import 区添加 `import json`
-  - [ ] 1.2 在 `_STRUCTURED_JOB_PROMPTS` 中新增 `"creating"` 条目，触发 `/bmad-create-story` 并使用 `{story_id}` / `{story_file}` 占位符
-  - [ ] 1.3 在 `_format_structured_job_prompt()` 之后新增 `async def _build_creating_prompt_with_findings(base_prompt: str, story_id: str, db_path: Path) -> str`
-  - [ ] 1.4 helper 通过 `get_connection()` + `get_open_findings()` 读取当前 unresolved findings
-  - [ ] 1.5 无 findings 时直接返回 `base_prompt`；有 findings 时追加 JSON payload、"FAILED validation" 指令与反注入声明
-  - [ ] 1.6 JSON payload 字段最少包含 `file_path`, `rule_id`, `severity`, `description`，并仅在有值时附带 `line_number`
+- [x] Task 1: 在 `recovery.py` 中新增 creating prompt 与 findings helper (AC: #1, #2, #3)
+  - [x] 1.1 在 `src/ato/recovery.py` 的 import 区添加 `import json`
+  - [x] 1.2 在 `_STRUCTURED_JOB_PROMPTS` 中新增 `"creating"` 条目，触发 `/bmad-create-story` 并使用 `{story_id}` / `{story_file}` 占位符
+  - [x] 1.3 在 `_format_structured_job_prompt()` 之后新增 `async def _build_creating_prompt_with_findings(base_prompt: str, story_id: str, db_path: Path) -> str`
+  - [x] 1.4 helper 通过 `get_connection()` + `get_open_findings()` 读取当前 unresolved findings
+  - [x] 1.5 无 findings 时直接返回 `base_prompt`；有 findings 时追加 JSON payload、"FAILED validation" 指令与反注入声明
+  - [x] 1.6 JSON payload 字段最少包含 `file_path`, `rule_id`, `severity`, `description`，并仅在有值时附带 `line_number`
 
-- [ ] Task 2: 让 recovery / restart 两条 creating dispatch 路径共用 helper (AC: #4)
-  - [ ] 2.1 在 `src/ato/recovery.py::_dispatch_structured_job()` 中，`_format_structured_job_prompt()` 之后增加 `if task.phase == "creating":` 分支并 `await _build_creating_prompt_with_findings(...)`
-  - [ ] 2.2 在 `src/ato/core.py::_dispatch_batch_restart()` 中导入 `_build_creating_prompt_with_findings`
-  - [ ] 2.3 `core.py` 的 creating restart 路径与 recovery 路径保持同构处理
-  - [ ] 2.4 不修改 `_format_structured_job_prompt()` 的同步签名，也不改动其他 phase 的 generic fallback 合同
+- [x] Task 2: 让 recovery / restart 两条 creating dispatch 路径共用 helper (AC: #4)
+  - [x] 2.1 在 `src/ato/recovery.py::_dispatch_structured_job()` 中，`_format_structured_job_prompt()` 之后增加 `if task.phase == "creating":` 分支并 `await _build_creating_prompt_with_findings(...)`
+  - [x] 2.2 在 `src/ato/core.py::_dispatch_batch_restart()` 中导入 `_build_creating_prompt_with_findings`
+  - [x] 2.3 `core.py` 的 creating restart 路径与 recovery 路径保持同构处理
+  - [x] 2.4 不修改 `_format_structured_job_prompt()` 的同步签名，也不改动其他 phase 的 generic fallback 合同
 
-- [ ] Task 3: 增加针对 helper 与两条路径的回归测试 (AC: #5)
-  - [ ] 3.1 在 `tests/unit/test_recovery.py` 中新增 `test_creating_prompt_template_exists`
-  - [ ] 3.2 在 `tests/unit/test_recovery.py` 中新增 helper 的 no-findings / with-findings 断言
-  - [ ] 3.3 在 `tests/unit/test_recovery.py` 中新增 JSON code fence + 反注入声明断言
-  - [ ] 3.4 在 `tests/unit/test_recovery.py` 中补一条 creating structured_job dispatch 使用 helper 的断言
-  - [ ] 3.5 在 `tests/unit/test_core.py` 中补一条 `_dispatch_batch_restart()` creating 路径使用 helper 的断言
+- [x] Task 3: 增加针对 helper 与两条路径的回归测试 (AC: #5)
+  - [x] 3.1 在 `tests/unit/test_recovery.py` 中新增 `test_creating_prompt_template_exists`
+  - [x] 3.2 在 `tests/unit/test_recovery.py` 中新增 helper 的 no-findings / with-findings 断言
+  - [x] 3.3 在 `tests/unit/test_recovery.py` 中新增 JSON code fence + 反注入声明断言
+  - [x] 3.4 在 `tests/unit/test_recovery.py` 中补一条 creating structured_job dispatch 使用 helper 的断言
+  - [x] 3.5 在 `tests/unit/test_core.py` 中补一条 `_dispatch_batch_restart()` creating 路径使用 helper 的断言
 
 ## Dev Notes
 
@@ -156,15 +156,32 @@ uv run pytest tests/unit/test_recovery.py tests/unit/test_core.py -v
 
 - 2026-03-28: Story 创建 — 基于 sprint change proposal 增补 validate_fail → creating corrective story
 - 2026-03-28: `validate-create-story` 修订 —— 将 runtime/test 影响面扩展到 `_dispatch_batch_restart()`；明确无 findings passthrough 覆盖未持久化反馈的 `validate_fail` 路径；移除易漂移的行号引用并补回 Scope Boundary、Previous Story Intelligence 与 Dev Agent Record 结构
+- 2026-03-28: 实现完成 — creating prompt 模板、findings helper、两条 dispatch 路径接线、9 个新测试全部通过
+- 2026-03-28: bugfix — 修复 phase-specific template 分支丢失 context_briefing 的回归（也修复了 designing 既有的同一盲区）；新增 4 个保护测试
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-待 dev-story 填写
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- ✅ 在 `_STRUCTURED_JOB_PROMPTS` 新增 `"creating"` 条目，触发 `/bmad-create-story`，使用 `{story_id}` / `{story_file}` 占位符
+- ✅ 新增 `_build_creating_prompt_with_findings()` async helper：无 findings 时 passthrough；有 findings 时追加 JSON code fence + "FAILED validation" + 反注入声明
+- ✅ `recovery.py::_dispatch_structured_job()` creating 路径调用 helper
+- ✅ `core.py::_dispatch_batch_restart()` creating 路径调用 helper（同构处理）
+- ✅ `_format_structured_job_prompt()` 保持 sync 签名不变
+- ✅ 新增 9 个测试：4 个模板断言 + 3 个 helper 断言 + 1 个 recovery dispatch 断言 + 1 个 core dispatch 断言
+- ✅ bugfix: phase-specific template 分支现在统一追加 `context_briefing`（当有值时），修复 creating + designing 两个模板分支的既有盲区
+- ✅ 新增 4 个 context_briefing 保护测试：recovery creating/designing 各 1 + 无 context 无多余文案 1 + core creating 1
+- ✅ 159 tests passed, 0 regressions, ruff lint clean
+
 ### File List
+
+- `src/ato/recovery.py` — 新增 `import json`、`"creating"` prompt 模板、`_build_creating_prompt_with_findings()` helper、`_dispatch_structured_job()` creating 分支
+- `src/ato/core.py` — `_dispatch_batch_restart()` 导入并调用 `_build_creating_prompt_with_findings`
+- `tests/unit/test_recovery.py` — 新增 TestCreatingPromptTemplate (4)、TestBuildCreatingPromptWithFindings (3)、TestCreatingDispatchUsesHelper (1)、TestTemplateContextBriefingPreservation (3)
+- `tests/unit/test_core.py` — 新增 TestBatchRestartCreatingFindings (2: findings 注入 + context_briefing 保留)
