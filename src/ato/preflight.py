@@ -122,6 +122,7 @@ async def _check_claude_auth() -> CheckResult:
     logger.debug("preflight_check_start", layer="system", check_item=check_item)
     cmd = [
         "claude",
+        "--dangerously-skip-permissions",
         "-p",
         "ping",
         "--max-turns",

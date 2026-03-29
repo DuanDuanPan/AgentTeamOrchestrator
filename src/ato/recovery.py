@@ -83,7 +83,8 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
     ),
     "validating": (
         "Validate the story artifacts at {worktree_path}. "
-        "Story: {story_id}. Perform a full story validation.\n\n"
+        "Story: {story_id}. Explicitly run the `validate-create-story` workflow "
+        "for this validation instead of doing a generic freeform review.\n\n"
         "Output format: Start with 结果: PASS or 结果: FAIL. "
         "Include sections: ## 摘要, ## 发现的关键问题, "
         "## 已应用增强, ## 剩余风险, ## 最终结论. "
@@ -105,6 +106,12 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
 
 # Structured job phase-specific prompt 模板（非 convergent_loop / interactive 阶段）
 _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
+    "planning": (
+        "为 story {story_id} 执行规划阶段。\n"
+        "请运行 /bmad-create-story 来分析 story 需求并生成完整的 story 规格文件。\n"
+        "Story 规格文件应保存到: {story_file}\n\n"
+        "确保产出物包含完整的 Acceptance Criteria、Tasks/Subtasks 和 Dev Notes。"
+    ),
     "creating": (
         "为 story {story_id} 创建 story 规格文件。\n"
         "Story 规格文件: {story_file}\n\n"
@@ -560,11 +567,16 @@ class RecoveryEngine:
             if pd.name == phase:
                 return {
                     "cli_tool": pd.cli_tool,
+                    "role": pd.role,
+                    "phase_type": pd.phase_type,
                     "model": pd.model,
                     "sandbox": pd.sandbox,
                     "timeout_seconds": pd.timeout_seconds,
                     "max_concurrent": settings.max_concurrent_agents,
                     "workspace": pd.workspace,
+                    "effort": pd.effort,
+                    "reasoning_effort": pd.reasoning_effort,
+                    "reasoning_summary_format": pd.reasoning_summary_format,
                 }
         return {}
 
@@ -608,6 +620,16 @@ class RecoveryEngine:
         model = phase_cfg.get("model")
         if model:
             opts["model"] = model
+
+        # effort (claude): 仅当 phase config 明确提供时才传
+        if effort := phase_cfg.get("effort"):
+            opts["effort"] = effort
+
+        # reasoning_effort / reasoning_summary_format (codex)
+        if reasoning_effort := phase_cfg.get("reasoning_effort"):
+            opts["reasoning_effort"] = reasoning_effort
+        if reasoning_summary_format := phase_cfg.get("reasoning_summary_format"):
+            opts["reasoning_summary_format"] = reasoning_summary_format
 
         # max_turns from timeout (structured_job: timeout/60 作为粗估)
         timeout = phase_cfg.get("timeout_seconds")

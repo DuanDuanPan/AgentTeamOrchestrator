@@ -25,6 +25,7 @@ logger = structlog.get_logger()
 
 __all__ = [
     "ATOSettings",
+    "CLIDefaultsConfig",
     "ConvergentLoopConfig",
     "CostConfig",
     "PhaseConfig",
@@ -41,6 +42,18 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+class CLIDefaultsConfig(BaseModel):
+    """CLI 工具全局默认参数。角色级配置优先于此处。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = None
+    sandbox: Literal["read-only", "workspace-write"] | None = None
+    effort: Literal["low", "medium", "high", "max"] | None = None
+    reasoning_effort: str | None = None
+    reasoning_summary_format: str | None = None
+
+
 class RoleConfig(BaseModel):
     """角色配置。"""
 
@@ -49,6 +62,9 @@ class RoleConfig(BaseModel):
     cli: Literal["claude", "codex"]
     model: str | None = None
     sandbox: Literal["read-only", "workspace-write"] | None = None
+    effort: Literal["low", "medium", "high", "max"] | None = None
+    reasoning_effort: str | None = None
+    reasoning_summary_format: str | None = None
 
 
 class PhaseConfig(BaseModel):
@@ -108,6 +124,7 @@ class ATOSettings(BaseSettings):
     # 运行时路径注入（load_config 设置，settings_customise_sources 消费）
     _yaml_file_override: ClassVar[Path | None] = None
 
+    cli_defaults: dict[str, CLIDefaultsConfig] = {}
     roles: dict[str, RoleConfig]
     phases: list[PhaseConfig]
     max_concurrent_agents: int = 4
@@ -171,6 +188,9 @@ class PhaseDefinition:
     timeout_seconds: int
     workspace: str = "main"
     skip_when: str | None = None
+    effort: str | None = None
+    reasoning_effort: str | None = None
+    reasoning_summary_format: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -354,9 +374,20 @@ def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
 
     for phase in config.phases:
         role_config = config.roles[phase.role]
+        cli_default = config.cli_defaults.get(role_config.cli, CLIDefaultsConfig())
 
-        # model 解析：model_map[phase.name] 优先，否则回退到角色默认
-        model = config.model_map.get(phase.name, role_config.model)
+        # model 解析：model_map[phase.name] > 角色级 > cli_defaults 级
+        model = (
+            config.model_map.get(phase.name)
+            or role_config.model
+            or cli_default.model
+        )
+        sandbox = role_config.sandbox or cli_default.sandbox
+        effort = role_config.effort or cli_default.effort
+        reasoning_effort = role_config.reasoning_effort or cli_default.reasoning_effort
+        reasoning_summary_format = (
+            role_config.reasoning_summary_format or cli_default.reasoning_summary_format
+        )
 
         # timeout 由 phase.type 决定；convergent_loop 视为非交互阶段
         if phase.type == "interactive_session":
@@ -370,13 +401,16 @@ def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
                 role=phase.role,
                 cli_tool=role_config.cli,
                 model=model,
-                sandbox=role_config.sandbox,
+                sandbox=sandbox,
                 phase_type=phase.type,
                 next_on_success=phase.next_on_success,
                 next_on_failure=phase.next_on_failure,
                 timeout_seconds=timeout_seconds,
                 workspace=_resolve_workspace(phase),
                 skip_when=phase.skip_when,
+                effort=effort,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary_format=reasoning_summary_format,
             )
         )
 

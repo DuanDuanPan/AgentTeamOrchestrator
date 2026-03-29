@@ -141,7 +141,10 @@ class TestBuildCommand:
     def test_basic_command(self) -> None:
         adapter = ClaudeAdapter()
         cmd = adapter._build_command("hello world")
-        assert cmd == ["claude", "-p", "hello world", "--output-format", "json"]
+        assert cmd == [
+            "claude", "--dangerously-skip-permissions",
+            "-p", "hello world", "--output-format", "json",
+        ]
 
     def test_with_max_turns(self) -> None:
         adapter = ClaudeAdapter()

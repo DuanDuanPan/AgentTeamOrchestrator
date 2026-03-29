@@ -201,46 +201,46 @@ def build_canonical_key_map(sprint_status_path: Path) -> dict[str, str]:
 
 
 def build_llm_recommend_prompt(
-    candidates: list[EpicInfo],
-    existing_stories: dict[str, StoryRecord],
     max_stories: int,
+    epics_path: str,
+    sprint_status_path: str | None = None,
 ) -> str:
     """为 LLM batch 推荐构建 prompt。
 
-    将 eligible candidates 及其当前状态序列化为 prompt，
-    指示 LLM 从中选择/排序最有价值的 stories。
+    不传递候选列表，而是告诉 LLM 项目文件位置，
+    让 LLM 自行阅读 epics、sprint status 和代码库来决定推荐。
     """
     lines: list[str] = [
-        "你是一个项目编排助手。"
-        "请从以下 eligible candidate stories 中选择最有价值的 stories 组成 batch。",
+        "你是一个项目编排助手。请分析当前项目环境，推荐最有价值的 stories 组成 batch。",
+        "",
+        "## 你需要做的",
+        f"1. 阅读 epics 文件: `{epics_path}`",
+    ]
+
+    if sprint_status_path:
+        lines.append(f"2. 阅读 sprint 状态文件: `{sprint_status_path}`")
+        lines.append("3. 浏览项目代码库，判断哪些 story 已在代码中实质完成")
+        lines.append("4. 分析 story 间的依赖关系")
+        lines.append(f"5. 推荐最多 {max_stories} 个最有价值的待实现 stories")
+    else:
+        lines.append("2. 浏览项目代码库，判断哪些 story 已在代码中实质完成")
+        lines.append("3. 分析 story 间的依赖关系")
+        lines.append(f"4. 推荐最多 {max_stories} 个最有价值的待实现 stories")
+
+    lines.extend([
         "",
         "## 约束",
         f"- 最多选择 {max_stories} 个 stories",
-        "- 只能从下方候选列表中选择，不能引入列表外的 story",
-        "- 排除你认为已在仓库中实质完成的 stories（即使状态仍是 backlog）",
+        "- story_keys 必须使用 sprint-status.yaml 中的 canonical key 格式"
+        "（如 `1-1-enabler-project-init`），若无 sprint-status 则使用"
+        " epics 中的 short key 格式（如 `1-1`）",
+        "- 排除已在代码中实质完成的 stories",
+        "- 排除依赖未满足的 stories（前置 story 未完成）",
         "- 按推荐优先级排序返回",
-        "",
-        "## Eligible Candidates",
-        "",
-    ]
-
-    for info in candidates:
-        story = existing_stories.get(info.story_key)
-        status_str = story.status if story is not None else "backlog"
-        phase_str = story.current_phase if story is not None else "idle"
-        deps_str = ", ".join(info.dependencies) if info.dependencies else "无"
-        lines.append(
-            f"- key: `{info.story_key}` | title: {info.title} "
-            f"| epic: {info.epic_key} | status: {status_str} | phase: {phase_str} "
-            f"| deps: {deps_str}"
-        )
-
-    lines.extend([
         "",
         "## 输出要求",
         "严格按照 JSON schema 返回 structured output，"
         "包含 story_keys（有序列表）和 reason（推荐理由）。",
-        "请查看当前仓库代码来判断哪些 stories 已经实质完成。",
     ])
 
     return "\n".join(lines)
@@ -337,8 +337,9 @@ class LLMRecommendError(Exception):
 class LLMBatchRecommender:
     """基于 Claude LLM 的智能 batch 推荐。
 
-    在 LocalBatchRecommender 生成的 **完整** eligible candidate pool 基础上，
-    调用 Claude 做语义排序/筛选。
+    让 Claude 自行阅读项目的 epics、sprint status 和代码库，
+    自主判断哪些 stories 已完成、哪些依赖未满足，
+    从而推荐最有价值的 batch。
 
     所有失败路径（adapter 错误、schema 不匹配、二次校验不通过）
     一律抛出 :class:`LLMRecommendError`，由 CLI 层统一 catch 并回退。
@@ -348,9 +349,13 @@ class LLMBatchRecommender:
         self,
         adapter: object,  # ClaudeAdapter — 延迟类型引用避免循环导入
         project_root: Path,
+        epics_path: Path,
+        sprint_status_path: Path | None = None,
     ) -> None:
         self._adapter = adapter
         self._project_root = project_root
+        self._epics_path = epics_path
+        self._sprint_status_path = sprint_status_path
 
     async def recommend(
         self,
@@ -358,7 +363,7 @@ class LLMBatchRecommender:
         existing_stories: dict[str, StoryRecord],
         max_stories: int,
     ) -> BatchProposal:
-        """LLM 推荐入口：先确定性过滤，再 LLM 排序/筛选。
+        """LLM 推荐入口：让 Claude 自主分析项目环境并推荐。
 
         Raises:
             LLMRecommendError: 任何失败（Claude 调用、schema 校验、
@@ -366,29 +371,24 @@ class LLMBatchRecommender:
         """
         from ato.models.schemas import BATCH_RECOMMEND_JSON_SCHEMA, BatchRecommendOutput
 
-        # 1. 生成完整 eligible candidate pool（不截断）
-        #    传 len(epics_info) 确保依赖/状态过滤后拿到全部候选，
-        #    而非被 max_stories 提前截断。
-        local = LocalBatchRecommender()
-        full_pool = local.recommend(
-            epics_info, existing_stories, len(epics_info),
+        # 1. 构建 prompt — 只传文件路径，让 LLM 自己读
+        sprint_status_str = (
+            str(self._sprint_status_path) if self._sprint_status_path and self._sprint_status_path.exists() else None
         )
-
-        if not full_pool.stories:
-            return full_pool
-
-        # 2. 构建 prompt 并调用 Claude
         prompt = build_llm_recommend_prompt(
-            full_pool.stories, existing_stories, max_stories,
+            max_stories,
+            epics_path=str(self._epics_path),
+            sprint_status_path=sprint_status_str,
         )
 
+        # 2. 调用 Claude — cwd 设为项目根目录，给足 turns 让 LLM 阅读文件
         try:
             result = await self._adapter.execute(  # type: ignore[attr-defined]
                 prompt,
                 {
                     "json_schema": BATCH_RECOMMEND_JSON_SCHEMA,
                     "cwd": str(self._project_root),
-                    "max_turns": 3,
+                    "max_turns": 10,
                 },
             )
         except Exception as exc:
@@ -409,21 +409,27 @@ class LLMBatchRecommender:
             )
             raise LLMRecommendError("structured_output schema 校验失败") from exc
 
-        # 4. Python 侧二次校验 — fail-closed：任何异常 key 即整体无效
-        candidate_keys = {info.story_key for info in full_pool.stories}
-        seen: set[str] = set()
+        # 4. Python 侧二次校验
+        #    构建合法 key 集合（canonical key + short key 均可接受）
+        valid_keys = {info.story_key for info in epics_info}
+        valid_keys |= {info.short_key for info in epics_info}
+        key_to_epic: dict[str, EpicInfo] = {}
+        for info in epics_info:
+            key_to_epic[info.story_key] = info
+            key_to_epic[info.short_key] = info
 
+        seen: set[str] = set()
         for key in output.story_keys:
             if key in seen:
                 logger.warning("llm_batch_recommend_duplicate_key", key=key)
                 raise LLMRecommendError(f"LLM 返回重复 key: {key}")
             seen.add(key)
-            if key not in candidate_keys:
+            if key not in valid_keys:
                 logger.warning(
-                    "llm_batch_recommend_out_of_pool_key", key=key,
+                    "llm_batch_recommend_unknown_key", key=key,
                 )
                 raise LLMRecommendError(
-                    f"LLM 返回集合外 key: {key}",
+                    f"LLM 返回未知 key: {key}",
                 )
 
         if len(output.story_keys) > max_stories:
@@ -442,8 +448,7 @@ class LLMBatchRecommender:
             raise LLMRecommendError("LLM 返回空 story_keys")
 
         # 5. 映射回 EpicInfo，按 LLM 返回顺序
-        pool_map = {info.story_key: info for info in full_pool.stories}
-        selected = [pool_map[key] for key in output.story_keys]
+        selected = [key_to_epic[key] for key in output.story_keys]
 
         logger.info(
             "llm_batch_recommend_success",

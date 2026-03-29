@@ -2636,10 +2636,11 @@ class TestValidatingFileFallback:
         )
 
     def test_validating_prompt_contains_report_path_placeholder(self) -> None:
-        """AC1: prompt 模板包含 {validation_report_path} 占位符和文件输出指令。"""
+        """AC1: prompt 模板包含 workflow 绑定和 report_path 输出指令。"""
         from ato.recovery import _CONVERGENT_LOOP_PROMPTS
 
         tmpl = _CONVERGENT_LOOP_PROMPTS["validating"]
+        assert "validate-create-story" in tmpl
         assert "{validation_report_path}" in tmpl
         assert "Also write the full validation report to" in tmpl
 
@@ -2679,6 +2680,7 @@ class TestValidatingFileFallback:
 
         prompt = _mock_recovery_adapter.execute.call_args[0][0]
         expected_path = "_bmad-output/implementation-artifacts/s-pr-validation-report.md"
+        assert "validate-create-story" in prompt
         assert expected_path in prompt
         assert "Also write the full validation report to" in prompt
 

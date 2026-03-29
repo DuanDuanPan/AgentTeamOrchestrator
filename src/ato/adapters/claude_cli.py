@@ -58,7 +58,7 @@ def build_interactive_command(
         prompt: 发送给 CLI 的提示文本。
         session_id: 若提供则使用 --resume 续接。
     """
-    cmd = ["claude", "-p", prompt]
+    cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
     if session_id:  # None 和 "" 都降级为 fresh session
         cmd.extend(["--resume", session_id])
     return cmd
@@ -77,8 +77,12 @@ class ClaudeAdapter(BaseAdapter):
         options: dict[str, Any] | None = None,
     ) -> list[str]:
         """构建 claude CLI 命令参数列表。"""
-        cmd = ["claude", "-p", prompt, "--output-format", "json"]
+        cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt, "--output-format", "json"]
         if options:
+            if model := options.get("model"):
+                cmd.extend(["--model", str(model)])
+            if effort := options.get("effort"):
+                cmd.extend(["--effort", str(effort)])
             if max_turns := options.get("max_turns"):
                 cmd.extend(["--max-turns", str(max_turns)])
             if json_schema := options.get("json_schema"):

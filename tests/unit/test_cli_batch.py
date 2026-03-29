@@ -479,12 +479,17 @@ class TestBatchSelectLlmFlag:
         db_path = _create_db(tmp_path)
         epics = _create_epics(tmp_path)
 
+        from unittest.mock import AsyncMock
+
         from ato.batch import LLMBatchRecommender, LLMRecommendError
 
         async def mock_recommend(*_args, **_kwargs):
             raise LLMRecommendError("Claude CLI 调用失败")
 
-        with patch.object(LLMBatchRecommender, "recommend", side_effect=mock_recommend):
+        with (
+            patch.object(LLMBatchRecommender, "recommend", side_effect=mock_recommend),
+            patch("ato.adapters.claude_cli.ClaudeAdapter", return_value=AsyncMock()),
+        ):
             result = runner.invoke(
                 app,
                 [

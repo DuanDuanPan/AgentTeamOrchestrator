@@ -767,25 +767,23 @@ class TestConfirmBatchHasUi:
 
 
 class TestBuildLlmRecommendPrompt:
-    def test_contains_candidate_keys(self) -> None:
-        candidates = [
-            _make_epic("1-1", "1-1-scaffolding", "Scaffolding"),
-            _make_epic("1-2", "1-2-sqlite", "SQLite", ["1-1"]),
-        ]
-        prompt = build_llm_recommend_prompt(candidates, {}, 5)
-        assert "1-1-scaffolding" in prompt
-        assert "1-2-sqlite" in prompt
+    def test_contains_file_paths(self) -> None:
+        prompt = build_llm_recommend_prompt(
+            5,
+            epics_path="/project/epics.md",
+            sprint_status_path="/project/sprint-status.yaml",
+        )
+        assert "/project/epics.md" in prompt
+        assert "/project/sprint-status.yaml" in prompt
 
     def test_contains_max_stories_constraint(self) -> None:
-        candidates = [_make_epic("1-1", "1-1-a", "A")]
-        prompt = build_llm_recommend_prompt(candidates, {}, 3)
+        prompt = build_llm_recommend_prompt(3, epics_path="/epics.md")
         assert "3" in prompt
 
-    def test_includes_status_info(self) -> None:
-        candidates = [_make_epic("1-1", "1-1-a", "A")]
-        existing = {"1-1-a": _make_story("1-1-a", "ready", "idle")}
-        prompt = build_llm_recommend_prompt(candidates, existing, 5)
-        assert "ready" in prompt
+    def test_without_sprint_status_no_step(self) -> None:
+        """不传 sprint_status_path 时，步骤中不包含阅读 sprint 文件。"""
+        prompt = build_llm_recommend_prompt(5, epics_path="/epics.md")
+        assert "阅读 sprint 状态文件" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +822,7 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
         proposal = await recommender.recommend(epics, existing, 5)
 
         assert len(proposal.stories) == 1
@@ -844,9 +842,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
 
-        with pytest.raises(LLMRecommendError, match="集合外"):
+        with pytest.raises(LLMRecommendError, match="未知"):
             await recommender.recommend(epics, existing, 5)
 
     async def test_duplicate_key_raises(self) -> None:
@@ -861,7 +859,7 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
 
         with pytest.raises(LLMRecommendError, match="重复"):
             await recommender.recommend(epics, existing, 5)
@@ -882,7 +880,7 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
 
         with pytest.raises(LLMRecommendError, match="超过上限"):
             await recommender.recommend(epics, existing, 2)
@@ -899,7 +897,7 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
 
         with pytest.raises(LLMRecommendError, match="空"):
             await recommender.recommend(epics, existing, 5)
@@ -916,7 +914,7 @@ class TestLLMBatchRecommender:
             retryable=True,
         )
 
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
 
         with pytest.raises(LLMRecommendError, match="调用失败"):
             await recommender.recommend(epics, existing, 5)
@@ -930,7 +928,7 @@ class TestLLMBatchRecommender:
         fixture["structured_output"] = None
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
 
         with pytest.raises(LLMRecommendError, match="structured_output"):
             await recommender.recommend(epics, existing, 5)
@@ -944,22 +942,29 @@ class TestLLMBatchRecommender:
         fixture["structured_output"] = {"invalid": "data"}
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
 
         with pytest.raises(LLMRecommendError, match="schema"):
             await recommender.recommend(epics, existing, 5)
 
-    async def test_empty_candidates_skips_llm_call(self) -> None:
-        """无 eligible candidates 时不调用 Claude。"""
+    async def test_llm_called_even_with_done_stories(self) -> None:
+        """LLM 自主分析项目，即使本地已知 done 也会调用 Claude。"""
         epics = [_make_epic("1-1", "1-1-done", "Done")]
         existing = {"1-1-done": _make_story("1-1-done", "done")}
 
-        adapter = AsyncMock()
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
-        proposal = await recommender.recommend(epics, existing, 5)
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": [],
+            "reason": "all done",
+        }
 
-        assert len(proposal.stories) == 0
-        adapter.execute.assert_not_called()
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+
+        with pytest.raises(LLMRecommendError, match="空"):
+            await recommender.recommend(epics, existing, 5)
+
+        adapter.execute.assert_called_once()
 
     async def test_cwd_set_to_project_root(self) -> None:
         """Claude 调用的 cwd 设置为项目根目录。"""
@@ -974,7 +979,7 @@ class TestLLMBatchRecommender:
 
         adapter = _make_mock_adapter(fixture)
         project_root = Path("/my/project/root")
-        recommender = LLMBatchRecommender(adapter, project_root)
+        recommender = LLMBatchRecommender(adapter, project_root, epics_path=Path("/fake/epics.md"))
         await recommender.recommend(epics, existing, 5)
 
         call_args = adapter.execute.call_args
@@ -998,7 +1003,7 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
         proposal = await recommender.recommend(epics, existing, 2)
 
         # 如果 pool 被截断，1-3-c 不在 pool 内会被视为集合外 key 而抛错
@@ -1022,7 +1027,7 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"))
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
         proposal = await recommender.recommend(epics, existing, 3)
 
         assert len(proposal.stories) == 2

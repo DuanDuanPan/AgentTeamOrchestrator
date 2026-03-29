@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +24,13 @@ from ato.models.db import (
     mark_approval_consumed,
     mark_running_tasks_paused,
 )
-from ato.models.schemas import ApprovalRecord, RecoveryResult, TaskRecord, TransitionEvent
+from ato.models.schemas import (
+    ApprovalRecord,
+    RecoveryResult,
+    StoryRecord,
+    TaskRecord,
+    TransitionEvent,
+)
 from ato.nudge import Nudge
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
@@ -635,6 +642,7 @@ class Orchestrator:
         self._pid_path = db_path.parent / "orchestrator.pid"
         self._background_tasks: list[asyncio.Task[None]] = []
         self._inflight_restart_dispatches: set[str] = set()
+        self._inflight_initial_dispatches: set[str] = set()
         self._merge_queue: MergeQueue | None = None
         self._worktree_mgr: WorktreeManager | None = None
 
@@ -870,6 +878,9 @@ class Orchestrator:
         # 调度待执行任务（由 approval restart/resume 产生的 pending tasks）
         await self._dispatch_pending_tasks()
 
+        # 调度 active phase 但无 task 的 stories（batch confirm 后首次 dispatch）
+        await self._dispatch_undispatched_stories()
+
     async def _process_approval_decisions(self) -> None:
         """消费已决策的 approvals，触发对应恢复动作或状态转换。
 
@@ -1050,6 +1061,105 @@ class Orchestrator:
             phase=task.phase,
             error_message=error_message,
         )
+
+    async def _dispatch_undispatched_stories(self) -> None:
+        """检测 active batch 中处于活跃阶段但无 task 的 stories 并调度。
+
+        每次 poll cycle 末尾调用。幂等：dispatch 创建 task 后即不再命中。
+        """
+        from ato.models.db import get_undispatched_stories
+
+        db = await get_connection(self._db_path)
+        try:
+            stories = await get_undispatched_stories(db)
+        finally:
+            await db.close()
+
+        for story in stories:
+            if story.story_id in self._inflight_initial_dispatches:
+                continue
+
+            self._inflight_initial_dispatches.add(story.story_id)
+
+            async def _run(s: StoryRecord = story) -> None:
+                try:
+                    await self._dispatch_initial_phase(s)
+                finally:
+                    self._inflight_initial_dispatches.discard(s.story_id)
+
+            task = asyncio.create_task(_run(), name=f"dispatch-initial-{story.story_id}")
+            self._background_tasks.append(task)
+            task.add_done_callback(lambda t: self._background_tasks.remove(t))
+
+            logger.info(
+                "initial_dispatch_scheduled",
+                story_id=story.story_id,
+                phase=story.current_phase,
+            )
+
+    async def _dispatch_initial_phase(self, story: StoryRecord) -> None:
+        """为首次进入活跃阶段的 story 调度 agent 任务。
+
+        首次调度不再复制 phase-specific dispatch 逻辑，而是：
+        1. 先持久化一条初始 pending task
+        2. 按 phase_type 复用既有 restart/recovery 管道
+
+        这样 validating/reviewing/qa_testing 会自动走 convergent-loop 的
+        BMAD parse/fallback/findings 流程，planning/creating/designing 等
+        structured_job 也与 restart 路径保持同一实现。
+        """
+        from ato.models.db import insert_task
+        from ato.recovery import RecoveryEngine
+
+        phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, story.current_phase)
+        if not phase_cfg:
+            logger.error(
+                "initial_dispatch_no_phase_config",
+                story_id=story.story_id,
+                phase=story.current_phase,
+            )
+            return
+
+        cli_tool = phase_cfg.get("cli_tool", "claude")
+        role = phase_cfg.get("role", "developer")
+        phase_type = phase_cfg.get("phase_type", "structured_job")
+
+        try:
+            initial_task = TaskRecord(
+                task_id=str(uuid.uuid4()),
+                story_id=story.story_id,
+                phase=story.current_phase,
+                role=str(role),
+                cli_tool=str(cli_tool),
+                status="pending",
+                expected_artifact="initial_dispatch_requested",
+            )
+            db = await get_connection(self._db_path)
+            try:
+                await insert_task(db, initial_task)
+            finally:
+                await db.close()
+
+            if phase_type == "convergent_loop":
+                await self._dispatch_convergent_restart(initial_task)
+            elif phase_type == "interactive_session":
+                await self._dispatch_interactive_restart(initial_task, resume=False)
+            else:
+                await self._dispatch_batch_restart(initial_task)
+
+            logger.info(
+                "initial_dispatch_done",
+                story_id=story.story_id,
+                phase=story.current_phase,
+                task_id=initial_task.task_id,
+                phase_type=phase_type,
+            )
+        except Exception:
+            logger.exception(
+                "initial_dispatch_failed",
+                story_id=story.story_id,
+                phase=story.current_phase,
+            )
 
     async def _dispatch_interactive_restart(
         self,
@@ -1327,6 +1437,12 @@ class Orchestrator:
             phase_sandbox = phase_cfg.get("sandbox")
             if phase_sandbox:
                 options["sandbox"] = phase_sandbox
+            if effort := phase_cfg.get("effort"):
+                options["effort"] = effort
+            if reasoning_effort := phase_cfg.get("reasoning_effort"):
+                options["reasoning_effort"] = reasoning_effort
+            if reasoning_summary_format := phase_cfg.get("reasoning_summary_format"):
+                options["reasoning_summary_format"] = reasoning_summary_format
 
             result = await mgr.dispatch_with_retry(
                 story_id=task.story_id,

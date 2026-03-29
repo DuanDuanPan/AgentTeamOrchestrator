@@ -323,7 +323,10 @@ class TestBuildCommand:
         """无 options 时不应默认追加 --sandbox。"""
         adapter = CodexAdapter()
         cmd = adapter._build_command("review this code")
-        assert cmd[:4] == ["codex", "exec", "review this code", "--json"]
+        assert cmd[:5] == [
+            "codex", "--dangerously-bypass-approvals-and-sandbox",
+            "exec", "review this code", "--json",
+        ]
         assert "--sandbox" not in cmd
 
     def test_no_options_no_sandbox_flag(self) -> None:

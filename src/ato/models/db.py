@@ -516,6 +516,31 @@ async def get_paused_tasks(db: aiosqlite.Connection) -> list[TaskRecord]:
     return await get_tasks_by_status(db, "paused")
 
 
+async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord]:
+    """返回 active batch 中处于活跃阶段但没有 running/pending/paused task 的 stories。
+
+    用于检测需要初始调度的 stories（batch confirm 后首次 dispatch）。
+    """
+    cursor = await db.execute(
+        """
+        SELECT s.story_id, s.title, s.status, s.current_phase,
+               s.worktree_path, s.created_at, s.updated_at, s.has_ui
+        FROM stories s
+        JOIN batch_stories bs ON s.story_id = bs.story_id
+        JOIN batches b ON bs.batch_id = b.batch_id
+        WHERE b.status = 'active'
+          AND s.current_phase NOT IN ('queued', 'done', 'blocked')
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks t
+            WHERE t.story_id = s.story_id
+              AND t.status IN ('running', 'pending', 'paused')
+          )
+        """,
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_story(row) for row in rows]
+
+
 async def count_tasks_by_status(db: aiosqlite.Connection, status: str) -> int:
     """按状态计数 tasks。
 

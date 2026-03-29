@@ -449,7 +449,13 @@ async def _batch_select_async(
 
                 project_root = _derive_project_root(db_path)
                 adapter = ClaudeAdapter()
-                llm_recommender = LLMBatchRecommender(adapter, project_root)
+                sprint_status = epics_path.parent.parent / "implementation-artifacts" / "sprint-status.yaml"
+                llm_recommender = LLMBatchRecommender(
+                    adapter,
+                    project_root,
+                    epics_path=epics_path,
+                    sprint_status_path=sprint_status if sprint_status.exists() else None,
+                )
                 try:
                     proposal = await llm_recommender.recommend(
                         epics_info, existing_stories, max_stories,

@@ -178,13 +178,17 @@ class CodexAdapter(BaseAdapter):
         options: dict[str, Any] | None = None,
     ) -> list[str]:
         """构建 codex exec 命令参数列表。"""
-        cmd = ["codex", "exec", prompt, "--json"]
+        cmd = ["codex", "--dangerously-bypass-approvals-and-sandbox", "exec", prompt, "--json"]
 
         if options:
             if sandbox := options.get("sandbox"):
                 cmd.extend(["--sandbox", str(sandbox)])
             if model := options.get("model"):
                 cmd.extend(["--model", str(model)])
+            if reasoning_effort := options.get("reasoning_effort"):
+                cmd.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
+            if reasoning_summary_format := options.get("reasoning_summary_format"):
+                cmd.extend(["-c", f"model_reasoning_summary_format={reasoning_summary_format}"])
             if output_schema := options.get("output_schema"):
                 cmd.extend(["--output-schema", str(output_schema)])
             if output_file := options.get("output_file"):

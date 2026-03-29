@@ -8,13 +8,32 @@
 #   根据项目需求编辑 ato.yaml
 
 # ---------------------------------------------------------------------------
+# CLI 工具全局默认参数
+# ---------------------------------------------------------------------------
+# 所有使用该 CLI 的角色自动继承。角色级同名字段优先。
+# 省略的字段由 CLI 工具自身决定默认行为。
+#
+# Claude -p 模式会继承 ~/.claude/settings.json 中的 model 和 effortLevel，
+# 因此通常不需要在此重复配置。仅在需要覆盖时使用 cli_defaults.claude。
+#
+# Codex exec 模式不继承 shell alias 参数，必须在此显式声明。
+
+cli_defaults:
+  # claude:
+  #   model: sonnet          # 覆盖 settings.json 默认模型
+  #   effort: high           # 覆盖 settings.json effort (low/medium/high/max)
+  codex:
+    model: gpt-5.4
+    reasoning_effort: xhigh
+    reasoning_summary_format: experimental
+
+# ---------------------------------------------------------------------------
 # 角色定义
 # ---------------------------------------------------------------------------
 # 每个角色指定使用的 CLI 工具（claude / codex）。
-# model 和 sandbox 均为可选字段，省略时由 CLI 工具自身决定默认行为。
-# 仅在需要覆盖 CLI 默认行为时才显式填写：
-#   model: 指定模型名称（如 sonnet, opus, codex-mini-latest）
-#   sandbox: read-only（只读沙箱）或 workspace-write（可写沙箱）
+# model / sandbox / effort / reasoning_effort / reasoning_summary_format
+# 均为可选字段，省略时从 cli_defaults 继承，再省略则由 CLI 自身决定。
+# 角色级字段优先于 cli_defaults。
 
 roles:
   planner:
