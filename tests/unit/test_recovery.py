@@ -2520,3 +2520,493 @@ class TestTemplateContextBriefingPreservation:
         assert _mock_recovery_adapter.execute.called
         prompt = _mock_recovery_adapter.execute.call_args[0][0]
         assert "Previous context:" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Story 9.1f: validating artifact-file fallback 回归测试
+# ---------------------------------------------------------------------------
+
+_ARTIFACTS_REL = "_bmad-output/implementation-artifacts"
+
+
+class TestValidatingFileFallback:
+    """验证 validating 阶段的 artifact-file fallback 逻辑。"""
+
+    def _make_engine(
+        self, db_path: Path, tq: AsyncMock | None = None
+    ) -> RecoveryEngine:
+        return RecoveryEngine(
+            db_path=db_path,
+            subprocess_mgr=None,
+            transition_queue=tq or AsyncMock(),
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+        )
+
+    def _approved_parse(self) -> object:
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        return BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="h",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+
+    def _failed_parse(self) -> object:
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        return BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="parse_failed",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="h",
+            raw_output_preview="unparseable",
+            parsed_at=_NOW,
+        )
+
+    def _findings_parse(self, *, blocking: bool = True) -> object:
+        from ato.models.schemas import BmadFinding, BmadParseResult, BmadSkillType
+
+        sev = "blocking" if blocking else "suggestion"
+        return BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="changes_requested",
+            findings=[
+                BmadFinding(
+                    severity=sev,
+                    category="intent_gap",
+                    description="test finding",
+                    file_path="src/test.py",
+                    rule_id="SV001",
+                    line=10,
+                    dedup_hash=compute_dedup_hash(
+                        "src/test.py", "SV001", sev, "test finding",
+                    ),
+                )
+            ],
+            parser_mode="deterministic",
+            raw_markdown_hash="h",
+            raw_output_preview="findings",
+            parsed_at=_NOW,
+        )
+
+    def test_validating_prompt_contains_report_path_placeholder(self) -> None:
+        """AC1: prompt 模板包含 {validation_report_path} 占位符和文件输出指令。"""
+        from ato.recovery import _CONVERGENT_LOOP_PROMPTS
+
+        tmpl = _CONVERGENT_LOOP_PROMPTS["validating"]
+        assert "{validation_report_path}" in tmpl
+        assert "Also write the full validation report to" in tmpl
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_prompt_rendered_with_report_path(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC1: 格式化后的 prompt 包含具体的 validation_report_path 值。"""
+        wt = str(tmp_path / "wt-prompt")
+        Path(wt).mkdir()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-pr", worktree_path=wt))
+            await insert_task(
+                db,
+                _make_task("t-pr", "s-pr", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        engine = self._make_engine(initialized_db_path)
+        task = _make_task("t-pr", "s-pr", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = self._approved_parse()
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine._dispatch_convergent_loop(task)
+
+        prompt = _mock_recovery_adapter.execute.call_args[0][0]
+        expected_path = "_bmad-output/implementation-artifacts/s-pr-validation-report.md"
+        assert expected_path in prompt
+        assert "Also write the full validation report to" in prompt
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_stdout_success_no_file_fallback(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC4: stdout 解析成功时不触发文件回退。"""
+        wt = str(tmp_path / "wt")
+        Path(wt).mkdir()
+        # 即使报告文件存在，也不应被读取
+        report_dir = Path(wt) / _ARTIFACTS_REL
+        report_dir.mkdir(parents=True)
+        report_file = report_dir / "s-ok-validation-report.md"
+        report_file.write_text("结果: FAIL\n不应被读取")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-ok", worktree_path=wt))
+            await insert_task(
+                db,
+                _make_task("t-ok", "s-ok", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = self._make_engine(initialized_db_path, mock_tq)
+        task = _make_task("t-ok", "s-ok", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = self._approved_parse()
+            mock_bmad_cls.return_value = mock_bmad
+
+            result = await engine._dispatch_convergent_loop(task)
+
+        assert result is True
+        # parse 只应被调用一次（stdout 解析），不应有文件回退的第二次调用
+        assert mock_bmad.parse.call_count == 1
+        # 应提交 validate_pass
+        mock_tq.submit.assert_called_once()
+        assert mock_tq.submit.call_args[0][0].event_name == "validate_pass"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_stdout_fail_file_exists_fallback_success(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC2: stdout 解析失败 + 报告文件存在 → 文件回退解析成功。"""
+        wt = str(tmp_path / "wt")
+        Path(wt).mkdir()
+        report_dir = Path(wt) / _ARTIFACTS_REL
+        report_dir.mkdir(parents=True)
+        report_file = report_dir / "s-fb-validation-report.md"
+        report_file.write_text("结果: PASS\n## 摘要\n无问题")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fb", worktree_path=wt))
+            await insert_task(
+                db,
+                _make_task("t-fb", "s-fb", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = self._make_engine(initialized_db_path, mock_tq)
+        task = _make_task("t-fb", "s-fb", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            # 第一次调用（stdout）返回 parse_failed，第二次（文件内容）返回 approved
+            mock_bmad.parse.side_effect = [self._failed_parse(), self._approved_parse()]
+            mock_bmad_cls.return_value = mock_bmad
+
+            result = await engine._dispatch_convergent_loop(task)
+
+        assert result is True
+        # parse 应被调用两次
+        assert mock_bmad.parse.call_count == 2
+        # 第二次 parse 应使用文件内容
+        second_call = mock_bmad.parse.call_args_list[1]
+        assert second_call.kwargs["markdown_output"] == "结果: PASS\n## 摘要\n无问题"
+        # 应提交 validate_pass（文件回退成功后继续正常流程）
+        mock_tq.submit.assert_called_once()
+        assert mock_tq.submit.call_args[0][0].event_name == "validate_pass"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_file_fallback_reads_from_dispatch_cwd(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC2: fallback 读取路径基于 dispatch cwd（worktree_path），不基于 orchestrator cwd。"""
+        # worktree 在 tmp_path 下的子目录
+        wt = tmp_path / "project-worktree"
+        wt.mkdir()
+        report_dir = wt / _ARTIFACTS_REL
+        report_dir.mkdir(parents=True)
+        report_file = report_dir / "s-cwd-validation-report.md"
+        report_file.write_text("结果: PASS\n## 摘要\ncwd test")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-cwd", worktree_path=str(wt)))
+            await insert_task(
+                db,
+                _make_task("t-cwd", "s-cwd", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        engine = self._make_engine(initialized_db_path)
+        task = _make_task("t-cwd", "s-cwd", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.side_effect = [self._failed_parse(), self._approved_parse()]
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine._dispatch_convergent_loop(task)
+
+        # 验证第二次 parse 调用使用的是从 worktree_path 下读取的文件内容
+        assert mock_bmad.parse.call_count == 2
+        second_content = mock_bmad.parse.call_args_list[1].kwargs["markdown_output"]
+        assert second_content == "结果: PASS\n## 摘要\ncwd test"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_stdout_fail_file_missing_parse_failed(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC3: stdout 解析失败 + 报告文件不存在 → parse_failed。"""
+        wt = str(tmp_path / "wt-missing")
+        Path(wt).mkdir()
+        # 不创建报告文件
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-miss", worktree_path=wt))
+            await insert_task(
+                db,
+                _make_task("t-miss", "s-miss", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = self._make_engine(initialized_db_path, mock_tq)
+        task = _make_task("t-miss", "s-miss", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = self._failed_parse()
+            mock_bmad_cls.return_value = mock_bmad
+
+            with patch("ato.adapters.bmad_adapter.record_parse_failure") as mock_rpf:
+                result = await engine._dispatch_convergent_loop(task)
+
+        assert result is True
+        # parse 只调用一次（文件不存在，不触发第二次）
+        assert mock_bmad.parse.call_count == 1
+        # 应该调用 record_parse_failure
+        mock_rpf.assert_called_once()
+        # 不应提交任何 transition
+        mock_tq.submit.assert_not_called()
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_stdout_fail_file_unparseable_parse_failed(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC6: stdout 解析失败 + 报告文件存在但也无法解析 → parse_failed。"""
+        wt = str(tmp_path / "wt-bad")
+        Path(wt).mkdir()
+        report_dir = Path(wt) / _ARTIFACTS_REL
+        report_dir.mkdir(parents=True)
+        report_file = report_dir / "s-bad-validation-report.md"
+        report_file.write_text("random garbage content that can't be parsed")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-bad", worktree_path=wt))
+            await insert_task(
+                db,
+                _make_task("t-bad", "s-bad", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = self._make_engine(initialized_db_path, mock_tq)
+        task = _make_task("t-bad", "s-bad", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            # 两次都返回 parse_failed
+            mock_bmad.parse.side_effect = [self._failed_parse(), self._failed_parse()]
+            mock_bmad_cls.return_value = mock_bmad
+
+            with patch("ato.adapters.bmad_adapter.record_parse_failure") as mock_rpf:
+                result = await engine._dispatch_convergent_loop(task)
+
+        assert result is True
+        # parse 调用两次（stdout + 文件）
+        assert mock_bmad.parse.call_count == 2
+        # record_parse_failure 应被调用（文件回退也失败）
+        mock_rpf.assert_called_once()
+        # 不应提交 transition
+        mock_tq.submit.assert_not_called()
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_file_fallback_findings_drive_transition(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """AC5: 文件回退解析结果正确触发 validate_pass / validate_fail。"""
+        # ---- 场景 A: blocking findings → validate_fail ----
+        wt_a = str(tmp_path / "wt-block")
+        Path(wt_a).mkdir()
+        report_dir_a = Path(wt_a) / _ARTIFACTS_REL
+        report_dir_a.mkdir(parents=True)
+        (report_dir_a / "s-blk-validation-report.md").write_text("结果: FAIL")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-blk", worktree_path=wt_a))
+            await insert_task(
+                db,
+                _make_task("t-blk", "s-blk", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq_a = AsyncMock()
+        engine_a = self._make_engine(initialized_db_path, mock_tq_a)
+        task_a = _make_task("t-blk", "s-blk", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.side_effect = [
+                self._failed_parse(),
+                self._findings_parse(blocking=True),
+            ]
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine_a._dispatch_convergent_loop(task_a)
+
+        # blocking finding → validate_fail
+        mock_tq_a.submit.assert_called_once()
+        assert mock_tq_a.submit.call_args[0][0].event_name == "validate_fail"
+
+        # ---- 场景 B: non-blocking findings → validate_pass ----
+        wt_b = str(tmp_path / "wt-pass")
+        Path(wt_b).mkdir()
+        report_dir_b = Path(wt_b) / _ARTIFACTS_REL
+        report_dir_b.mkdir(parents=True)
+        (report_dir_b / "s-sug-validation-report.md").write_text("结果: PASS")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-sug", worktree_path=wt_b))
+            await insert_task(
+                db,
+                _make_task("t-sug", "s-sug", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq_b = AsyncMock()
+        engine_b = self._make_engine(initialized_db_path, mock_tq_b)
+        task_b = _make_task("t-sug", "s-sug", status="pending", pid=None, phase="validating")
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.side_effect = [
+                self._failed_parse(),
+                self._findings_parse(blocking=False),
+            ]
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine_b._dispatch_convergent_loop(task_b)
+
+        # non-blocking findings → validate_pass
+        mock_tq_b.submit.assert_called_once()
+        assert mock_tq_b.submit.call_args[0][0].event_name == "validate_pass"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_file_fallback_read_error_stays_parse_failed(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """read_text() 异常不应升级为 dispatch_failed，应保持 parse_failed 路径。"""
+        wt = str(tmp_path / "wt-readerr")
+        Path(wt).mkdir()
+        report_dir = Path(wt) / _ARTIFACTS_REL
+        report_dir.mkdir(parents=True)
+        report_file = report_dir / "s-err-validation-report.md"
+        report_file.write_text("valid content")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-err", worktree_path=wt))
+            await insert_task(
+                db,
+                _make_task("t-err", "s-err", status="pending", pid=None, phase="validating"),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = self._make_engine(initialized_db_path, mock_tq)
+        task = _make_task("t-err", "s-err", status="pending", pid=None, phase="validating")
+
+        with (
+            patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
+            patch.object(
+                Path, "read_text", side_effect=OSError(13, "Permission denied")
+            ),
+            patch("ato.adapters.bmad_adapter.record_parse_failure") as mock_rpf,
+        ):
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = self._failed_parse()
+            mock_bmad_cls.return_value = mock_bmad
+
+            result = await engine._dispatch_convergent_loop(task)
+
+        # 返回 True（dispatch 已执行），不是 False（dispatch_failed）
+        assert result is True
+        # parse 只调用一次（read_text 失败，不触发第二次 parse）
+        assert mock_bmad.parse.call_count == 1
+        # record_parse_failure 应被调用（走 parse_failed 路径）
+        mock_rpf.assert_called_once()
+        # 不应提交 transition
+        mock_tq.submit.assert_not_called()

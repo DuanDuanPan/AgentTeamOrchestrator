@@ -1,6 +1,6 @@
 # Story 9.1f: validating 阶段 artifact-file fallback 解析
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- Depends on: Story 9.1 (designing phase 引入了完整的 phase 链) -->
@@ -106,27 +106,27 @@ Then 至少覆盖：
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 更新 validating prompt 模板添加报告文件路径 (AC: #1)
-  - [ ] 1.1 在 `recovery.py` 的 `_CONVERGENT_LOOP_PROMPTS["validating"]` 中新增 `{validation_report_path}` 占位符和文件输出指令
-  - [ ] 1.2 在 prompt format 调用处补充 `validation_report_path` 参数，路径规则：`_bmad-output/implementation-artifacts/{story_id}-validation-report.md`
-  - [ ] 1.3 不删除现有 stdout 格式指令（作为第一优先级解析源）
+- [x] Task 1: 更新 validating prompt 模板添加报告文件路径 (AC: #1)
+  - [x] 1.1 在 `recovery.py` 的 `_CONVERGENT_LOOP_PROMPTS["validating"]` 中新增 `{validation_report_path}` 占位符和文件输出指令
+  - [x] 1.2 在 prompt format 调用处补充 `validation_report_path` 参数，路径规则：`_bmad-output/implementation-artifacts/{story_id}-validation-report.md`
+  - [x] 1.3 不删除现有 stdout 格式指令（作为第一优先级解析源）
 
-- [ ] Task 2: 在 `_dispatch_convergent_loop()` 中实现 artifact-file fallback (AC: #2, #3, #4, #5)
-  - [ ] 2.1 保持 `BmadAdapter` 为黑盒：仅在 `parse_result.verdict == "parse_failed"` 时触发 validating-only fallback，不依赖 deterministic fast-path 的内部返回值
-  - [ ] 2.2 构造与 prompt 一致的相对 `validation_report_path`，并基于 dispatch `cwd` 解析出绝对读取路径（当前实现为 `Path(worktree_path) / validation_report_path`）
-  - [ ] 2.3 检查绝对读取路径是否存在；存在则 `Path.read_text()` 读取并再次调用 `bmad_adapter.parse()`
-  - [ ] 2.4 文件不存在或文件内容也无法解析 → 保持原有 `parse_failed` 流程
-  - [ ] 2.5 文件解析成功 → 用新 `parse_result` 替换原值，继续走 findings 入库 + transition 逻辑
-  - [ ] 2.6 仅对 `validating` phase 启用此 fallback，不影响 `reviewing` / `qa_testing` 的解析流程
-  - [ ] 2.7 添加 structlog 日志标记 fallback 触发事件（`"convergent_loop_file_fallback_triggered"`）
+- [x] Task 2: 在 `_dispatch_convergent_loop()` 中实现 artifact-file fallback (AC: #2, #3, #4, #5)
+  - [x] 2.1 保持 `BmadAdapter` 为黑盒：仅在 `parse_result.verdict == "parse_failed"` 时触发 validating-only fallback，不依赖 deterministic fast-path 的内部返回值
+  - [x] 2.2 构造与 prompt 一致的相对 `validation_report_path`，并基于 dispatch `cwd` 解析出绝对读取路径（当前实现为 `Path(worktree_path) / validation_report_path`）
+  - [x] 2.3 检查绝对读取路径是否存在；存在则 `Path.read_text()` 读取并再次调用 `bmad_adapter.parse()`
+  - [x] 2.4 文件不存在或文件内容也无法解析 → 保持原有 `parse_failed` 流程
+  - [x] 2.5 文件解析成功 → 用新 `parse_result` 替换原值，继续走 findings 入库 + transition 逻辑
+  - [x] 2.6 仅对 `validating` phase 启用此 fallback，不影响 `reviewing` / `qa_testing` 的解析流程
+  - [x] 2.7 添加 structlog 日志标记 fallback 触发事件（`"convergent_loop_file_fallback_triggered"`）
 
-- [ ] Task 3: 增加 fallback 链路的回归测试 (AC: #6)
-  - [ ] 3.1 在 `tests/unit/test_recovery.py` 中新增 `test_validating_stdout_success_no_file_fallback`
-  - [ ] 3.2 新增 `test_validating_stdout_fail_file_exists_fallback_success`
-  - [ ] 3.3 新增 `test_validating_file_fallback_reads_from_dispatch_cwd`（验证 fallback 读取的是 worktree 相对路径，不是 orchestrator cwd）
-  - [ ] 3.4 新增 `test_validating_stdout_fail_file_missing_parse_failed`
-  - [ ] 3.5 新增 `test_validating_stdout_fail_file_unparseable_parse_failed`
-  - [ ] 3.6 新增 `test_validating_file_fallback_findings_drive_transition`（验证文件解析结果正确触发 validate_pass / validate_fail）
+- [x] Task 3: 增加 fallback 链路的回归测试 (AC: #6)
+  - [x] 3.1 在 `tests/unit/test_recovery.py` 中新增 `test_validating_stdout_success_no_file_fallback`
+  - [x] 3.2 新增 `test_validating_stdout_fail_file_exists_fallback_success`
+  - [x] 3.3 新增 `test_validating_file_fallback_reads_from_dispatch_cwd`（验证 fallback 读取的是 worktree 相对路径，不是 orchestrator cwd）
+  - [x] 3.4 新增 `test_validating_stdout_fail_file_missing_parse_failed`
+  - [x] 3.5 新增 `test_validating_stdout_fail_file_unparseable_parse_failed`
+  - [x] 3.6 新增 `test_validating_file_fallback_findings_drive_transition`（验证文件解析结果正确触发 validate_pass / validate_fail）
 
 ## Dev Notes
 
@@ -182,16 +182,25 @@ uv run pytest tests/unit/test_recovery.py -v -k "validating"
 ## Change Log
 
 - 2026-03-28: Story 创建 — 基于对 validate-create-story 输出不匹配解析器预期的分析，新增 artifact-file fallback corrective story
-- 2026-03-28: `validate-create-story` 修订 —— 将 fallback 触发条件收紧到 `parse_result.verdict == "parse_failed"` 公开合同；补回“基于 dispatch cwd 解析报告文件绝对路径”的实现约束与测试覆盖；移除易漂移的行号引用
+- 2026-03-28: `validate-create-story` 修订 —— 将 fallback 触发条件收紧到 `parse_result.verdict == “parse_failed”` 公开合同；补回”基于 dispatch cwd 解析报告文件绝对路径”的实现约束与测试覆盖；移除易漂移的行号引用
+- 2026-03-29: 实现完成 — prompt 模板新增 `{validation_report_path}`，`_dispatch_convergent_loop()` 新增 validating-only 文件回退逻辑，6 个回归测试全部通过
+- 2026-03-29: 修复 review findings — (1) fallback read_text 异常用 try/except 捕获，避免升级为 dispatch_failed；(2) 新增 AC1 prompt 回归测试锁住 validation_report_path 指令
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-待 dev-story 填写
+Claude Opus 4.6 (1M context)
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- ✅ Task 1: 更新 `_CONVERGENT_LOOP_PROMPTS[“validating”]` 模板，新增 `{validation_report_path}` 占位符和 “Also write the full validation report to” 指令；在 `prompt_template.format()` 调用处补充路径参数（使用 `ARTIFACTS_REL` 常量）；保留现有 stdout 格式指令不变
+- ✅ Task 2: 在 `_dispatch_convergent_loop()` 的 `parse_result.verdict == “parse_failed”` 分支中，对 `validating` phase 新增文件回退逻辑：构造 `Path(worktree_path) / ARTIFACTS_REL / {story_id}-validation-report.md` 绝对路径，存在则 `read_text` 并重新 `bmad.parse()`；成功则替换 `parse_result` 继续正常流程，失败则保持原 `parse_failed` 路径；仅限 `validating` phase，不影响其他 convergent_loop phase；添加 `convergent_loop_file_fallback_triggered` structlog 日志
+- ✅ Task 3: 新增 `TestValidatingFileFallback` 测试类，包含 9 个测试用例覆盖所有 fallback 路径：stdout 成功不触发回退、文件回退成功、基于 dispatch cwd 读取、文件不存在、文件不可解析、findings 驱动 validate_pass/validate_fail、read_text 异常不升级为 dispatch_failed、prompt 模板包含占位符、格式化 prompt 包含具体路径
+
 ### File List
+
+- src/ato/recovery.py（修改）— prompt 模板 + fallback 逻辑
+- tests/unit/test_recovery.py（修改）— 新增 6 个回归测试

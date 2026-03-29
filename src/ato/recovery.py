@@ -87,7 +87,8 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
         "Output format: Start with 结果: PASS or 结果: FAIL. "
         "Include sections: ## 摘要, ## 发现的关键问题, "
         "## 已应用增强, ## 剩余风险, ## 最终结论. "
-        "Number each issue as ## 1. Title, ## 2. Title etc."
+        "Number each issue as ## 1. Title, ## 2. Title etc.\n\n"
+        "Also write the full validation report to {validation_report_path}."
     ),
     "qa_testing": (
         "Perform a test quality review on the worktree at {worktree_path}. "
@@ -751,9 +752,15 @@ class RecoveryEngine:
 
             prompt_template = _CONVERGENT_LOOP_PROMPTS.get(task.phase)
             if prompt_template is not None:
+                from ato.design_artifacts import ARTIFACTS_REL
+
+                validation_report_path = (
+                    f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
+                )
                 prompt = prompt_template.format(
                     worktree_path=worktree_path,
                     story_id=task.story_id,
+                    validation_report_path=validation_report_path,
                 )
             else:
                 prompt = (
@@ -799,24 +806,57 @@ class RecoveryEngine:
             )
 
             if parse_result.verdict == "parse_failed":
-                db = await get_connection(self._db_path)
-                try:
-                    await record_parse_failure(
-                        parse_result=parse_result,
-                        story_id=task.story_id,
-                        skill_type=skill_type,
-                        db=db,
-                        task_id=task.task_id,
-                        notifier=self._nudge.notify if self._nudge else None,
+                # Story 9.1f: validating-only artifact-file fallback
+                if task.phase == "validating" and worktree_path is not None:
+                    report_rel = (
+                        f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
                     )
-                finally:
-                    await db.close()
-                logger.warning(
-                    "recovery_convergent_loop_parse_failed",
-                    task_id=task.task_id,
-                    phase=task.phase,
-                )
-                return True  # dispatch 已执行，parse 失败已记录
+                    report_abs = Path(worktree_path) / report_rel
+                    if report_abs.is_file():
+                        logger.info(
+                            "convergent_loop_file_fallback_triggered",
+                            task_id=task.task_id,
+                            story_id=task.story_id,
+                            report_path=str(report_abs),
+                        )
+                        try:
+                            file_content = report_abs.read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError) as exc:
+                            logger.warning(
+                                "convergent_loop_file_fallback_read_error",
+                                task_id=task.task_id,
+                                story_id=task.story_id,
+                                report_path=str(report_abs),
+                                error=str(exc),
+                            )
+                        else:
+                            fallback_result = await bmad.parse(
+                                markdown_output=file_content,
+                                skill_type=skill_type,
+                                story_id=task.story_id,
+                            )
+                            if fallback_result.verdict != "parse_failed":
+                                parse_result = fallback_result
+
+                if parse_result.verdict == "parse_failed":
+                    db = await get_connection(self._db_path)
+                    try:
+                        await record_parse_failure(
+                            parse_result=parse_result,
+                            story_id=task.story_id,
+                            skill_type=skill_type,
+                            db=db,
+                            task_id=task.task_id,
+                            notifier=self._nudge.notify if self._nudge else None,
+                        )
+                    finally:
+                        await db.close()
+                    logger.warning(
+                        "recovery_convergent_loop_parse_failed",
+                        task_id=task.task_id,
+                        phase=task.phase,
+                    )
+                    return True  # dispatch 已执行，parse 失败已记录
 
             # Findings → DB
             now = datetime.now(tz=UTC)
