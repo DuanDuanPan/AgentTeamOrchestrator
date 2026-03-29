@@ -422,6 +422,7 @@ class LLMBatchRecommender:
             key_to_epic[info.short_key] = info
 
         seen: set[str] = set()
+        seen_canonical: set[str] = set()
         for key in output.story_keys:
             if key in seen:
                 logger.warning("llm_batch_recommend_duplicate_key", key=key)
@@ -434,6 +435,16 @@ class LLMBatchRecommender:
                 raise LLMRecommendError(
                     f"LLM 返回未知 key: {key}",
                 )
+            canonical = key_to_epic[key].story_key
+            if canonical in seen_canonical:
+                logger.warning(
+                    "llm_batch_recommend_canonical_duplicate",
+                    key=key, canonical=canonical,
+                )
+                raise LLMRecommendError(
+                    f"LLM 返回重复 story（别名）: {key} → {canonical}",
+                )
+            seen_canonical.add(canonical)
 
         if len(output.story_keys) > max_stories:
             logger.warning(
@@ -450,9 +461,36 @@ class LLMBatchRecommender:
             logger.warning("llm_batch_recommend_empty_result")
             raise LLMRecommendError("LLM 返回空 story_keys")
 
-        # 5. 映射回 EpicInfo，按 LLM 返回顺序，回写 has_ui
+        # 5. 归一化 has_ui_map — 将任意 key 格式解析为 canonical story_key
+        resolved_has_ui: dict[str, bool] = {}
+        for ui_key, ui_val in output.has_ui_map.items():
+            epic = key_to_epic.get(ui_key)
+            if epic is None:
+                logger.warning(
+                    "llm_batch_recommend_has_ui_map_unknown_key",
+                    key=ui_key,
+                )
+                raise LLMRecommendError(
+                    f"has_ui_map 包含未知 key: {ui_key}",
+                )
+            canonical = epic.story_key
+            if canonical in resolved_has_ui:
+                logger.warning(
+                    "llm_batch_recommend_has_ui_map_alias_conflict",
+                    key=ui_key, canonical=canonical,
+                )
+                raise LLMRecommendError(
+                    f"has_ui_map 包含同一 story 的冲突别名: "
+                    f"{ui_key} → {canonical}",
+                )
+            resolved_has_ui[canonical] = ui_val
+
+        # 6. 映射回 EpicInfo，按 LLM 返回顺序，回写 has_ui
         selected = [
-            replace(key_to_epic[key], has_ui=output.has_ui_map.get(key, False))
+            replace(
+                key_to_epic[key],
+                has_ui=resolved_has_ui.get(key_to_epic[key].story_key, False),
+            )
             for key in output.story_keys
         ]
 

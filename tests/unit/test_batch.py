@@ -1104,3 +1104,94 @@ class TestLLMBatchRecommender:
         proposal = await recommender.recommend(epics, existing, 5)
 
         assert proposal.stories[0].has_ui is False
+
+    async def test_has_ui_map_canonical_key_resolved_with_short_story_key(self) -> None:
+        """has_ui_map 用 canonical key、story_keys 用 short key 时，归一化后正确回写。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1"],
+            "has_ui_map": {"1-1-scaffolding": True},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        proposal = await recommender.recommend(epics, existing, 5)
+
+        # 两种 key 格式归一化到同一个 EpicInfo，has_ui 正确回写
+        assert proposal.stories[0].has_ui is True
+
+    async def test_has_ui_map_short_key_resolved_with_canonical_story_key(self) -> None:
+        """has_ui_map 用 short key、story_keys 用 canonical key 时，归一化后正确回写。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding"],
+            "has_ui_map": {"1-1": True},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        proposal = await recommender.recommend(epics, existing, 5)
+
+        assert proposal.stories[0].has_ui is True
+
+    async def test_has_ui_map_alias_conflict_raises(self) -> None:
+        """has_ui_map 同时包含同一 story 的 short 和 canonical key 时 fail-closed。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding"],
+            "has_ui_map": {"1-1": False, "1-1-scaffolding": True},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+
+        with pytest.raises(LLMRecommendError, match="冲突"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_story_keys_canonical_duplicate_raises(self) -> None:
+        """story_keys 包含同一 story 的 short 和 canonical 别名时 fail-closed。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1", "1-1-scaffolding"],
+            "has_ui_map": {"1-1": False, "1-1-scaffolding": False},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+
+        with pytest.raises(LLMRecommendError, match="重复"):
+            await recommender.recommend(epics, existing, 5)
+
+    async def test_has_ui_map_unknown_key_raises(self) -> None:
+        """has_ui_map 包含完全未知的 key 时抛出 LLMRecommendError（fail-closed）。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding"],
+            "has_ui_map": {"1-1-scaffolding": False, "nonexistent": True},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+
+        with pytest.raises(LLMRecommendError, match="未知"):
+            await recommender.recommend(epics, existing, 5)
