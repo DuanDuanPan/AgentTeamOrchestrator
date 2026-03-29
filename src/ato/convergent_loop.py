@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import structlog
 
@@ -25,10 +25,12 @@ from ato.models.schemas import (
     BmadSkillType,
     ConvergentLoopResult,
     FindingRecord,
+    ProgressCallback,
     TransitionEvent,
     compute_dedup_hash,
 )
 from ato.nudge import Nudge
+from ato.progress import build_agent_progress_callback
 from ato.subprocess_mgr import SubprocessManager
 from ato.transition_queue import TransitionQueue
 
@@ -77,6 +79,26 @@ class ConvergentLoop:
         self._blocking_threshold = blocking_threshold
         self._nudge = nudge
         self._reviewer_options = reviewer_options or {}
+
+    def _build_progress_callback(
+        self,
+        *,
+        task_id: str | None,
+        story_id: str,
+        phase: str,
+        role: str,
+        cli_tool: Literal["claude", "codex"],
+    ) -> ProgressCallback:
+        """Build a logger-backed progress callback for loop dispatches."""
+
+        return build_agent_progress_callback(
+            logger=logger,
+            task_id=task_id,
+            story_id=story_id,
+            phase=phase,
+            role=role,
+            cli_tool=cli_tool,
+        )
 
     # ------------------------------------------------------------------
     # Story 3.2d — Convergent Loop Orchestration
@@ -463,6 +485,13 @@ class ConvergentLoop:
             options=review_opts,
             task_id=review_task_id,
             is_retry=is_retry,
+            on_progress=self._build_progress_callback(
+                task_id=review_task_id,
+                story_id=story_id,
+                phase="reviewing",
+                role="reviewer",
+                cli_tool="codex",
+            ),
         )
 
         # --- Parse review output via BMAD adapter ---
@@ -777,6 +806,13 @@ class ConvergentLoop:
             cli_tool="claude",
             prompt=fix_prompt,
             options={"cwd": resolved_path},
+            on_progress=self._build_progress_callback(
+                task_id=None,
+                story_id=story_id,
+                phase="fixing",
+                role="developer",
+                cli_tool="claude",
+            ),
         )
 
         # --- Record HEAD after fix ---
@@ -978,6 +1014,13 @@ class ConvergentLoop:
             options=rereview_opts,
             task_id=rereview_task_id,
             is_retry=is_retry,
+            on_progress=self._build_progress_callback(
+                task_id=rereview_task_id,
+                story_id=story_id,
+                phase="reviewing",
+                role="reviewer",
+                cli_tool="codex",
+            ),
         )
 
         # --- Parse re-review output via BMAD adapter ---

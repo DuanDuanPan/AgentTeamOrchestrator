@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from ato.models.db import (
     get_connection,
     get_findings_by_story,
     get_pending_approvals,
+    insert_findings_batch,
     insert_story,
 )
 from ato.models.schemas import (
@@ -27,6 +28,7 @@ from ato.models.schemas import (
     FindingSeverity,
     FindingStatus,
     ParseVerdict,
+    ProgressEvent,
     StoryRecord,
     TransitionEvent,
     compute_dedup_hash,
@@ -752,6 +754,124 @@ class TestTransitionQueueInteraction:
         assert event.event_name == "review_fail"
         assert event.source == "agent"
         assert isinstance(event.submitted_at, datetime)
+
+
+class TestConvergentLoopProgressLogging:
+    """验证 convergent loop caller 层会透传并记录流式进度。"""
+
+    @pytest.mark.asyncio
+    async def test_first_review_passes_progress_callback(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, mock_sub, _, _ = _make_loop(initialized_db_path)
+        with patch("ato.convergent_loop.logger") as mock_logger:
+            await loop.run_first_review(story.story_id, "/tmp/wt")
+            on_progress = mock_sub.dispatch_with_retry.call_args.kwargs["on_progress"]
+            assert callable(on_progress)
+            await on_progress(
+                ProgressEvent(
+                    event_type="tool_use",
+                    summary="调用函数: review",
+                    cli_tool="codex",
+                    timestamp=datetime.now(tz=UTC),
+                    raw={"type": "item.completed"},
+                )
+            )
+
+        assert any(
+            call.args and call.args[0] == "agent_progress"
+            for call in mock_logger.info.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_fix_dispatch_passes_progress_callback(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding_record(
+                        story_id=story.story_id,
+                        description="missing null check",
+                        file_path="src/foo.py",
+                        rule_id="R001",
+                        severity="blocking",
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        loop, mock_sub, _, _ = _make_loop(initialized_db_path)
+        with (
+            patch("ato.convergent_loop.logger") as mock_logger,
+            patch.object(loop, "_get_worktree_head", side_effect=["aaa111", "bbb222"]),
+        ):
+            await loop.run_fix_dispatch(story.story_id, 1, worktree_path="/tmp/wt")
+            on_progress = mock_sub.dispatch_with_retry.call_args.kwargs["on_progress"]
+            assert callable(on_progress)
+            await on_progress(
+                ProgressEvent(
+                    event_type="text",
+                    summary="正在修复 blocking finding",
+                    cli_tool="claude",
+                    timestamp=datetime.now(tz=UTC),
+                    raw={"type": "assistant"},
+                )
+            )
+
+        assert any(
+            call.args and call.args[0] == "agent_progress"
+            for call in mock_logger.info.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_rereview_passes_progress_callback(self, initialized_db_path: Any) -> None:
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding_record_for_rereview(
+                        story_id=story.story_id,
+                        finding_id="find-open-1",
+                        description="open issue",
+                        file_path="src/a.py",
+                        rule_id="RR01",
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        loop, mock_sub, _, _ = _make_loop(initialized_db_path)
+        with patch("ato.convergent_loop.logger") as mock_logger:
+            await loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
+            on_progress = mock_sub.dispatch_with_retry.call_args.kwargs["on_progress"]
+            assert callable(on_progress)
+            await on_progress(
+                ProgressEvent(
+                    event_type="tool_use",
+                    summary="调用函数: rereview",
+                    cli_tool="codex",
+                    timestamp=datetime.now(tz=UTC),
+                    raw={"type": "item.completed"},
+                )
+            )
+
+        assert any(
+            call.args and call.args[0] == "agent_progress"
+            for call in mock_logger.info.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_validate_fail_event(
@@ -3943,9 +4063,7 @@ class TestConvergenceRateDedupRegression:
 class TestReviewerOptionsPassthrough:
     """验证 ConvergentLoop 将 reviewer_options (model/sandbox) 透传到 dispatch。"""
 
-    async def test_first_review_passes_reviewer_options(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_first_review_passes_reviewer_options(self, initialized_db_path: Any) -> None:
         """run_first_review 应将 reviewer_options 合并到 dispatch options。"""
         story = _make_story("s-ro-1")
         db = await get_connection(initialized_db_path)
@@ -3980,9 +4098,7 @@ class TestReviewerOptionsPassthrough:
         assert options["sandbox"] == "read-only"
         assert options["cwd"] == "/tmp/wt"
 
-    async def test_rereview_passes_reviewer_options(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_rereview_passes_reviewer_options(self, initialized_db_path: Any) -> None:
         """run_rereview 应将 reviewer_options 合并到 dispatch options。"""
         from ato.models.db import insert_findings_batch
 
@@ -4037,9 +4153,7 @@ class TestReviewerOptionsPassthrough:
         assert options["sandbox"] == "read-only"
         assert options["cwd"] == "/tmp/wt"
 
-    async def test_no_reviewer_options_only_cwd(
-        self, initialized_db_path: Any
-    ) -> None:
+    async def test_no_reviewer_options_only_cwd(self, initialized_db_path: Any) -> None:
         """无 reviewer_options 时 dispatch options 只含 cwd。"""
         story = _make_story("s-ro-3")
         db = await get_connection(initialized_db_path)
@@ -4081,7 +4195,7 @@ class TestReviewPromptManifestInjection:
         (ux / "ux-spec.md").touch()
         (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
         (ux / "prototype.snapshot.json").write_text('{"children":[]}')
-        (ux / "prototype.save-report.json").write_text('{}')
+        (ux / "prototype.save-report.json").write_text("{}")
         (exports / "a.png").write_bytes(b"PNG")
         write_prototype_manifest(story_id, root)
         return root
@@ -4094,6 +4208,7 @@ class TestReviewPromptManifestInjection:
 
         # 用 root/.ato/state.db 让 derive_project_root 正确推导
         import shutil
+
         ato_dir = root / ".ato"
         db_path = ato_dir / "state.db"
         shutil.copy2(initialized_db_path, db_path)
@@ -4124,6 +4239,7 @@ class TestReviewPromptManifestInjection:
         root = self._setup_manifest(tmp_path, "s-ux2")
 
         import shutil
+
         ato_dir = root / ".ato"
         db_path = ato_dir / "state.db"
         shutil.copy2(initialized_db_path, db_path)
@@ -4134,6 +4250,7 @@ class TestReviewPromptManifestInjection:
             await insert_story(db, story)
             # 插入一条 finding 供 re-review scope
             from datetime import UTC, datetime
+
             finding = FindingRecord(
                 finding_id="f1",
                 story_id="s-ux2",
@@ -4188,9 +4305,7 @@ class TestResolveWorktreePathWorkspace:
             await db.close()
 
         loop, _, _, _ = _make_loop(initialized_db_path)
-        result = await loop._resolve_worktree_path(
-            "s-main-ws", None, allow_project_root=True
-        )
+        result = await loop._resolve_worktree_path("s-main-ws", None, allow_project_root=True)
         assert result == expected_root
 
     async def test_default_raises_without_worktree(self, initialized_db_path: Path) -> None:
@@ -4220,9 +4335,7 @@ class TestResolveWorktreePathWorkspace:
 
         loop, _, _, _ = _make_loop(initialized_db_path)
         # validating 使用 allow_project_root=True（workspace: main 语义）
-        result = await loop._resolve_worktree_path(
-            "s-val", None, allow_project_root=True
-        )
+        result = await loop._resolve_worktree_path("s-val", None, allow_project_root=True)
         assert result == expected_root
         # reviewing 不允许回退（workspace: worktree 语义）
         with pytest.raises(ValueError):

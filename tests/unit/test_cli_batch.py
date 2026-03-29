@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from typer.testing import CliRunner
 
 from ato.cli import app
 from ato.models.db import init_db
+from ato.models.schemas import ProgressEvent
 
 runner = CliRunner()
 
@@ -535,3 +537,45 @@ class TestBatchSelectLlmFlag:
                 input="\n",
             )
         assert result.exit_code == 0
+
+    def test_llm_flag_streams_progress(self, tmp_path: Path) -> None:
+        """--llm 路径应将 Claude 流式事件打印到当前终端。"""
+        db_path = _create_db(tmp_path)
+        epics = _create_epics(tmp_path)
+
+        from ato.batch import BatchProposal, LLMBatchRecommender
+
+        async def mock_recommend(self, epics_info, existing_stories, max_stories):
+            assert self._on_progress is not None
+            await self._on_progress(
+                ProgressEvent(
+                    event_type="tool_use",
+                    summary="调用工具: Read",
+                    cli_tool="claude",
+                    timestamp=datetime.now(tz=UTC),
+                    raw={"type": "assistant"},
+                )
+            )
+            return BatchProposal(
+                stories=[epics_info[0]],
+                reason="LLM 推荐: test",
+            )
+
+        with patch.object(LLMBatchRecommender, "recommend", mock_recommend):
+            result = runner.invoke(
+                app,
+                [
+                    "batch",
+                    "select",
+                    "--db-path",
+                    str(db_path),
+                    "--epics-file",
+                    str(epics),
+                    "--llm",
+                ],
+                input="\n",
+            )
+
+        assert result.exit_code == 0
+        assert "→ [claude] 调用工具: Read" in result.output
+        assert "Batch 已创建" in result.output

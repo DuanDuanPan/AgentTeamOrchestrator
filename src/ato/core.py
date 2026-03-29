@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import aiosqlite
 import structlog
@@ -26,12 +27,14 @@ from ato.models.db import (
 )
 from ato.models.schemas import (
     ApprovalRecord,
+    ProgressCallback,
     RecoveryResult,
     StoryRecord,
     TaskRecord,
     TransitionEvent,
 )
 from ato.nudge import Nudge
+from ato.progress import build_agent_progress_callback
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
 
@@ -646,6 +649,17 @@ class Orchestrator:
         self._merge_queue: MergeQueue | None = None
         self._worktree_mgr: WorktreeManager | None = None
 
+    def _build_progress_callback(self, task: TaskRecord) -> ProgressCallback:
+        """Build an orchestrator-level progress logger for background agent work."""
+        return build_agent_progress_callback(
+            logger=logger,
+            task_id=task.task_id,
+            story_id=task.story_id,
+            phase=task.phase,
+            role=task.role,
+            cli_tool=task.cli_tool,
+        )
+
     async def run(self) -> None:
         """主入口——启动 → 轮询 → 停止。
 
@@ -1120,7 +1134,8 @@ class Orchestrator:
             )
             return
 
-        cli_tool = phase_cfg.get("cli_tool", "claude")
+        cli_tool_raw = phase_cfg.get("cli_tool", "claude")
+        cli_tool: Literal["claude", "codex"] = "codex" if cli_tool_raw == "codex" else "claude"
         role = phase_cfg.get("role", "developer")
         phase_type = phase_cfg.get("phase_type", "structured_job")
 
@@ -1130,7 +1145,7 @@ class Orchestrator:
                 story_id=story.story_id,
                 phase=story.current_phase,
                 role=str(role),
-                cli_tool=str(cli_tool),
+                cli_tool=cli_tool,
                 status="pending",
                 expected_artifact="initial_dispatch_requested",
             )
@@ -1221,7 +1236,9 @@ class Orchestrator:
             if task.context_briefing:
                 story_ctx = f"\n\nPrevious context: {task.context_briefing}"
             prompt = _build_interactive_prompt(
-                task, worktree_path, story_ctx,
+                task,
+                worktree_path,
+                story_ctx,
                 project_root=derive_project_root(self._db_path),
             )
 
@@ -1453,6 +1470,7 @@ class Orchestrator:
                 options=options,
                 task_id=task.task_id,
                 is_retry=True,
+                on_progress=self._build_progress_callback(task),
             )
 
             # 成功后提交 transition event
@@ -2033,13 +2051,21 @@ class Orchestrator:
                 # 失败 → 创建新 approval（同事务）
                 logger.warning("spec_batch_retry_failed", batch_id=batch_id, error=message)
                 await self._create_spec_batch_approval(
-                    approval.story_id, batch_id, story_ids, message, db=db,
+                    approval.story_id,
+                    batch_id,
+                    story_ids,
+                    message,
+                    db=db,
                 )
                 return True
             except Exception:
                 logger.exception("spec_batch_retry_error", batch_id=batch_id)
                 await self._create_spec_batch_approval(
-                    approval.story_id, batch_id, story_ids, "retry raised exception", db=db,
+                    approval.story_id,
+                    batch_id,
+                    story_ids,
+                    "retry raised exception",
+                    db=db,
                 )
                 return True
 
@@ -2050,7 +2076,9 @@ class Orchestrator:
                 batch_id=batch_id,
             )
             await self._create_spec_batch_approval(
-                approval.story_id, batch_id, story_ids,
+                approval.story_id,
+                batch_id,
+                story_ids,
                 "awaiting manual fix — retry or skip when ready",
                 db=db,
             )
@@ -2099,13 +2127,15 @@ class Orchestrator:
 
         from ato.models.db import insert_approval
 
-        payload = _json.dumps({
-            "scope": "spec_batch",
-            "batch_id": batch_id,
-            "story_ids": story_ids,
-            "error_output": error_output,
-            "options": ["retry", "manual_fix", "skip"],
-        })
+        payload = _json.dumps(
+            {
+                "scope": "spec_batch",
+                "batch_id": batch_id,
+                "story_ids": story_ids,
+                "error_output": error_output,
+                "options": ["retry", "manual_fix", "skip"],
+            }
+        )
         new_approval = ApprovalRecord(
             approval_id=str(uuid.uuid4()),
             story_id=story_id,

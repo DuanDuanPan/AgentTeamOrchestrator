@@ -18,6 +18,7 @@ import structlog
 from ato.models.db import _dt_to_iso
 from ato.models.schemas import (
     BatchRecord,
+    ProgressCallback,
     StoryRecord,
 )
 
@@ -227,24 +228,26 @@ def build_llm_recommend_prompt(
         lines.append("3. 分析 story 间的依赖关系")
         lines.append(f"4. 推荐最多 {max_stories} 个最有价值的待实现 stories")
 
-    lines.extend([
-        "",
-        "## 约束",
-        f"- 最多选择 {max_stories} 个 stories",
-        "- story_keys 必须使用 sprint-status.yaml 中的 canonical key 格式"
-        "（如 `1-1-enabler-project-init`），若无 sprint-status 则使用"
-        " epics 中的 short key 格式（如 `1-1`）",
-        "- 排除已在代码中实质完成的 stories",
-        "- 排除依赖未满足的 stories（前置 story 未完成）",
-        "- 按推荐优先级排序返回",
-        "- 判断每个推荐 story 是否涉及 UI/UX 工作"
-        "（如 TUI 组件、界面交互、样式变更），在 has_ui_map 中标注 true/false",
-        "",
-        "## 输出要求",
-        "严格按照 JSON schema 返回 structured output，"
-        "包含 story_keys（有序列表）、has_ui_map（每个 story 的 UI 标志）"
-        "和 reason（推荐理由）。",
-    ])
+    lines.extend(
+        [
+            "",
+            "## 约束",
+            f"- 最多选择 {max_stories} 个 stories",
+            "- story_keys 必须使用 sprint-status.yaml 中的 canonical key 格式"
+            "（如 `1-1-enabler-project-init`），若无 sprint-status 则使用"
+            " epics 中的 short key 格式（如 `1-1`）",
+            "- 排除已在代码中实质完成的 stories",
+            "- 排除依赖未满足的 stories（前置 story 未完成）",
+            "- 按推荐优先级排序返回",
+            "- 判断每个推荐 story 是否涉及 UI/UX 工作"
+            "（如 TUI 组件、界面交互、样式变更），在 has_ui_map 中标注 true/false",
+            "",
+            "## 输出要求",
+            "严格按照 JSON schema 返回 structured output，"
+            "包含 story_keys（有序列表）、has_ui_map（每个 story 的 UI 标志）"
+            "和 reason（推荐理由）。",
+        ]
+    )
 
     return "\n".join(lines)
 
@@ -354,11 +357,13 @@ class LLMBatchRecommender:
         project_root: Path,
         epics_path: Path,
         sprint_status_path: Path | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         self._adapter = adapter
         self._project_root = project_root
         self._epics_path = epics_path
         self._sprint_status_path = sprint_status_path
+        self._on_progress = on_progress
 
     async def recommend(
         self,
@@ -376,7 +381,9 @@ class LLMBatchRecommender:
 
         # 1. 构建 prompt — 只传文件路径，让 LLM 自己读
         sprint_status_str = (
-            str(self._sprint_status_path) if self._sprint_status_path and self._sprint_status_path.exists() else None
+            str(self._sprint_status_path)
+            if self._sprint_status_path and self._sprint_status_path.exists()
+            else None
         )
         prompt = build_llm_recommend_prompt(
             max_stories,
@@ -393,6 +400,7 @@ class LLMBatchRecommender:
                     "cwd": str(self._project_root),
                     "max_turns": 10,
                 },
+                on_progress=self._on_progress,
             )
         except Exception as exc:
             logger.warning("llm_batch_recommend_call_failed", exc_info=True)
@@ -408,7 +416,8 @@ class LLMBatchRecommender:
             output = BatchRecommendOutput.model_validate(raw)
         except Exception as exc:
             logger.warning(
-                "llm_batch_recommend_schema_validation_failed", exc_info=True,
+                "llm_batch_recommend_schema_validation_failed",
+                exc_info=True,
             )
             raise LLMRecommendError("structured_output schema 校验失败") from exc
 
@@ -430,7 +439,8 @@ class LLMBatchRecommender:
             seen.add(key)
             if key not in valid_keys:
                 logger.warning(
-                    "llm_batch_recommend_unknown_key", key=key,
+                    "llm_batch_recommend_unknown_key",
+                    key=key,
                 )
                 raise LLMRecommendError(
                     f"LLM 返回未知 key: {key}",
@@ -439,7 +449,8 @@ class LLMBatchRecommender:
             if canonical in seen_canonical:
                 logger.warning(
                     "llm_batch_recommend_canonical_duplicate",
-                    key=key, canonical=canonical,
+                    key=key,
+                    canonical=canonical,
                 )
                 raise LLMRecommendError(
                     f"LLM 返回重复 story（别名）: {key} → {canonical}",
@@ -453,8 +464,7 @@ class LLMBatchRecommender:
                 max_stories=max_stories,
             )
             raise LLMRecommendError(
-                f"LLM 返回 {len(output.story_keys)} 个 stories，"
-                f"超过上限 {max_stories}",
+                f"LLM 返回 {len(output.story_keys)} 个 stories，超过上限 {max_stories}",
             )
 
         if not output.story_keys:
@@ -477,11 +487,11 @@ class LLMBatchRecommender:
             if canonical in resolved_has_ui:
                 logger.warning(
                     "llm_batch_recommend_has_ui_map_alias_conflict",
-                    key=ui_key, canonical=canonical,
+                    key=ui_key,
+                    canonical=canonical,
                 )
                 raise LLMRecommendError(
-                    f"has_ui_map 包含同一 story 的冲突别名: "
-                    f"{ui_key} → {canonical}",
+                    f"has_ui_map 包含同一 story 的冲突别名: {ui_key} → {canonical}",
                 )
             resolved_has_ui[canonical] = ui_val
 

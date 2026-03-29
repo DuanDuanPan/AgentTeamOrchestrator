@@ -249,7 +249,12 @@ class TestBuildCanonicalKeyMap:
 
 
 def _make_epic(
-    short_key: str, story_key: str, title: str, deps: list[str] | None = None, *, has_ui: bool = False
+    short_key: str,
+    story_key: str,
+    title: str,
+    deps: list[str] | None = None,
+    *,
+    has_ui: bool = False,
 ) -> EpicInfo:
     return EpicInfo(
         story_key=story_key,
@@ -830,7 +835,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 5)
 
         assert len(proposal.stories) == 1
@@ -851,7 +858,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="未知"):
             await recommender.recommend(epics, existing, 5)
@@ -868,7 +877,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="重复"):
             await recommender.recommend(epics, existing, 5)
@@ -889,7 +900,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="超过上限"):
             await recommender.recommend(epics, existing, 2)
@@ -906,7 +919,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="空"):
             await recommender.recommend(epics, existing, 5)
@@ -923,7 +938,9 @@ class TestLLMBatchRecommender:
             retryable=True,
         )
 
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="调用失败"):
             await recommender.recommend(epics, existing, 5)
@@ -937,7 +954,9 @@ class TestLLMBatchRecommender:
         fixture["structured_output"] = None
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="structured_output"):
             await recommender.recommend(epics, existing, 5)
@@ -951,7 +970,9 @@ class TestLLMBatchRecommender:
         fixture["structured_output"] = {"invalid": "data"}
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="schema"):
             await recommender.recommend(epics, existing, 5)
@@ -968,7 +989,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="空"):
             await recommender.recommend(epics, existing, 5)
@@ -995,6 +1018,29 @@ class TestLLMBatchRecommender:
         options = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("options")
         assert options["cwd"] == str(project_root)
 
+    async def test_passes_progress_callback_to_adapter(self) -> None:
+        """CLI 注入的 on_progress 应透传到 adapter.execute。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding"],
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        on_progress = AsyncMock()
+        recommender = LLMBatchRecommender(
+            adapter,
+            Path("/fake/root"),
+            epics_path=Path("/fake/epics.md"),
+            on_progress=on_progress,
+        )
+        await recommender.recommend(epics, existing, 5)
+
+        assert adapter.execute.call_args.kwargs["on_progress"] is on_progress
+
     async def test_full_pool_not_truncated_by_max_stories(self) -> None:
         """LLM 收到完整 eligible pool，不被 max_stories 截断。"""
         epics = [
@@ -1012,7 +1058,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 2)
 
         # 如果 pool 被截断，1-3-c 不在 pool 内会被视为集合外 key 而抛错
@@ -1036,7 +1084,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 3)
 
         assert len(proposal.stories) == 2
@@ -1059,7 +1109,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 5)
 
         assert proposal.stories[0].has_ui is False
@@ -1081,7 +1133,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 5)
 
         assert proposal.stories[0].has_ui is True
@@ -1100,7 +1154,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 5)
 
         assert proposal.stories[0].has_ui is False
@@ -1118,7 +1174,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 5)
 
         # 两种 key 格式归一化到同一个 EpicInfo，has_ui 正确回写
@@ -1137,7 +1195,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
         proposal = await recommender.recommend(epics, existing, 5)
 
         assert proposal.stories[0].has_ui is True
@@ -1155,7 +1215,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="冲突"):
             await recommender.recommend(epics, existing, 5)
@@ -1173,7 +1235,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="重复"):
             await recommender.recommend(epics, existing, 5)
@@ -1191,7 +1255,9 @@ class TestLLMBatchRecommender:
         }
 
         adapter = _make_mock_adapter(fixture)
-        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        recommender = LLMBatchRecommender(
+            adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md")
+        )
 
         with pytest.raises(LLMRecommendError, match="未知"):
             await recommender.recommend(epics, existing, 5)

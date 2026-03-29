@@ -18,7 +18,7 @@ from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from ato.config import PhaseDefinition, evaluate_skip_condition
 from ato.models.db import get_connection, get_story
-from ato.models.schemas import StateTransitionError, TransitionEvent
+from ato.models.schemas import StateTransitionError, TransitionEvent, TransitionSource
 from ato.nudge import Nudge, send_user_notification
 from ato.state_machine import (
     StoryLifecycle,
@@ -260,7 +260,7 @@ class TransitionQueue:
         db: aiosqlite.Connection,
         story_id: str,
         new_phase: str,
-        source: str,
+        source: TransitionSource,
     ) -> None:
         """Post-commit hook：检查新 phase 是否配置了 skip_when 条件跳过。
 

@@ -23,7 +23,13 @@ from ato.models.db import get_connection, get_story
 from ato.models.schemas import (
     APPROVAL_DEFAULT_VALID_OPTIONS as _DEFAULT_VALID_OPTIONS,
 )
-from ato.models.schemas import APPROVAL_TYPE_ICONS, CheckResult, ContextBriefing, StoryRecord
+from ato.models.schemas import (
+    APPROVAL_TYPE_ICONS,
+    CheckResult,
+    ContextBriefing,
+    ProgressEvent,
+    StoryRecord,
+)
 from ato.preflight import run_preflight
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
@@ -52,6 +58,20 @@ def _format_cli_error(what: str, options: str | list[str]) -> str:
     """
     opts = " / ".join(options) if isinstance(options, list) else options
     return f"发生了什么：{what}\n你的选项：{opts}"
+
+
+def _format_progress_line(event: ProgressEvent) -> str:
+    """格式化 LLM 流式事件，供 CLI 实时输出。"""
+    icons = {
+        "init": "◦",
+        "text": "⋯",
+        "tool_use": "→",
+        "tool_result": "←",
+        "result": "✓",
+        "error": "✗",
+    }
+    icon = icons.get(event.event_type, "·")
+    return f"{icon} [{event.cli_tool}] {event.summary}"
 
 
 # ---------------------------------------------------------------------------
@@ -448,16 +468,31 @@ async def _batch_select_async(
 
                 project_root = _derive_project_root(db_path)
                 adapter = ClaudeAdapter()
-                sprint_status = epics_path.parent.parent / "implementation-artifacts" / "sprint-status.yaml"
+                sprint_status = (
+                    epics_path.parent.parent / "implementation-artifacts" / "sprint-status.yaml"
+                )
+                last_progress: tuple[str, str, str] | None = None
+
+                async def _echo_llm_progress(event: ProgressEvent) -> None:
+                    nonlocal last_progress
+                    current = (event.cli_tool, event.event_type, event.summary)
+                    if current == last_progress:
+                        return
+                    last_progress = current
+                    typer.echo(_format_progress_line(event))
+
                 llm_recommender = LLMBatchRecommender(
                     adapter,
                     project_root,
                     epics_path=epics_path,
                     sprint_status_path=sprint_status if sprint_status.exists() else None,
+                    on_progress=_echo_llm_progress,
                 )
                 try:
                     proposal = await llm_recommender.recommend(
-                        epics_info, existing_stories, max_stories,
+                        epics_info,
+                        existing_stories,
+                        max_stories,
                     )
                 except LLMRecommendError as exc:
                     logger.warning(

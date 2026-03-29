@@ -28,6 +28,7 @@ from ato.models.schemas import (
     CLIAdapterError,
     ErrorCategory,
     FindingRecord,
+    ProgressEvent,
     StoryRecord,
     TaskRecord,
     compute_dedup_hash,
@@ -828,6 +829,130 @@ class TestDispatchOptions:
         )
 
         assert options == {"cwd": "/tmp/existing-worktree"}
+
+
+class TestRecoveryProgressLogging:
+    """验证 recovery caller 层会透传并记录流式进度。"""
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_structured_job_recovery_passes_progress_callback(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1"))
+            await insert_task(
+                db,
+                _make_task("t1", "s1", status="running", pid=999, phase="creating"),
+            )
+        finally:
+            await db.close()
+
+        dispatch_mock = AsyncMock(return_value=_MOCK_ADAPTER_RESULT)
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing"},
+        )
+
+        with (
+            patch("ato.subprocess_mgr.SubprocessManager.dispatch_with_retry", dispatch_mock),
+            patch("ato.recovery.logger") as mock_logger,
+        ):
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+            on_progress = dispatch_mock.await_args.kwargs["on_progress"]
+            assert callable(on_progress)
+
+            await on_progress(
+                ProgressEvent(
+                    event_type="tool_use",
+                    summary="调用工具: Read",
+                    cli_tool="claude",
+                    timestamp=datetime.now(tz=UTC),
+                    raw={"type": "assistant"},
+                )
+            )
+
+        assert any(
+            call.args and call.args[0] == "agent_progress"
+            for call in mock_logger.info.call_args_list
+        )
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_convergent_loop_recovery_passes_progress_callback(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-validate", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-validate", "s-validate", status="running", pid=999, phase="validating"
+                ),
+            )
+        finally:
+            await db.close()
+
+        dispatch_mock = AsyncMock(return_value=_MOCK_ADAPTER_RESULT)
+        parse_result = BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+        )
+
+        with (
+            patch("ato.subprocess_mgr.SubprocessManager.dispatch_with_retry", dispatch_mock),
+            patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
+            patch("ato.recovery.logger") as mock_logger,
+        ):
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = parse_result
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+            on_progress = dispatch_mock.await_args.kwargs["on_progress"]
+            assert callable(on_progress)
+
+            await on_progress(
+                ProgressEvent(
+                    event_type="text",
+                    summary="正在验证 story",
+                    cli_tool="codex",
+                    timestamp=datetime.now(tz=UTC),
+                    raw={"type": "item.completed"},
+                )
+            )
+
+        assert any(
+            call.args and call.args[0] == "agent_progress"
+            for call in mock_logger.info.call_args_list
+        )
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
@@ -2145,7 +2270,7 @@ class TestValidatingPromptManifestInjection:
         (ux / "ux-spec.md").touch()
         (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
         (ux / "prototype.snapshot.json").write_text('{"children":[]}')
-        (ux / "prototype.save-report.json").write_text('{}')
+        (ux / "prototype.save-report.json").write_text("{}")
         (exports / "a.png").write_bytes(b"PNG")
         write_prototype_manifest(story_id, root)
         return root
@@ -2177,9 +2302,7 @@ class TestValidatingPromptManifestInjection:
             await insert_story(db, _make_story("s-val", worktree_path="/tmp/wt"))
             await insert_task(
                 db,
-                _make_task(
-                    "t-val", "s-val", status="pending", pid=None, phase="validating"
-                ),
+                _make_task("t-val", "s-val", status="pending", pid=None, phase="validating"),
             )
         finally:
             await db.close()
@@ -2202,9 +2325,7 @@ class TestValidatingPromptManifestInjection:
             convergent_loop_phases={"validating", "reviewing"},
         )
 
-        task = _make_task(
-            "t-val", "s-val", status="pending", pid=None, phase="validating"
-        )
+        task = _make_task("t-val", "s-val", status="pending", pid=None, phase="validating")
 
         with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
             mock_bmad = AsyncMock()
@@ -2271,9 +2392,7 @@ class TestCreatingPromptTemplate:
 class TestBuildCreatingPromptWithFindings:
     """验证 _build_creating_prompt_with_findings helper。"""
 
-    async def test_no_findings_returns_base_prompt(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_no_findings_returns_base_prompt(self, initialized_db_path: Path) -> None:
         """AC3: 无 findings 时返回原始 base_prompt。"""
         from ato.recovery import _build_creating_prompt_with_findings
 
@@ -2284,14 +2403,10 @@ class TestBuildCreatingPromptWithFindings:
             await db.close()
 
         base = "base prompt text"
-        result = await _build_creating_prompt_with_findings(
-            base, "new-1", initialized_db_path
-        )
+        result = await _build_creating_prompt_with_findings(base, "new-1", initialized_db_path)
         assert result == base
 
-    async def test_with_findings_appends_json_payload(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_with_findings_appends_json_payload(self, initialized_db_path: Path) -> None:
         """AC2: 有 findings 时追加 JSON code fence 与验证反馈。"""
         import json
 
@@ -2325,9 +2440,7 @@ class TestBuildCreatingPromptWithFindings:
             await db.close()
 
         base = "base prompt"
-        result = await _build_creating_prompt_with_findings(
-            base, "test-1", initialized_db_path
-        )
+        result = await _build_creating_prompt_with_findings(base, "test-1", initialized_db_path)
 
         # AC2: 包含标题和指令
         assert "## Validation Feedback" in result
@@ -2355,9 +2468,7 @@ class TestBuildCreatingPromptWithFindings:
             assert "severity" in finding
             assert "description" in finding
 
-    async def test_line_number_included_only_when_present(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_line_number_included_only_when_present(self, initialized_db_path: Path) -> None:
         """AC2: line_number 仅在原 finding 有值时出现。"""
         import json
 
@@ -2374,9 +2485,7 @@ class TestBuildCreatingPromptWithFindings:
                 rule_id="R1",
             )
             # Manually set line_number
-            f_with_ln = FindingRecord(
-                **{**f_with_ln.model_dump(), "line_number": 42}
-            )
+            f_with_ln = FindingRecord(**{**f_with_ln.model_dump(), "line_number": 42})
             f_without_ln = _make_open_finding(
                 finding_id="f-no-ln",
                 story_id="ln-test",
@@ -2388,9 +2497,7 @@ class TestBuildCreatingPromptWithFindings:
         finally:
             await db.close()
 
-        result = await _build_creating_prompt_with_findings(
-            "base", "ln-test", initialized_db_path
-        )
+        result = await _build_creating_prompt_with_findings("base", "ln-test", initialized_db_path)
         json_start = result.index("```json\n") + len("```json\n")
         json_end = result.index("\n```", json_start)
         payload = json.loads(result[json_start:json_end])
@@ -2421,8 +2528,11 @@ class TestCreatingDispatchUsesHelper:
             await insert_task(
                 db,
                 _make_task(
-                    "t-create", "s-create",
-                    status="running", pid=999, phase="creating",
+                    "t-create",
+                    "s-create",
+                    status="running",
+                    pid=999,
+                    phase="creating",
                 ),
             )
             await insert_findings_batch(
@@ -2476,13 +2586,14 @@ class TestTemplateContextBriefingPreservation:
         try:
             await insert_story(db, _make_story("s-ctx"))
             task = _make_task(
-                "t-ctx", "s-ctx",
-                status="running", pid=999, phase="creating",
+                "t-ctx",
+                "s-ctx",
+                status="running",
+                pid=999,
+                phase="creating",
             )
             # 手动注入 context_briefing
-            task = TaskRecord(
-                **{**task.model_dump(), "context_briefing": "human note: fix AC3"}
-            )
+            task = TaskRecord(**{**task.model_dump(), "context_briefing": "human note: fix AC3"})
             await insert_task(db, task)
         finally:
             await db.close()
@@ -2519,12 +2630,13 @@ class TestTemplateContextBriefingPreservation:
         try:
             await insert_story(db, _make_story("s-des"))
             task = _make_task(
-                "t-des", "s-des",
-                status="running", pid=999, phase="designing",
+                "t-des",
+                "s-des",
+                status="running",
+                pid=999,
+                phase="designing",
             )
-            task = TaskRecord(
-                **{**task.model_dump(), "context_briefing": "retry after gate fail"}
-            )
+            task = TaskRecord(**{**task.model_dump(), "context_briefing": "retry after gate fail"})
             await insert_task(db, task)
         finally:
             await db.close()
@@ -2561,8 +2673,11 @@ class TestTemplateContextBriefingPreservation:
             await insert_task(
                 db,
                 _make_task(
-                    "t-noctx", "s-noctx",
-                    status="running", pid=999, phase="creating",
+                    "t-noctx",
+                    "s-noctx",
+                    status="running",
+                    pid=999,
+                    phase="creating",
                 ),
             )
         finally:
@@ -2594,9 +2709,7 @@ _ARTIFACTS_REL = "_bmad-output/implementation-artifacts"
 class TestValidatingFileFallback:
     """验证 validating 阶段的 artifact-file fallback 逻辑。"""
 
-    def _make_engine(
-        self, db_path: Path, tq: AsyncMock | None = None
-    ) -> RecoveryEngine:
+    def _make_engine(self, db_path: Path, tq: AsyncMock | None = None) -> RecoveryEngine:
         from ato.config import ATOSettings
 
         # validating tests need workspace: worktree so file fallback reads from worktree path
@@ -2663,7 +2776,10 @@ class TestValidatingFileFallback:
                     rule_id="SV001",
                     line=10,
                     dedup_hash=compute_dedup_hash(
-                        "src/test.py", "SV001", sev, "test finding",
+                        "src/test.py",
+                        "SV001",
+                        sev,
+                        "test finding",
                     ),
                 )
             ],
@@ -3072,9 +3188,7 @@ class TestValidatingFileFallback:
 
         with (
             patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
-            patch.object(
-                Path, "read_text", side_effect=OSError(13, "Permission denied")
-            ),
+            patch.object(Path, "read_text", side_effect=OSError(13, "Permission denied")),
             patch("ato.adapters.bmad_adapter.record_parse_failure") as mock_rpf,
         ):
             mock_bmad = AsyncMock()

@@ -1044,13 +1044,15 @@ class TestSpecBatchApprovalLifecycle:
         """manual_fix 消费旧 approval 并创建新的 pending approval，用户可对新 approval 决策。"""
         import json
 
-        payload = json.dumps({
-            "scope": "spec_batch",
-            "batch_id": "b1",
-            "story_ids": ["s1"],
-            "error_output": "pre-commit hook failed",
-            "options": ["retry", "manual_fix", "skip"],
-        })
+        payload = json.dumps(
+            {
+                "scope": "spec_batch",
+                "batch_id": "b1",
+                "story_ids": ["s1"],
+                "error_output": "pre-commit hook failed",
+                "options": ["retry", "manual_fix", "skip"],
+            }
+        )
         await _insert_test_approval(
             initialized_db_path,
             approval_id="spec1111-0000-0000-0000-000000000000",
@@ -1113,13 +1115,15 @@ class TestSpecBatchApprovalLifecycle:
         finally:
             await db.close()
 
-        payload = json.dumps({
-            "scope": "spec_batch",
-            "batch_id": "b2",
-            "story_ids": ["s1"],
-            "error_output": "error",
-            "options": ["retry", "manual_fix", "skip"],
-        })
+        payload = json.dumps(
+            {
+                "scope": "spec_batch",
+                "batch_id": "b2",
+                "story_ids": ["s1"],
+                "error_output": "error",
+                "options": ["retry", "manual_fix", "skip"],
+            }
+        )
         await _insert_test_approval(
             initialized_db_path,
             approval_id="spec2222-0000-0000-0000-000000000000",
@@ -2052,6 +2056,69 @@ class TestBatchRestartPhaseOptions:
         assert "model" not in options
         assert "sandbox" not in options
 
+    async def test_batch_restart_passes_orchestrator_progress_callback(
+        self, initialized_db_path: Path
+    ) -> None:
+        """core 层应向 dispatch_with_retry 传入 on_progress，以暴露后台流式事件。"""
+        from ato.config import ATOSettings
+        from ato.models.schemas import AdapterResult, ProgressEvent, TaskRecord
+
+        settings = ATOSettings(
+            roles={"creator": {"cli": "claude"}},
+            phases=[
+                {
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path, status="pending", task_id="t-progress", story_id="s1"
+        )
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        result = AdapterResult(status="success", exit_code=0, duration_ms=10, text_result="ok")
+        dispatch_mock = AsyncMock(return_value=result)
+        task = TaskRecord(
+            task_id="t-progress",
+            story_id="s1",
+            phase="creating",
+            role="creator",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with (
+            patch("ato.recovery._create_adapter", return_value=object()),
+            patch("ato.subprocess_mgr.SubprocessManager.dispatch_with_retry", dispatch_mock),
+            patch("ato.core.logger") as mock_logger,
+        ):
+            await orchestrator._dispatch_batch_restart(task)
+
+            on_progress = dispatch_mock.await_args.kwargs["on_progress"]
+            assert callable(on_progress)
+
+            await on_progress(
+                ProgressEvent(
+                    event_type="tool_use",
+                    summary="调用工具: Read",
+                    cli_tool="claude",
+                    timestamp=datetime.now(tz=UTC),
+                    raw={"type": "assistant"},
+                )
+            )
+
+        assert any(
+            call.args and call.args[0] == "agent_progress"
+            for call in mock_logger.info.call_args_list
+        )
+
 
 # ---------------------------------------------------------------------------
 # Pre-worktree structured_job 串行控制测试 (Story 9.1 AC#5)
@@ -2803,7 +2870,7 @@ class TestDevelopingPromptUxContext:
         (ux / "ux-spec.md").touch()
         (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
         (ux / "prototype.snapshot.json").write_text('{"children":[]}')
-        (ux / "prototype.save-report.json").write_text('{}')
+        (ux / "prototype.save-report.json").write_text("{}")
         (exports / "a.png").write_bytes(b"PNG")
         write_prototype_manifest("s1", root)
 
@@ -2901,7 +2968,9 @@ class TestBatchRestartCreatingFindings:
                         file_path="story.md",
                         rule_id="SV001",
                         dedup_hash=compute_dedup_hash(
-                            "story.md", "SV001", "blocking",
+                            "story.md",
+                            "SV001",
+                            "blocking",
                             "missing acceptance criteria",
                         ),
                         created_at=now,

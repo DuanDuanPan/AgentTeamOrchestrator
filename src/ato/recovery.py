@@ -23,6 +23,7 @@ import structlog
 
 from ato.adapters.base import BaseAdapter
 from ato.models.schemas import (
+    ProgressCallback,
     RecoveryAction,
     RecoveryClassification,
     RecoveryMode,
@@ -31,6 +32,7 @@ from ato.models.schemas import (
     TransitionEvent,
 )
 from ato.nudge import Nudge
+from ato.progress import build_agent_progress_callback
 from ato.subprocess_mgr import SubprocessManager
 from ato.transition_queue import TransitionQueue
 
@@ -225,9 +227,7 @@ async def _build_creating_prompt_with_findings(
             entry["line_number"] = f.line_number
         finding_data.append(entry)
 
-    payload_json = json.dumps(
-        {"validation_findings": finding_data}, indent=2, ensure_ascii=False
-    )
+    payload_json = json.dumps({"validation_findings": finding_data}, indent=2, ensure_ascii=False)
 
     return (
         f"{base_prompt}\n\n"
@@ -308,6 +308,26 @@ class RecoveryEngine:
         self._convergent_loop_phases = convergent_loop_phases or set()
         self._settings = settings  # ATOSettings, typed as Any to avoid circular import
         self._background_tasks: list[asyncio.Task[Any]] = []
+
+    def _build_progress_callback(
+        self,
+        *,
+        task_id: str | None,
+        story_id: str,
+        phase: str,
+        role: str,
+        cli_tool: Literal["claude", "codex"],
+    ) -> ProgressCallback:
+        """Build a logger-backed progress callback for recovery dispatches."""
+
+        return build_agent_progress_callback(
+            logger=logger,
+            task_id=task_id,
+            story_id=story_id,
+            phase=phase,
+            role=role,
+            cli_tool=cli_tool,
+        )
 
     async def await_background_tasks(self) -> None:
         """等待所有后台任务完成。供测试和 Orchestrator shutdown 使用。"""
@@ -548,8 +568,10 @@ class RecoveryEngine:
         沿用 legacy fallback：有 worktree_path 则视为 worktree，否则回退 main。
         """
         workspace = phase_cfg.get("workspace")
-        if workspace in {"main", "worktree"}:
-            return workspace
+        if workspace == "main":
+            return "main"
+        if workspace == "worktree":
+            return "worktree"
         return "worktree" if worktree_path else "main"
 
     @staticmethod
@@ -839,9 +861,7 @@ class RecoveryEngine:
             if prompt_template is not None:
                 from ato.design_artifacts import ARTIFACTS_REL
 
-                validation_report_path = (
-                    f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
-                )
+                validation_report_path = f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
                 prompt = prompt_template.format(
                     worktree_path=effective_path,
                     story_id=task.story_id,
@@ -880,6 +900,13 @@ class RecoveryEngine:
                 options=dispatch_opts,
                 task_id=task.task_id,
                 is_retry=True,
+                on_progress=self._build_progress_callback(
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                    role=role,
+                    cli_tool=cli_tool,
+                ),
             )
 
             # BMAD parse
@@ -893,9 +920,7 @@ class RecoveryEngine:
             if parse_result.verdict == "parse_failed":
                 # Story 9.1f: validating-only artifact-file fallback
                 if task.phase == "validating" and effective_path is not None:
-                    report_rel = (
-                        f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
-                    )
+                    report_rel = f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
                     report_abs = Path(effective_path) / report_rel
                     if report_abs.is_file():
                         logger.info(
@@ -1090,6 +1115,13 @@ class RecoveryEngine:
                 options=options,
                 task_id=task.task_id,
                 is_retry=True,
+                on_progress=self._build_progress_callback(
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                    role=task.role,
+                    cli_tool=task.cli_tool,
+                ),
             )
 
             if result.status == "success":
