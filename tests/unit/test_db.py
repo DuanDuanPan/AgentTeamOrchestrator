@@ -230,6 +230,38 @@ class TestStoryCrud:
         finally:
             await db.close()
 
+    async def test_has_ui_defaults_to_false(self, initialized_db_path: Path) -> None:
+        """has_ui 默认为 False 的 story 正确存储和回读。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            story = _make_story("story-noui")
+            await insert_story(db, story)
+            result = await get_story(db, "story-noui")
+            assert result is not None
+            assert result.has_ui is False
+        finally:
+            await db.close()
+
+    async def test_has_ui_true_roundtrip(self, initialized_db_path: Path) -> None:
+        """has_ui=True 的 story 正确存储和回读。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            story = StoryRecord(
+                story_id="story-ui",
+                title="UI story",
+                status="in_progress",
+                current_phase="dev",
+                has_ui=True,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+            await insert_story(db, story)
+            result = await get_story(db, "story-ui")
+            assert result is not None
+            assert result.has_ui is True
+        finally:
+            await db.close()
+
 
 # ---------------------------------------------------------------------------
 # CRUD — Task round-trip

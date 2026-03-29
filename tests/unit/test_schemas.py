@@ -150,6 +150,23 @@ class TestStoryRecord:
         story = StoryRecord.model_validate(data)
         assert story.worktree_path == "/tmp/worktree"
 
+    def test_has_ui_defaults_to_false(self) -> None:
+        story = StoryRecord.model_validate(_valid_story_data())
+        assert story.has_ui is False
+
+    def test_has_ui_accepts_true(self) -> None:
+        data = _valid_story_data()
+        data["has_ui"] = True
+        story = StoryRecord.model_validate(data)
+        assert story.has_ui is True
+
+    def test_has_ui_strict_rejects_int(self) -> None:
+        """strict=True 下 int 不能隐式转为 bool。"""
+        data = _valid_story_data()
+        data["has_ui"] = 1
+        with pytest.raises(ValidationError):
+            StoryRecord.model_validate(data)
+
 
 # ---------------------------------------------------------------------------
 # TaskRecord

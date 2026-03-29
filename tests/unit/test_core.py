@@ -1031,6 +1031,132 @@ class TestProcessApprovalDecisions:
 
 
 # ---------------------------------------------------------------------------
+# Story 9.3: spec_batch precommit_failure approval lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestSpecBatchApprovalLifecycle:
+    """spec_batch precommit_failure 审批的消费语义。"""
+
+    async def test_manual_fix_consumes_old_and_creates_new_approval(
+        self, initialized_db_path: Path
+    ) -> None:
+        """manual_fix 消费旧 approval 并创建新的 pending approval，用户可对新 approval 决策。"""
+        import json
+
+        payload = json.dumps({
+            "scope": "spec_batch",
+            "batch_id": "b1",
+            "story_ids": ["s1"],
+            "error_output": "pre-commit hook failed",
+            "options": ["retry", "manual_fix", "skip"],
+        })
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="spec1111-0000-0000-0000-000000000000",
+            approval_type="precommit_failure",
+            decision="manual_fix",
+            status="approved",
+        )
+        # 用 spec_batch payload 覆盖默认 payload
+        from ato.models.db import get_connection
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE approvals SET payload = ? WHERE approval_id = ?",
+                (payload, "spec1111-0000-0000-0000-000000000000"),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_decided_unconsumed_approvals, get_pending_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            # 旧 approval 已消费（不在 unconsumed 里）
+            unconsumed = await get_decided_unconsumed_approvals(db)
+            old_ids = [a.approval_id for a in unconsumed]
+            assert "spec1111-0000-0000-0000-000000000000" not in old_ids
+
+            # 新的 pending approval 已创建
+            pending = await get_pending_approvals(db)
+            spec_pending = [a for a in pending if a.approval_type == "precommit_failure"]
+            assert len(spec_pending) == 1, "应创建新的 pending approval"
+            new_payload = json.loads(spec_pending[0].payload or "{}")
+            assert new_payload["scope"] == "spec_batch"
+            assert new_payload["batch_id"] == "b1"
+        finally:
+            await db.close()
+
+    async def test_skip_consumes_approval_and_marks_committed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """skip 决策消费 approval 并标记 batch spec_committed。"""
+        import json
+
+        from ato.models.db import get_connection, insert_batch
+        from ato.models.schemas import BatchRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(
+                db,
+                BatchRecord(batch_id="b2", status="active", created_at=now),
+            )
+        finally:
+            await db.close()
+
+        payload = json.dumps({
+            "scope": "spec_batch",
+            "batch_id": "b2",
+            "story_ids": ["s1"],
+            "error_output": "error",
+            "options": ["retry", "manual_fix", "skip"],
+        })
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="spec2222-0000-0000-0000-000000000000",
+            approval_type="precommit_failure",
+            decision="skip",
+            status="approved",
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE approvals SET payload = ? WHERE approval_id = ?",
+                (payload, "spec2222-0000-0000-0000-000000000000"),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        # skip → consumed + spec_committed=True
+        from ato.models.db import get_active_batch, get_decided_unconsumed_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db)
+            assert len(remaining) == 0, "skip 应消费 approval"
+
+            batch = await get_active_batch(db)
+            assert batch is not None
+            assert batch.spec_committed is True
+        finally:
+            await db.close()
+
+
+# ---------------------------------------------------------------------------
 # Convergent restart 异常路径：不得重复创建 approval
 # ---------------------------------------------------------------------------
 

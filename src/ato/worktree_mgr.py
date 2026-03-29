@@ -550,3 +550,95 @@ class WorktreeManager:
             if line.startswith("worktree ") and line[9:] == resolved:
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # Batch spec commit — Story 9.3
+    # ------------------------------------------------------------------
+
+    async def batch_spec_commit(
+        self,
+        batch_id: str,
+        story_ids: list[str],
+    ) -> tuple[bool, str]:
+        """将 batch 内所有 story 的规格文件提交到本地 main。
+
+        Stage 路径：
+        - ``_bmad-output/implementation-artifacts/{story_id}.md``
+        - ``_bmad-output/implementation-artifacts/{story_id}-ux/`` (若存在)
+
+        Args:
+            batch_id: Batch 唯一标识。
+            story_ids: Batch 内的 story_id 列表。
+
+        Returns:
+            (success, message) 元组。success 为 True 时 message 是 commit hash，
+            False 时 message 是错误信息。
+        """
+        spec_dir = "_bmad-output/implementation-artifacts"
+        paths_to_add: list[str] = []
+        for sid in story_ids:
+            spec_file = f"{spec_dir}/{sid}.md"
+            spec_ux_dir = f"{spec_dir}/{sid}-ux/"
+            # 只 stage 存在的文件/目录
+            full_spec = self._project_root / spec_file
+            if full_spec.exists():
+                paths_to_add.append(spec_file)
+            full_ux = self._project_root / spec_ux_dir.rstrip("/")
+            if full_ux.exists() and full_ux.is_dir():
+                paths_to_add.append(spec_ux_dir)
+
+        if not paths_to_add:
+            return True, "no spec files to commit (idempotent)"
+
+        # 幂等检查：如果工作树无差异，视为已提交。
+        # 必须验证返回码——非零退出说明 git 状态异常，不能假设"无变更"。
+        rc_diff, diff_out, stderr_diff = await self._run_git(
+            "diff", "--name-only", "--", *paths_to_add
+        )
+        rc_staged, staged_out, stderr_staged = await self._run_git(
+            "diff", "--cached", "--name-only", "--", *paths_to_add
+        )
+        # 检查是否有 untracked 的 spec files
+        rc_ls, ls_out, stderr_ls = await self._run_git(
+            "ls-files", "--others", "--exclude-standard", "--", *paths_to_add
+        )
+
+        # 任一 git 探测命令失败 → 不能做幂等假设，报错让上层处理
+        if rc_diff != 0:
+            return False, f"git diff failed (rc={rc_diff}): {stderr_diff}"
+        if rc_staged != 0:
+            return False, f"git diff --cached failed (rc={rc_staged}): {stderr_staged}"
+        if rc_ls != 0:
+            return False, f"git ls-files failed (rc={rc_ls}): {stderr_ls}"
+
+        has_changes = bool(
+            diff_out.strip() or staged_out.strip() or ls_out.strip()
+        )
+        if not has_changes:
+            return True, "all spec files already committed (idempotent)"
+
+        # git add — 仅 stage spec paths
+        rc_add, _, stderr_add = await self._run_git("add", "--", *paths_to_add)
+        if rc_add != 0:
+            return False, f"git add failed: {stderr_add}"
+
+        # git commit — 使用 pathspec 限定只提交 spec 文件，
+        # 不吞 index 中其他已暂存的无关变更。
+        commit_msg = f"spec(batch-{batch_id}): add validated story specifications"
+        rc_commit, _stdout_commit, stderr_commit = await self._run_git(
+            "commit", "-m", commit_msg, "--", *paths_to_add,
+        )
+        if rc_commit != 0:
+            return False, f"git commit failed: {stderr_commit}"
+
+        # 获取 commit hash
+        rc_rev, commit_hash, _ = await self._run_git("rev-parse", "HEAD")
+        commit_hash = commit_hash.strip() if rc_rev == 0 else "unknown"
+
+        logger.info(
+            "batch_spec_committed",
+            batch_id=batch_id,
+            story_ids=story_ids,
+            commit_hash=commit_hash,
+        )
+        return True, commit_hash

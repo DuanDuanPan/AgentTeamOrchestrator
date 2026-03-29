@@ -60,6 +60,7 @@ phases:
     type: structured_job
     next_on_success: validating
     workspace: main
+    skip_when: "not story.has_ui"
 
   - name: validating
     role: validator

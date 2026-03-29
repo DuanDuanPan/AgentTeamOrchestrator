@@ -962,3 +962,168 @@ class TestRevertMergeRangeContract:
 
         assert success is False
         assert "could not revert" in stderr
+
+
+# ---------------------------------------------------------------------------
+# Story 9.3: Batch spec commit
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSpecCommit:
+    """batch_spec_commit() 正确 stage 并提交 implementation-artifacts 中的 spec 文件。"""
+
+    async def test_commit_stages_correct_paths(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """spec 文件和 UX 目录被正确 stage 并 commit。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        # 创建 spec 文件
+        spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "s1.md").write_text("spec 1")
+        (spec_dir / "s2.md").write_text("spec 2")
+        ux_dir = spec_dir / "s1-ux"
+        ux_dir.mkdir()
+        (ux_dir / "wireframe.pen").write_text("design")
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        call_count = 0
+        expected_calls: list[tuple[int, str]] = []
+
+        def _make_side_effect() -> Any:
+            nonlocal call_count
+
+            async def side_effect(*args: Any, **kwargs: Any) -> Any:
+                nonlocal call_count
+                call_count += 1
+                cmd_args = args[1:]  # skip "git"
+                expected_calls.append((call_count, " ".join(str(a) for a in cmd_args)))
+                return _make_proc_mock(returncode=0, stdout="abc123\n")
+
+            return side_effect
+
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            side_effect=_make_side_effect(),
+        ):
+            success, message = await mgr.batch_spec_commit("batch-1", ["s1", "s2"])
+
+        assert success is True
+        # 应有多次 git 调用：diff, diff --cached, ls-files, add, commit, rev-parse
+        assert call_count >= 4
+
+        # 验证 commit 调用包含 pathspec（不吞 index 中无关变更）
+        commit_calls = [c for c in expected_calls if "commit" in c[1]]
+        assert len(commit_calls) >= 1
+        commit_cmd = commit_calls[0][1]
+        assert "--" in commit_cmd, f"commit 应包含 '--' pathspec 分隔符: {commit_cmd}"
+
+    async def test_commit_idempotent_no_changes(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """无差异时幂等成功，不重复创建 commit。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "s1.md").write_text("spec 1")
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        # diff, diff --cached, ls-files 全部返回空 → 无变更
+        proc_empty = _make_proc_mock(returncode=0, stdout="")
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            return_value=proc_empty,
+        ):
+            success, message = await mgr.batch_spec_commit("batch-1", ["s1"])
+
+        assert success is True
+        assert "idempotent" in message
+
+    async def test_commit_failure_returns_error(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """git add 失败时返回 (False, error_message)。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "s1.md").write_text("spec 1")
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        call_count = 0
+
+        async def side_effect(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            cmd_args = list(args[1:])  # skip "git"
+            # First 3 calls are diff checks (return non-empty to indicate changes)
+            if call_count <= 3:
+                if "ls-files" in cmd_args:
+                    return _make_proc_mock(returncode=0, stdout="s1.md\n")
+                return _make_proc_mock(returncode=0, stdout="")
+            # 4th call: git add → fail
+            return _make_proc_mock(returncode=1, stderr="fatal: pathspec error")
+
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            side_effect=side_effect,
+        ):
+            success, message = await mgr.batch_spec_commit("batch-1", ["s1"])
+
+        assert success is False
+        assert "git add failed" in message
+
+    async def test_no_spec_files_idempotent(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """story 文件不存在时幂等成功。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        success, message = await mgr.batch_spec_commit("batch-1", ["nonexistent"])
+
+        assert success is True
+        assert "idempotent" in message
+
+    async def test_git_diff_failure_not_treated_as_idempotent(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """git diff 非零退出不能被当成"无变更"的幂等成功。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "s1.md").write_text("spec")
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        # git diff 返回非零但 stdout 为空 → 应报错，不应视为幂等
+        proc_fail = _make_proc_mock(returncode=128, stdout="", stderr="fatal: bad revision")
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            return_value=proc_fail,
+        ):
+            success, message = await mgr.batch_spec_commit("batch-1", ["s1"])
+
+        assert success is False
+        assert "git diff failed" in message

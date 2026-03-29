@@ -577,3 +577,324 @@ class TestWorktreeCreationOnDeveloping:
         # 不应创建
         mock_create.assert_not_called()
         await tq.stop()
+
+
+# ---------------------------------------------------------------------------
+# Story 9.3: Conditional phase skip
+# ---------------------------------------------------------------------------
+
+
+def _make_designing_phase_defs() -> list["PhaseDefinition"]:
+    """创建包含 skip_when 的 designing 阶段定义。"""
+    from ato.config import PhaseDefinition
+
+    return [
+        PhaseDefinition(
+            name="designing",
+            role="ux_designer",
+            cli_tool="claude",
+            model=None,
+            sandbox=None,
+            phase_type="structured_job",
+            next_on_success="validating",
+            next_on_failure=None,
+            timeout_seconds=1800,
+            workspace="main",
+            skip_when="not story.has_ui",
+        ),
+    ]
+
+
+class TestConditionalPhaseSkip:
+    """Story 9.3 AC3: 条件跳过 designing 阶段。"""
+
+    async def test_designing_skipped_when_no_ui(self, initialized_db_path: Path) -> None:
+        """has_ui=False 时 designing 被自动跳过，story 进入 validating。"""
+        # 插入 story at creating (has_ui=False by default)
+        await _insert_story_at_phase(initialized_db_path, "s-noui", "creating")
+
+        phase_defs = _make_designing_phase_defs()
+        tq = TransitionQueue(initialized_db_path, phase_defs=phase_defs)
+        await tq.start()
+
+        # create_done → designing (skip_when triggers) → auto design_done → validating
+        await tq.submit(_make_event("s-noui", "create_done"))
+        # 等足够时间让 auto-skip event 也被处理
+        await asyncio.sleep(0.1)
+        await tq._queue.join()
+
+        story = await _read_story(initialized_db_path, "s-noui")
+        assert story is not None
+        assert story.current_phase == "validating"
+
+        await tq.stop()
+
+    async def test_designing_not_skipped_when_has_ui(self, initialized_db_path: Path) -> None:
+        """has_ui=True 时 designing 不被跳过，story 停留在 designing。"""
+        # 插入 has_ui=True 的 story at creating
+        now = datetime.now(UTC)
+        record = StoryRecord(
+            story_id="s-ui",
+            title="UI story",
+            status="in_progress",
+            current_phase="creating",
+            has_ui=True,
+            created_at=now,
+            updated_at=now,
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, record)
+            await db.commit()
+        finally:
+            await db.close()
+
+        phase_defs = _make_designing_phase_defs()
+        tq = TransitionQueue(initialized_db_path, phase_defs=phase_defs)
+        await tq.start()
+
+        await tq.submit(_make_event("s-ui", "create_done"))
+        await asyncio.sleep(0.1)
+        await tq._queue.join()
+
+        story = await _read_story(initialized_db_path, "s-ui")
+        assert story is not None
+        assert story.current_phase == "designing"
+
+        await tq.stop()
+
+    async def test_no_phase_defs_no_skip(self, initialized_db_path: Path) -> None:
+        """没有 phase_defs 时不触发任何跳过。"""
+        await _insert_story_at_phase(initialized_db_path, "s-nopd", "creating")
+
+        tq = TransitionQueue(initialized_db_path)  # no phase_defs
+        await tq.start()
+
+        await tq.submit(_make_event("s-nopd", "create_done"))
+        await asyncio.sleep(0.1)
+        await tq._queue.join()
+
+        story = await _read_story(initialized_db_path, "s-nopd")
+        assert story is not None
+        assert story.current_phase == "designing"
+
+        await tq.stop()
+
+
+# ---------------------------------------------------------------------------
+# Story 9.3: Batch spec commit on dev_ready
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSpecCommitOnDevReady:
+    """Story 9.3 AC5/AC7: batch spec commit 在 dev_ready 时触发。"""
+
+    async def test_batch_spec_commit_triggered_when_all_dev_ready(
+        self, initialized_db_path: Path
+    ) -> None:
+        """batch 内所有 story 到达 dev_ready 时触发 spec commit。"""
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import get_active_batch, insert_batch, insert_batch_story_links
+        from ato.models.schemas import BatchRecord, BatchStoryLink
+
+        # 创建 batch 和两个 story
+        now = datetime.now(UTC)
+        batch = BatchRecord(batch_id="b1", status="active", created_at=now)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s1", "validating")
+            await _insert_story_at_phase(initialized_db_path, "s2", "dev_ready")
+            await insert_batch_story_links(
+                db,
+                [
+                    BatchStoryLink(batch_id="b1", story_id="s1", sequence_no=0),
+                    BatchStoryLink(batch_id="b1", story_id="s2", sequence_no=1),
+                ],
+            )
+        finally:
+            await db.close()
+
+        mock_commit = AsyncMock(return_value=(True, "abc123"))
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        with (
+            patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+            patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+        ):
+            mock_wm_cls.return_value.batch_spec_commit = mock_commit
+
+            # s1: validate_pass → dev_ready (now both at dev_ready → trigger commit)
+            await tq.submit(_make_event("s1", "validate_pass"))
+            await asyncio.sleep(0.2)
+            await tq._queue.join()
+
+        mock_commit.assert_called_once()
+        call_args = mock_commit.call_args
+        assert call_args[0][0] == "b1"  # batch_id
+        assert set(call_args[0][1]) == {"s1", "s2"}  # story_ids
+
+        # Verify spec_committed is True
+        db = await get_connection(initialized_db_path)
+        try:
+            batch_record = await get_active_batch(db)
+            assert batch_record is not None
+            assert batch_record.spec_committed is True
+        finally:
+            await db.close()
+
+        await tq.stop()
+
+    async def test_no_commit_when_not_all_dev_ready(
+        self, initialized_db_path: Path
+    ) -> None:
+        """batch 内部分 story 未到达 dev_ready 时不触发 commit。"""
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import insert_batch, insert_batch_story_links
+        from ato.models.schemas import BatchRecord, BatchStoryLink
+
+        now = datetime.now(UTC)
+        batch = BatchRecord(batch_id="b2", status="active", created_at=now)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s3", "validating")
+            await _insert_story_at_phase(initialized_db_path, "s4", "creating")
+            await insert_batch_story_links(
+                db,
+                [
+                    BatchStoryLink(batch_id="b2", story_id="s3", sequence_no=0),
+                    BatchStoryLink(batch_id="b2", story_id="s4", sequence_no=1),
+                ],
+            )
+        finally:
+            await db.close()
+
+        mock_commit = AsyncMock(return_value=(True, "abc123"))
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        with (
+            patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+            patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+        ):
+            mock_wm_cls.return_value.batch_spec_commit = mock_commit
+            await tq.submit(_make_event("s3", "validate_pass"))
+            await asyncio.sleep(0.2)
+            await tq._queue.join()
+
+        # s4 还在 creating → 不触发 commit
+        mock_commit.assert_not_called()
+        await tq.stop()
+
+    async def test_precommit_failure_creates_approval(
+        self, initialized_db_path: Path
+    ) -> None:
+        """batch spec commit 失败时创建 precommit_failure(scope=spec_batch) approval。"""
+        import json
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import get_pending_approvals, insert_batch, insert_batch_story_links
+        from ato.models.schemas import BatchRecord, BatchStoryLink
+
+        now = datetime.now(UTC)
+        batch = BatchRecord(batch_id="b3", status="active", created_at=now)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s5", "validating")
+            await insert_batch_story_links(
+                db,
+                [BatchStoryLink(batch_id="b3", story_id="s5", sequence_no=0)],
+            )
+        finally:
+            await db.close()
+
+        mock_commit = AsyncMock(return_value=(False, "pre-commit hook failed"))
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        with (
+            patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+            patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+        ):
+            mock_wm_cls.return_value.batch_spec_commit = mock_commit
+            await tq.submit(_make_event("s5", "validate_pass"))
+            await asyncio.sleep(0.2)
+            await tq._queue.join()
+
+        # Verify precommit_failure approval created
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+            spec_approvals = [
+                a for a in approvals if a.approval_type == "precommit_failure"
+            ]
+            assert len(spec_approvals) == 1
+            payload = json.loads(spec_approvals[0].payload or "{}")
+            assert payload["scope"] == "spec_batch"
+            assert payload["batch_id"] == "b3"
+            assert "s5" in payload["story_ids"]
+            assert "retry" in payload["options"]
+        finally:
+            await db.close()
+
+        await tq.stop()
+
+    async def test_exception_in_spec_commit_creates_approval(
+        self, initialized_db_path: Path
+    ) -> None:
+        """batch_spec_commit() 抛异常时仍创建 approval（不吞掉异常导致卡死）。"""
+        import json
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import get_pending_approvals, insert_batch, insert_batch_story_links
+        from ato.models.schemas import BatchRecord, BatchStoryLink
+
+        now = datetime.now(UTC)
+        batch = BatchRecord(batch_id="b4", status="active", created_at=now)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s6", "validating")
+            await insert_batch_story_links(
+                db,
+                [BatchStoryLink(batch_id="b4", story_id="s6", sequence_no=0)],
+            )
+        finally:
+            await db.close()
+
+        # batch_spec_commit 抛 WorktreeError
+        from ato.models.schemas import WorktreeError
+
+        mock_commit = AsyncMock(side_effect=WorktreeError("git timeout"))
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        with (
+            patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+            patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+        ):
+            mock_wm_cls.return_value.batch_spec_commit = mock_commit
+            await tq.submit(_make_event("s6", "validate_pass"))
+            await asyncio.sleep(0.2)
+            await tq._queue.join()
+
+        # 验证异常路径仍创建了 approval
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+            spec_approvals = [
+                a for a in approvals if a.approval_type == "precommit_failure"
+            ]
+            assert len(spec_approvals) == 1
+            payload = json.loads(spec_approvals[0].payload or "{}")
+            assert payload["scope"] == "spec_batch"
+            assert "git timeout" in payload["error_output"]
+        finally:
+            await db.close()
+
+        await tq.stop()

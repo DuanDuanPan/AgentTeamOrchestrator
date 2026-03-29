@@ -245,6 +245,15 @@ async def _migrate_v6_to_v7(db: aiosqlite.Connection) -> None:
     await db.execute("INSERT OR IGNORE INTO merge_queue_state (id, frozen) VALUES (1, 0)")
 
 
+@_register(8)
+async def _migrate_v7_to_v8(db: aiosqlite.Connection) -> None:
+    """v7 → v8: stories.has_ui + batches.spec_committed（Story 9.3）。"""
+    if not await _column_exists(db, "stories", "has_ui"):
+        await db.execute("ALTER TABLE stories ADD COLUMN has_ui BOOLEAN DEFAULT 0")
+    if not await _column_exists(db, "batches", "spec_committed"):
+        await db.execute("ALTER TABLE batches ADD COLUMN spec_committed BOOLEAN DEFAULT 0")
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

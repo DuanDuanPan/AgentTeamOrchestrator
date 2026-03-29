@@ -16,6 +16,7 @@ import aiosqlite
 import structlog
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
+from ato.config import PhaseDefinition, evaluate_skip_condition
 from ato.models.db import get_connection, get_story
 from ato.models.schemas import StateTransitionError, TransitionEvent
 from ato.nudge import Nudge, send_user_notification
@@ -63,6 +64,11 @@ _HP_PHASES: list[str] = [
 ]
 for _i, _phase in enumerate(_HP_PHASES):
     _HAPPY_PATH_EVENTS[_phase] = _HP_EVENTS[:_i]
+
+# phase → 该 phase 的 success 事件（用于条件跳过时自动提交）
+_PHASE_SUCCESS_EVENT: dict[str, str] = {}
+for _i, _phase in enumerate(_HP_PHASES[:-1]):  # exclude "done"
+    _PHASE_SUCCESS_EVENT[_phase] = _HP_EVENTS[_i]
 
 # 非 happy-path phases 的特殊 replay 路径
 _SPECIAL_REPLAY: dict[str, list[str]] = {
@@ -116,7 +122,12 @@ class TransitionQueue:
         await tq.stop()
     """
 
-    def __init__(self, db_path: Path, nudge: Nudge | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        nudge: Nudge | None = None,
+        phase_defs: list[PhaseDefinition] | None = None,
+    ) -> None:
         self._db_path = db_path
         self._nudge = nudge
         self._queue: asyncio.Queue[TransitionEvent | None] = asyncio.Queue()
@@ -124,6 +135,10 @@ class TransitionQueue:
         self._consumer_task: asyncio.Task[None] | None = None
         self._db: aiosqlite.Connection | None = None
         self._running = False
+        # phase name → PhaseDefinition lookup for skip_when evaluation
+        self._phase_defs: dict[str, PhaseDefinition] = (
+            {pd.name: pd for pd in phase_defs} if phase_defs else {}
+        )
 
     async def start(self) -> None:
         """启动 consumer 后台任务并打开长连接。
@@ -213,7 +228,10 @@ class TransitionQueue:
                 await db.commit()
 
                 # Post-commit hooks
-                if new_state == "developing":
+                await self._on_phase_skip_check(db, event.story_id, new_state, event.source)
+                if new_state == "dev_ready":
+                    await self._on_enter_dev_ready(db, event.story_id)
+                elif new_state == "developing":
                     await self._on_enter_developing(db, event.story_id)
                 elif new_state == "done":
                     await self._on_story_done(db, event.story_id)
@@ -235,6 +253,180 @@ class TransitionQueue:
             finally:
                 self._queue.task_done()
                 clear_contextvars()
+
+    async def _on_phase_skip_check(
+        self,
+        db: aiosqlite.Connection,
+        story_id: str,
+        new_phase: str,
+        source: str,
+    ) -> None:
+        """Post-commit hook：检查新 phase 是否配置了 skip_when 条件跳过。
+
+        若 skip_when 求值为 True，自动将对应的 success event 放入队列，
+        使 story 合法地经过该 phase 然后立即转入下一个 phase。
+        """
+        if not self._phase_defs:
+            return
+
+        phase_def = self._phase_defs.get(new_phase)
+        if phase_def is None or phase_def.skip_when is None:
+            return
+
+        story = await get_story(db, story_id)
+        if story is None:
+            return
+
+        should_skip = evaluate_skip_condition(phase_def.skip_when, story)
+        if not should_skip:
+            return
+
+        success_event = _PHASE_SUCCESS_EVENT.get(new_phase)
+        if success_event is None:
+            logger.warning(
+                "phase_skip_no_success_event",
+                story_id=story_id,
+                phase=new_phase,
+            )
+            return
+
+        from datetime import UTC, datetime
+
+        skip_event = TransitionEvent(
+            story_id=story_id,
+            event_name=success_event,
+            source=source,
+            submitted_at=datetime.now(tz=UTC),
+        )
+        await self._queue.put(skip_event)
+        logger.info(
+            "phase_skipped",
+            story_id=story_id,
+            phase=new_phase,
+            skip_expression=phase_def.skip_when,
+            skip_reason=f"skip_when evaluated to True: {phase_def.skip_when}",
+            auto_event=success_event,
+        )
+
+    async def _on_enter_dev_ready(self, db: aiosqlite.Connection, story_id: str) -> None:
+        """Story 进入 dev_ready 时的 post-commit hook：检查 batch spec commit。
+
+        当 active batch 内所有 story 均到达 dev_ready 且 spec 尚未提交时，
+        执行单次本地 commit 将规格文件提交到 main。
+        """
+        from ato.models.db import (
+            get_active_batch,
+            get_batch_stories,
+            insert_approval,
+            mark_batch_spec_committed,
+        )
+
+        batch = await get_active_batch(db)
+        if batch is None:
+            return
+
+        # 已提交则跳过
+        if batch.spec_committed:
+            return
+
+        # 检查 batch 内所有 story 是否都到达 dev_ready
+        batch_stories = await get_batch_stories(db, batch.batch_id)
+        all_dev_ready = all(s.current_phase == "dev_ready" for _, s in batch_stories)
+        if not all_dev_ready:
+            return
+
+        story_ids = [s.story_id for _, s in batch_stories]
+
+        try:
+            from ato.core import derive_project_root
+            from ato.worktree_mgr import WorktreeManager
+
+            project_root = derive_project_root(self._db_path)
+            mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+            success, message = await mgr.batch_spec_commit(batch.batch_id, story_ids)
+
+            if success:
+                await mark_batch_spec_committed(db, batch.batch_id)
+                logger.info(
+                    "batch_spec_commit_success",
+                    batch_id=batch.batch_id,
+                    story_ids=story_ids,
+                    commit_hash=message,
+                )
+            else:
+                # 创建 precommit_failure approval
+                import json
+                import uuid
+                from datetime import UTC
+                from datetime import datetime as dt_cls
+
+                from ato.models.schemas import ApprovalRecord
+
+                payload = json.dumps({
+                    "scope": "spec_batch",
+                    "batch_id": batch.batch_id,
+                    "story_ids": story_ids,
+                    "error_output": message,
+                    "options": ["retry", "manual_fix", "skip"],
+                })
+                approval = ApprovalRecord(
+                    approval_id=str(uuid.uuid4()),
+                    story_id=story_id,
+                    approval_type="precommit_failure",
+                    status="pending",
+                    payload=payload,
+                    created_at=dt_cls.now(tz=UTC),
+                    recommended_action="retry",
+                    risk_level="medium",
+                )
+                await insert_approval(db, approval)
+                send_user_notification(
+                    "normal",
+                    f"Batch spec commit 失败：{message}",
+                )
+                logger.warning(
+                    "batch_spec_commit_failed",
+                    batch_id=batch.batch_id,
+                    error=message,
+                )
+        except Exception as exc:
+            logger.exception(
+                "batch_spec_commit_error",
+                story_id=story_id,
+            )
+            # 异常也需创建 approval，否则 batch 卡死且无恢复路径
+            try:
+                import json
+                import uuid
+                from datetime import UTC
+                from datetime import datetime as dt_cls
+
+                from ato.models.schemas import ApprovalRecord
+
+                payload = json.dumps({
+                    "scope": "spec_batch",
+                    "batch_id": batch.batch_id,
+                    "story_ids": story_ids,
+                    "error_output": str(exc),
+                    "options": ["retry", "manual_fix", "skip"],
+                })
+                approval = ApprovalRecord(
+                    approval_id=str(uuid.uuid4()),
+                    story_id=story_id,
+                    approval_type="precommit_failure",
+                    status="pending",
+                    payload=payload,
+                    created_at=dt_cls.now(tz=UTC),
+                    recommended_action="retry",
+                    risk_level="medium",
+                )
+                await insert_approval(db, approval)
+                send_user_notification(
+                    "normal",
+                    f"Batch spec commit 异常：{exc}",
+                )
+            except Exception:
+                logger.exception("batch_spec_commit_approval_creation_failed")
 
     async def _on_enter_developing(self, db: aiosqlite.Connection, story_id: str) -> None:
         """Story 首次进入 developing 时的 post-commit hook：创建 worktree。

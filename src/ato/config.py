@@ -19,7 +19,7 @@ from pydantic_settings import (
     YamlConfigSettingsSource,
 )
 
-from ato.models.schemas import ConfigError
+from ato.models.schemas import ConfigError, StoryRecord
 
 logger = structlog.get_logger()
 
@@ -32,6 +32,7 @@ __all__ = [
     "RoleConfig",
     "TimeoutConfig",
     "build_phase_definitions",
+    "evaluate_skip_condition",
     "load_config",
 ]
 
@@ -61,6 +62,7 @@ class PhaseConfig(BaseModel):
     next_on_success: str
     next_on_failure: str | None = None
     workspace: Literal["main", "worktree"] | None = None
+    skip_when: str | None = None
 
 
 class ConvergentLoopConfig(BaseModel):
@@ -168,6 +170,7 @@ class PhaseDefinition:
     next_on_failure: str | None
     timeout_seconds: int
     workspace: str = "main"
+    skip_when: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +376,133 @@ def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
                 next_on_failure=phase.next_on_failure,
                 timeout_seconds=timeout_seconds,
                 workspace=_resolve_workspace(phase),
+                skip_when=phase.skip_when,
             )
         )
 
     return definitions
+
+
+# ---------------------------------------------------------------------------
+# 条件跳过表达式求值（Story 9.3）
+# ---------------------------------------------------------------------------
+
+# 白名单属性：仅允许访问这些 StoryRecord 字段
+_SKIP_ALLOWED_ATTRS: frozenset[str] = frozenset({"has_ui", "story_id", "title"})
+
+# 支持的 token 类型
+_SKIP_KEYWORDS: frozenset[str] = frozenset({"not", "and", "or"})
+
+
+def evaluate_skip_condition(expression: str, story: StoryRecord) -> bool:
+    """安全求值 skip_when 表达式。
+
+    仅允许 ``story.<attr>`` 形式访问白名单属性，
+    支持 ``not`` / ``and`` / ``or`` 布尔运算。
+    不使用 Python ``eval()``。
+
+    非法或无法解析的表达式返回 False（不跳过）并记录 warning。
+
+    Args:
+        expression: skip_when 字符串（如 ``"not story.has_ui"``）。
+        story: 当前 StoryRecord。
+
+    Returns:
+        True 表示应跳过当前阶段，False 表示不跳过。
+    """
+    try:
+        tokens = _tokenize_skip_expr(expression)
+        result = _parse_or_expr(tokens, story)
+        if tokens:
+            # 未消费完的 token → 语法错误
+            logger.warning(
+                "skip_when_trailing_tokens",
+                expression=expression,
+                remaining=tokens,
+            )
+            return False
+        return result
+    except _SkipExprError as exc:
+        logger.warning(
+            "skip_when_invalid_expression",
+            expression=expression,
+            error=str(exc),
+        )
+        return False
+
+
+class _SkipExprError(Exception):
+    """skip_when 表达式解析错误（内部使用）。"""
+
+
+def _tokenize_skip_expr(expression: str) -> list[str]:
+    """将表达式拆分为 token 列表。
+
+    支持 ``story.attr``、``not``、``and``、``or``、``(``、``)``。
+    """
+    import re
+
+    pattern = re.compile(r"story\.\w+|not|and|or|[()]|\S+")
+    return pattern.findall(expression.strip())
+
+
+def _resolve_attr(token: str, story: StoryRecord) -> object:
+    """解析 ``story.<attr>`` token 到实际值。"""
+    if not token.startswith("story."):
+        raise _SkipExprError(f"Invalid token: {token!r} (expected 'story.<attr>')")
+    attr = token[len("story."):]
+    if attr not in _SKIP_ALLOWED_ATTRS:
+        raise _SkipExprError(
+            f"Attribute 'story.{attr}' not allowed (whitelist: {sorted(_SKIP_ALLOWED_ATTRS)})"
+        )
+    return getattr(story, attr)
+
+
+def _parse_or_expr(tokens: list[str], story: StoryRecord) -> bool:
+    """解析 or 表达式（最低优先级）。"""
+    left = _parse_and_expr(tokens, story)
+    while tokens and tokens[0] == "or":
+        tokens.pop(0)
+        right = _parse_and_expr(tokens, story)
+        left = left or right
+    return left
+
+
+def _parse_and_expr(tokens: list[str], story: StoryRecord) -> bool:
+    """解析 and 表达式。"""
+    left = _parse_not_expr(tokens, story)
+    while tokens and tokens[0] == "and":
+        tokens.pop(0)
+        right = _parse_not_expr(tokens, story)
+        left = left and right
+    return left
+
+
+def _parse_not_expr(tokens: list[str], story: StoryRecord) -> bool:
+    """解析 not 表达式。"""
+    if tokens and tokens[0] == "not":
+        tokens.pop(0)
+        return not _parse_not_expr(tokens, story)
+    return _parse_primary(tokens, story)
+
+
+def _parse_primary(tokens: list[str], story: StoryRecord) -> bool:
+    """解析原子表达式：``story.<attr>`` 或 ``(expr)``。"""
+    if not tokens:
+        raise _SkipExprError("Unexpected end of expression")
+
+    token = tokens[0]
+
+    if token == "(":
+        tokens.pop(0)
+        result = _parse_or_expr(tokens, story)
+        if not tokens or tokens[0] != ")":
+            raise _SkipExprError("Missing closing parenthesis")
+        tokens.pop(0)
+        return bool(result)
+
+    if token.startswith("story."):
+        tokens.pop(0)
+        return bool(_resolve_attr(token, story))
+
+    raise _SkipExprError(f"Unexpected token: {token!r}")

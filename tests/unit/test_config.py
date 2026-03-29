@@ -13,9 +13,10 @@ from ato.config import (
     PhaseDefinition,
     TimeoutConfig,
     build_phase_definitions,
+    evaluate_skip_condition,
     load_config,
 )
-from ato.models.schemas import ConfigError
+from ato.models.schemas import ConfigError, StoryRecord
 
 # ---------------------------------------------------------------------------
 # 测试辅助
@@ -1376,3 +1377,142 @@ phases:
         p = _write_yaml(tmp_path, yaml_content)
         with pytest.raises(ConfigError):
             load_config(p)
+
+
+class TestPhaseConfigSkipWhen:
+    """PhaseConfig / PhaseDefinition skip_when 字段（Story 9.3）。"""
+
+    def test_skip_when_defaults_to_none(self, tmp_path: Path) -> None:
+        """skip_when 省略时默认为 None。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.phases[0].skip_when is None
+
+    def test_skip_when_accepted(self, tmp_path: Path) -> None:
+        """skip_when 字符串正确解析。"""
+        yaml_content = """\
+roles:
+  ux:
+    cli: claude
+  dev:
+    cli: claude
+phases:
+  - name: designing
+    role: ux
+    type: structured_job
+    next_on_success: developing
+    skip_when: "not story.has_ui"
+  - name: developing
+    role: dev
+    type: structured_job
+    next_on_success: done
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        assert config.phases[0].skip_when == "not story.has_ui"
+        assert config.phases[1].skip_when is None
+
+    def test_skip_when_propagated_to_phase_definition(self, tmp_path: Path) -> None:
+        """build_phase_definitions() 传播 skip_when 到 PhaseDefinition。"""
+        yaml_content = """\
+roles:
+  ux:
+    cli: claude
+  dev:
+    cli: claude
+phases:
+  - name: designing
+    role: ux
+    type: structured_job
+    next_on_success: developing
+    skip_when: "not story.has_ui"
+  - name: developing
+    role: dev
+    type: structured_job
+    next_on_success: done
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+        defs = build_phase_definitions(config)
+        assert defs[0].skip_when == "not story.has_ui"
+        assert defs[1].skip_when is None
+
+
+class TestEvaluateSkipCondition:
+    """evaluate_skip_condition() 安全表达式求值器（Story 9.3 AC4）。"""
+
+    @pytest.fixture()
+    def story_no_ui(self) -> StoryRecord:
+        from datetime import UTC, datetime
+
+        return StoryRecord(
+            story_id="s-backend",
+            title="Backend story",
+            status="in_progress",
+            current_phase="designing",
+            has_ui=False,
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
+
+    @pytest.fixture()
+    def story_with_ui(self) -> StoryRecord:
+        from datetime import UTC, datetime
+
+        return StoryRecord(
+            story_id="s-frontend",
+            title="Frontend story",
+            status="in_progress",
+            current_phase="designing",
+            has_ui=True,
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
+
+    def test_not_story_has_ui_true_when_no_ui(self, story_no_ui: StoryRecord) -> None:
+        assert evaluate_skip_condition("not story.has_ui", story_no_ui) is True
+
+    def test_not_story_has_ui_false_when_has_ui(self, story_with_ui: StoryRecord) -> None:
+        assert evaluate_skip_condition("not story.has_ui", story_with_ui) is False
+
+    def test_story_has_ui_direct(self, story_with_ui: StoryRecord) -> None:
+        assert evaluate_skip_condition("story.has_ui", story_with_ui) is True
+
+    def test_and_expression(self, story_with_ui: StoryRecord) -> None:
+        assert evaluate_skip_condition("story.has_ui and story.has_ui", story_with_ui) is True
+
+    def test_or_expression(self, story_no_ui: StoryRecord) -> None:
+        assert evaluate_skip_condition("story.has_ui or not story.has_ui", story_no_ui) is True
+
+    def test_complex_expression(self, story_no_ui: StoryRecord) -> None:
+        result = evaluate_skip_condition("not story.has_ui and story.story_id", story_no_ui)
+        assert result is True  # not False == True, and "s-backend" is truthy
+
+    def test_illegal_attribute_returns_false(self, story_no_ui: StoryRecord) -> None:
+        """非白名单属性安全降级为 False（不跳过）。"""
+        assert evaluate_skip_condition("story.worktree_path", story_no_ui) is False
+
+    def test_eval_not_used(self, story_no_ui: StoryRecord) -> None:
+        """危险表达式不被执行，安全降级为 False。"""
+        assert evaluate_skip_condition("__import__('os').system('echo pwned')", story_no_ui) is False
+
+    def test_empty_expression_returns_false(self, story_no_ui: StoryRecord) -> None:
+        assert evaluate_skip_condition("", story_no_ui) is False
+
+    def test_parentheses(self, story_no_ui: StoryRecord) -> None:
+        result = evaluate_skip_condition("(not story.has_ui)", story_no_ui)
+        assert result is True
+
+    def test_double_not(self, story_no_ui: StoryRecord) -> None:
+        result = evaluate_skip_condition("not not story.has_ui", story_no_ui)
+        assert result is False  # not not False == False

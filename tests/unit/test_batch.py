@@ -674,3 +674,77 @@ class TestConfirmBatch:
             assert links[1][1].current_phase == "queued"
         finally:
             await db.close()
+
+
+class TestConfirmBatchHasUi:
+    """confirm_batch() 正确写入和回读 has_ui 标记（Story 9.3 AC2）。"""
+
+    async def test_has_ui_written_for_new_story(self, initialized_db_path: Path) -> None:
+        """新 story 的 has_ui 标记在 confirm_batch 中正确写入。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            info_ui = EpicInfo(
+                story_key="9-3-ui",
+                short_key="9-3",
+                title="UI Story",
+                epic_key="9",
+                has_ui=True,
+            )
+            info_backend = EpicInfo(
+                story_key="9-4-backend",
+                short_key="9-4",
+                title="Backend Story",
+                epic_key="9",
+                has_ui=False,
+            )
+            proposal = BatchProposal(stories=[info_ui, info_backend])
+            batch, count = await confirm_batch(db, proposal)
+            assert count == 2
+
+            links = await get_batch_stories(db, batch.batch_id)
+            assert len(links) == 2
+            # UI story: has_ui=True
+            assert links[0][1].story_id == "9-3-ui"
+            assert links[0][1].has_ui is True
+            # Backend story: has_ui=False
+            assert links[1][1].story_id == "9-4-backend"
+            assert links[1][1].has_ui is False
+        finally:
+            await db.close()
+
+    async def test_has_ui_updated_for_existing_story(self, initialized_db_path: Path) -> None:
+        """已存在的 story 的 has_ui 在 confirm_batch 中被更新。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            # 先插入一个 has_ui=False 的 story
+            from ato.models.db import insert_story
+
+            existing = StoryRecord(
+                story_id="9-5-existing",
+                title="Existing",
+                status="backlog",
+                current_phase="idle",
+                has_ui=False,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+            await insert_story(db, existing)
+
+            # confirm_batch 带 has_ui=True
+            info = EpicInfo(
+                story_key="9-5-existing",
+                short_key="9-5",
+                title="Existing",
+                epic_key="9",
+                has_ui=True,
+            )
+            proposal = BatchProposal(stories=[info])
+            batch, count = await confirm_batch(db, proposal)
+            assert count == 1
+
+            # 回读 has_ui 应更新为 True
+            links = await get_batch_stories(db, batch.batch_id)
+            assert len(links) == 1
+            assert links[0][1].has_ui is True
+        finally:
+            await db.close()

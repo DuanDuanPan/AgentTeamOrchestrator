@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 7
+SCHEMA_VERSION: int = 8
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -320,6 +320,7 @@ class StoryRecord(_StrictBase):
     status: StoryStatus
     current_phase: str
     worktree_path: str | None = None
+    has_ui: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -399,6 +400,7 @@ class BatchRecord(_StrictBase):
 
     batch_id: str
     status: BatchStatus
+    spec_committed: bool = False
     created_at: datetime
     completed_at: datetime | None = None
 

@@ -253,3 +253,69 @@ class TestMigrationV5:
                 "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_findings_dedup'"
             )
             assert await cursor.fetchone() is not None
+
+
+class TestMigrationV8:
+    """MIGRATIONS[8] — stories 表新增 has_ui 列测试（Story 9.3）。"""
+
+    async def test_migration_v7_to_v8_adds_has_ui_column(self, db_path: Path) -> None:
+        """从 v7 增量迁移到 v8，stories 表新增 has_ui 列。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            # 先迁移到 v7
+            await run_migrations(db, 0, 7)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 7
+
+            # 插入测试数据（v7 schema 无 has_ui / spec_committed）
+            await db.execute(
+                "INSERT INTO stories (story_id, title, status, current_phase, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("s1", "test", "backlog", "queued", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+            )
+            await db.execute(
+                "INSERT INTO batches (batch_id, status, created_at) VALUES (?, ?, ?)",
+                ("b1", "active", "2026-01-01T00:00:00"),
+            )
+            await db.commit()
+
+            # 迁移到 v8
+            await run_migrations(db, 7, 8)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 8
+
+            # 验证 has_ui 列存在且默认为 0
+            cursor = await db.execute("SELECT has_ui FROM stories WHERE story_id = ?", ("s1",))
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 0
+
+            # 验证 spec_committed 列存在且默认为 0
+            cursor = await db.execute(
+                "SELECT spec_committed FROM batches WHERE batch_id = ?", ("b1",)
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 0
+
+    async def test_migration_v8_idempotent(self, db_path: Path) -> None:
+        """v8 迁移幂等——重复执行不报错。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, 8)
+            # 重置 version 重跑
+            await db.execute("PRAGMA user_version = 7")
+            await db.commit()
+            await run_migrations(db, 7, 8)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 8

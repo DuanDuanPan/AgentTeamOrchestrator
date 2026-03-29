@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS stories (
     status        TEXT NOT NULL,
     current_phase TEXT NOT NULL,
     worktree_path TEXT,
+    has_ui        BOOLEAN DEFAULT 0,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 )"""
@@ -243,13 +244,14 @@ async def insert_story(db: aiosqlite.Connection, story: StoryRecord) -> None:
     """插入一条 story 记录。"""
     await db.execute(
         "INSERT INTO stories (story_id, title, status, current_phase, worktree_path, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "has_ui, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             story.story_id,
             story.title,
             story.status,
             story.current_phase,
             story.worktree_path,
+            int(story.has_ui),
             _dt_to_iso(story.created_at),
             _dt_to_iso(story.updated_at),
         ),
@@ -334,6 +336,9 @@ def _row_to_story(row: aiosqlite.Row) -> StoryRecord:
     data = dict(row)
     data["created_at"] = _iso_to_dt(data["created_at"])
     data["updated_at"] = _iso_to_dt(data["updated_at"])
+    # SQLite stores BOOLEAN as 0/1 integer; Pydantic strict mode requires native bool
+    if "has_ui" in data:
+        data["has_ui"] = bool(data["has_ui"])
     return StoryRecord.model_validate(data)
 
 
@@ -733,7 +738,7 @@ async def get_batch_stories(
     cursor = await db.execute(
         "SELECT bs.batch_id, bs.story_id, bs.sequence_no, "
         "s.story_id AS s_story_id, s.title, s.status, s.current_phase, "
-        "s.worktree_path, s.created_at, s.updated_at "
+        "s.worktree_path, s.has_ui, s.created_at, s.updated_at "
         "FROM batch_stories bs "
         "JOIN stories s ON bs.story_id = s.story_id "
         "WHERE bs.batch_id = ? ORDER BY bs.sequence_no",
@@ -757,6 +762,7 @@ async def get_batch_stories(
                 "status": data["status"],
                 "current_phase": data["current_phase"],
                 "worktree_path": data["worktree_path"],
+                "has_ui": bool(data["has_ui"]) if data.get("has_ui") is not None else False,
                 "created_at": _iso_to_dt(data["created_at"]),
                 "updated_at": _iso_to_dt(data["updated_at"]),
             }
@@ -817,6 +823,21 @@ async def get_batch_progress(db: aiosqlite.Connection, batch_id: str) -> BatchPr
     return BatchProgress(done=done, active=active, pending=pending, failed=failed)
 
 
+async def mark_batch_spec_committed(db: aiosqlite.Connection, batch_id: str) -> bool:
+    """标记 batch 的 spec 文件已提交到 main。
+
+    仅当 spec_committed 为 0 时执行更新，返回是否实际更新。
+    """
+    cursor = await db.execute(
+        "UPDATE batches SET spec_committed = 1 WHERE batch_id = ? AND spec_committed = 0",
+        (batch_id,),
+    )
+    updated = cursor.rowcount > 0
+    if updated:
+        await db.commit()
+    return updated
+
+
 async def complete_batch(db: aiosqlite.Connection, batch_id: str) -> bool:
     """将 batch 从 active 收敛为 completed。
 
@@ -839,6 +860,9 @@ def _row_to_batch(row: aiosqlite.Row) -> BatchRecord:
     data = dict(row)
     data["created_at"] = _iso_to_dt(data["created_at"])
     data["completed_at"] = _iso_to_dt(data["completed_at"])
+    # SQLite stores BOOLEAN as 0/1 integer; Pydantic strict mode requires native bool
+    if "spec_committed" in data:
+        data["spec_committed"] = bool(data["spec_committed"])
     return BatchRecord.model_validate(data)
 
 

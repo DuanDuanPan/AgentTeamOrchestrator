@@ -671,8 +671,11 @@ class Orchestrator:
         write_pid_file(self._pid_path)
         logger.info("pid_file_written", pid=os.getpid(), path=str(self._pid_path))
 
-        # 初始化 TransitionQueue
-        self._tq = TransitionQueue(self._db_path, nudge=self._nudge)
+        # 初始化 TransitionQueue（传入 phase_defs 以启用条件跳过）
+        from ato.config import build_phase_definitions
+
+        phase_defs = build_phase_definitions(self._settings)
+        self._tq = TransitionQueue(self._db_path, nudge=self._nudge, phase_defs=phase_defs)
         await self._tq.start()
 
         # 初始化 WorktreeManager 和 MergeQueue
@@ -882,7 +885,7 @@ class Orchestrator:
             now = datetime.now(tz=UTC)
             for approval in approvals:
                 try:
-                    handled = await self._handle_approval_decision(approval)
+                    handled = await self._handle_approval_decision(approval, db=db)
                     if handled:
                         await mark_approval_consumed(db, approval.approval_id, now)
                         logger.info(
@@ -1541,8 +1544,18 @@ class Orchestrator:
         finally:
             await db.close()
 
-    async def _handle_approval_decision(self, approval: ApprovalRecord) -> bool:
+    async def _handle_approval_decision(
+        self,
+        approval: ApprovalRecord,
+        *,
+        db: aiosqlite.Connection | None = None,
+    ) -> bool:
         """根据 approval_type + decision 映射处理动作。
+
+        Args:
+            approval: 待处理的已决策 approval。
+            db: 外层连接（可选）。spec_batch 等需要原子性的 handler
+                用此连接插入新 approval，与 mark_consumed 同事务提交。
 
         Returns:
             True 表示处理成功，可标记 consumed。
@@ -1780,6 +1793,20 @@ class Orchestrator:
             return False
 
         if atype == "precommit_failure":
+            # Check scope from payload to differentiate spec_batch vs merge queue
+            scope = ""
+            if approval.payload:
+                import json as _json
+
+                try:
+                    _payload = _json.loads(approval.payload)
+                    scope = _payload.get("scope", "")
+                except (ValueError, TypeError):
+                    pass
+
+            if scope == "spec_batch":
+                return await self._handle_spec_batch_precommit(approval, decision, db=db)
+
             if decision == "retry":
                 # Re-enqueue for another merge attempt
                 logger.info(
@@ -1845,6 +1872,144 @@ class Orchestrator:
             decision=decision,
         )
         return True
+
+    async def _handle_spec_batch_precommit(
+        self,
+        approval: ApprovalRecord,
+        decision: str,
+        *,
+        db: aiosqlite.Connection | None = None,
+    ) -> bool:
+        """处理 precommit_failure(scope=spec_batch) 的审批决策。
+
+        Args:
+            db: 外层连接。用此连接插入新 approval（commit=False），
+                与外层 mark_consumed 同事务提交，保证原子性。
+
+        Returns:
+            True = 消费 approval（终态）。
+        """
+        import json as _json
+
+        payload = _json.loads(approval.payload or "{}")
+        batch_id = payload.get("batch_id", "")
+        story_ids = payload.get("story_ids", [])
+
+        if decision == "retry":
+            logger.info(
+                "spec_batch_precommit_retry",
+                batch_id=batch_id,
+                story_ids=story_ids,
+            )
+            # 重新尝试 batch spec commit
+            try:
+                from ato.models.db import mark_batch_spec_committed
+                from ato.worktree_mgr import WorktreeManager
+
+                project_root = derive_project_root(self._db_path)
+                mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+                success, message = await mgr.batch_spec_commit(batch_id, story_ids)
+                if success:
+                    if db is not None:
+                        await mark_batch_spec_committed(db, batch_id)
+                    logger.info("spec_batch_retry_success", batch_id=batch_id)
+                    return True  # 成功 → 消费 approval
+                # 失败 → 创建新 approval（同事务）
+                logger.warning("spec_batch_retry_failed", batch_id=batch_id, error=message)
+                await self._create_spec_batch_approval(
+                    approval.story_id, batch_id, story_ids, message, db=db,
+                )
+                return True
+            except Exception:
+                logger.exception("spec_batch_retry_error", batch_id=batch_id)
+                await self._create_spec_batch_approval(
+                    approval.story_id, batch_id, story_ids, "retry raised exception", db=db,
+                )
+                return True
+
+        if decision == "manual_fix":
+            # 消费当前 approval + 在同事务中创建新的
+            logger.info(
+                "spec_batch_precommit_manual_fix",
+                batch_id=batch_id,
+            )
+            await self._create_spec_batch_approval(
+                approval.story_id, batch_id, story_ids,
+                "awaiting manual fix — retry or skip when ready",
+                db=db,
+            )
+            return True
+
+        if decision == "skip":
+            logger.info(
+                "spec_batch_precommit_skip",
+                batch_id=batch_id,
+                story_ids=story_ids,
+            )
+            # skip = 允许 batch 继续进入 developing，不产生 spec commit
+            try:
+                from ato.models.db import mark_batch_spec_committed
+
+                if db is not None:
+                    await mark_batch_spec_committed(db, batch_id)
+            except Exception:
+                logger.exception("spec_batch_skip_mark_failed", batch_id=batch_id)
+            return True
+
+        logger.warning(
+            "approval_unrecognized_decision",
+            approval_id=approval.approval_id,
+            approval_type="precommit_failure",
+            decision=decision,
+        )
+        return False
+
+    async def _create_spec_batch_approval(
+        self,
+        story_id: str,
+        batch_id: str,
+        story_ids: list[str],
+        error_output: str,
+        *,
+        db: aiosqlite.Connection | None = None,
+    ) -> None:
+        """创建 spec_batch precommit_failure approval。
+
+        当 ``db`` 提供时在该连接上 INSERT（不 commit），由调用方
+        与 mark_consumed 同事务提交，保证原子性。
+        """
+        import json as _json
+        import uuid
+
+        from ato.models.db import insert_approval
+
+        payload = _json.dumps({
+            "scope": "spec_batch",
+            "batch_id": batch_id,
+            "story_ids": story_ids,
+            "error_output": error_output,
+            "options": ["retry", "manual_fix", "skip"],
+        })
+        new_approval = ApprovalRecord(
+            approval_id=str(uuid.uuid4()),
+            story_id=story_id,
+            approval_type="precommit_failure",
+            status="pending",
+            payload=payload,
+            created_at=datetime.now(tz=UTC),
+            recommended_action="retry",
+            risk_level="medium",
+        )
+        if db is not None:
+            # 同事务：不 commit，外层 mark_consumed 会 commit
+            await insert_approval(db, new_approval, commit=False)
+        else:
+            # 独立连接回退（如 _on_enter_dev_ready 异常路径）
+            own_db = await get_connection(self._db_path)
+            try:
+                await insert_approval(own_db, new_approval)
+            finally:
+                await own_db.close()
 
     async def _reschedule_interactive_task(
         self,

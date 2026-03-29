@@ -42,6 +42,7 @@ class EpicInfo:
     title: str
     epic_key: str  # e.g. "2b"
     dependencies: list[str] = field(default_factory=list)  # short_key list
+    has_ui: bool = False
 
 
 @dataclass
@@ -366,16 +367,24 @@ async def confirm_batch(
             if exists is None:
                 await db.execute(
                     "INSERT INTO stories (story_id, title, status, current_phase, "
-                    "worktree_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "worktree_path, has_ui, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         info.story_key,
                         info.title,
                         "backlog",
                         "queued" if seq > 0 else "planning",
                         None,
+                        int(info.has_ui),
                         now_iso,
                         now_iso,
                     ),
+                )
+            else:
+                # 更新已存在 story 的 has_ui（batch select 可能重新设置）
+                await db.execute(
+                    "UPDATE stories SET has_ui = ? WHERE story_id = ?",
+                    (int(info.has_ui), info.story_key),
                 )
 
             await db.execute(
