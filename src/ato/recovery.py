@@ -41,7 +41,9 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 _PHASE_SUCCESS_EVENT: dict[str, str] = {
-    "planning": "plan_done",
+    # Story 9.4: planning 已移除，但旧 task 记录可能残留 phase="planning"。
+    # 映射到 create_done 使 recovery 在完成后正确推进状态机（creating → designing）。
+    "planning": "create_done",
     "creating": "create_done",
     "designing": "design_done",
     "validating": "validate_pass",
@@ -106,12 +108,6 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
 
 # Structured job phase-specific prompt 模板（非 convergent_loop / interactive 阶段）
 _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
-    "planning": (
-        "为 story {story_id} 执行规划阶段。\n"
-        "请运行 /bmad-create-story 来分析 story 需求并生成完整的 story 规格文件。\n"
-        "Story 规格文件应保存到: {story_file}\n\n"
-        "确保产出物包含完整的 Acceptance Criteria、Tasks/Subtasks 和 Dev Notes。"
-    ),
     "creating": (
         "为 story {story_id} 创建 story 规格文件。\n"
         "Story 规格文件: {story_file}\n\n"
@@ -1025,7 +1021,7 @@ class RecoveryEngine:
     async def _dispatch_structured_job(self, task: TaskRecord) -> None:
         """后台 dispatch structured_job：遵守 config 的 model/timeout/sandbox/并发。
 
-        Pre-worktree phases（planning/creating/designing）在 project_root 上执行，
+        Pre-worktree phases（creating/designing）在 project_root 上执行，
         通过共享 main-path limiter（max=1）保证同一时刻最多 1 个 story 占用 project_root。
         """
         phase_cfg = self._resolve_phase_config(task.phase)

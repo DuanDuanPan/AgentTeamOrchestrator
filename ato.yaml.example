@@ -36,8 +36,6 @@ cli_defaults:
 # 角色级字段优先于 cli_defaults。
 
 roles:
-  planner:
-    cli: claude
   creator:
     cli: claude
   ux_designer:
@@ -62,12 +60,6 @@ roles:
 # next_on_failure: 失败后跳转的阶段（可选）
 
 phases:
-  - name: planning
-    role: planner
-    type: structured_job
-    next_on_success: creating
-    workspace: main
-
   - name: creating
     role: creator
     type: structured_job

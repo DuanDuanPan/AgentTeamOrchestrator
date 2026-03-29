@@ -34,7 +34,6 @@ async def _seed_story(db_path: Path, story_id: str, phase: str = "queued") -> No
     """插入一条 story 到 SQLite。"""
     status_map = {
         "queued": "backlog",
-        "planning": "planning",
         "creating": "planning",
         "designing": "planning",
         "validating": "planning",
@@ -191,7 +190,7 @@ class TestTransitionLatency:
 
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "planning"
+        assert story.current_phase == "creating"
 
         await tq.stop()
 
@@ -211,8 +210,7 @@ class TestEndToEnd:
         await tq.start()
 
         transitions = [
-            ("start_create", "planning", "planning"),
-            ("plan_done", "creating", "planning"),
+            ("start_create", "creating", "planning"),
             ("create_done", "designing", "planning"),
             ("design_done", "validating", "planning"),
             ("validate_pass", "dev_ready", "ready"),

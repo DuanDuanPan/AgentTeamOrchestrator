@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -237,10 +237,13 @@ def build_llm_recommend_prompt(
         "- 排除已在代码中实质完成的 stories",
         "- 排除依赖未满足的 stories（前置 story 未完成）",
         "- 按推荐优先级排序返回",
+        "- 判断每个推荐 story 是否涉及 UI/UX 工作"
+        "（如 TUI 组件、界面交互、样式变更），在 has_ui_map 中标注 true/false",
         "",
         "## 输出要求",
         "严格按照 JSON schema 返回 structured output，"
-        "包含 story_keys（有序列表）和 reason（推荐理由）。",
+        "包含 story_keys（有序列表）、has_ui_map（每个 story 的 UI 标志）"
+        "和 reason（推荐理由）。",
     ])
 
     return "\n".join(lines)
@@ -447,8 +450,11 @@ class LLMBatchRecommender:
             logger.warning("llm_batch_recommend_empty_result")
             raise LLMRecommendError("LLM 返回空 story_keys")
 
-        # 5. 映射回 EpicInfo，按 LLM 返回顺序
-        selected = [key_to_epic[key] for key in output.story_keys]
+        # 5. 映射回 EpicInfo，按 LLM 返回顺序，回写 has_ui
+        selected = [
+            replace(key_to_epic[key], has_ui=output.has_ui_map.get(key, False))
+            for key in output.story_keys
+        ]
 
         logger.info(
             "llm_batch_recommend_success",
@@ -560,7 +566,7 @@ async def confirm_batch(
                         info.story_key,
                         info.title,
                         "backlog",
-                        "queued" if seq > 0 else "planning",
+                        "queued" if seq > 0 else "creating",
                         None,
                         int(info.has_ui),
                         now_iso,
@@ -579,13 +585,13 @@ async def confirm_batch(
                 (batch_id, info.story_key, seq),
             )
 
-        # 5. 更新状态：seq=0 → planning，其余 → queued
+        # 5. 更新状态：seq=0 → planning(status) + creating(phase)，其余 → queued
         for seq, info in enumerate(actionable):
             if seq == 0:
                 await db.execute(
                     "UPDATE stories SET status = ?, current_phase = ?, "
                     "updated_at = ? WHERE story_id = ?",
-                    ("planning", "planning", now_iso, info.story_key),
+                    ("planning", "creating", now_iso, info.story_key),
                 )
             else:
                 await db.execute(

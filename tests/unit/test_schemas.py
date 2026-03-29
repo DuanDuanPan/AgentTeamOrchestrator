@@ -700,4 +700,27 @@ class TestBatchRecommendOutput:
     def test_json_schema_has_required_fields(self) -> None:
         assert "story_keys" in BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[operator]
         assert "reason" in BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[operator]
-        assert set(BATCH_RECOMMEND_JSON_SCHEMA["required"]) == {"story_keys", "reason"}  # type: ignore[arg-type]
+        assert set(BATCH_RECOMMEND_JSON_SCHEMA["required"]) == {"story_keys", "has_ui_map", "reason"}  # type: ignore[arg-type]
+
+    def test_valid_output_with_has_ui_map(self) -> None:
+        output = BatchRecommendOutput(
+            story_keys=["1-1-scaffolding"],
+            has_ui_map={"1-1-scaffolding": True},
+            reason="test",
+        )
+        assert output.has_ui_map == {"1-1-scaffolding": True}
+
+    def test_default_empty_has_ui_map(self) -> None:
+        output = BatchRecommendOutput(story_keys=["a"], reason="test")
+        assert output.has_ui_map == {}
+
+    def test_has_ui_map_non_bool_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BatchRecommendOutput.model_validate(
+                {"story_keys": ["a"], "has_ui_map": {"a": 1}, "reason": "test"}
+            )
+
+    def test_json_schema_has_has_ui_map(self) -> None:
+        props = BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[index]
+        assert "has_ui_map" in props
+        assert props["has_ui_map"]["type"] == "object"

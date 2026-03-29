@@ -167,7 +167,7 @@ development_status:
   9-1f-validating-artifact-file-fallback-parse: done
   9-2-workspace-concept-worktree-timing: done
   9-3-conditional-skip-spec-commit: done
-  9-4-remove-planning-phase: ready-for-dev
+  9-4-remove-planning-phase: review
   epic-9-retrospective: optional
 
   # ===== Epic 7: Growth — 多项目并行与系统智能 (Phase 2) =====

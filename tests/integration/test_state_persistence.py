@@ -42,8 +42,7 @@ class TestStatePersistenceIntegration:
             sm = await StoryLifecycle.create()
 
             events_and_expected = [
-                ("start_create", "planning", "planning"),
-                ("plan_done", "creating", "planning"),
+                ("start_create", "creating", "planning"),
                 ("create_done", "designing", "planning"),
                 ("design_done", "validating", "planning"),
                 ("validate_pass", "dev_ready", "ready"),
@@ -80,7 +79,7 @@ class TestStatePersistenceIntegration:
             sm = await StoryLifecycle.create()
 
             # 推进到 reviewing
-            for event in ("start_create", "plan_done", "create_done", "design_done", "validate_pass", "start_dev", "dev_done"):
+            for event in ("start_create", "create_done", "design_done", "validate_pass", "start_dev", "dev_done"):
                 await sm.send(event)
                 await save_story_state(db, _STORY_ID, sm.current_state_value)
                 await db.commit()
@@ -125,7 +124,7 @@ class TestStatePersistenceIntegration:
             sm = await StoryLifecycle.create()
 
             # 推进到 developing，然后 escalate
-            for event in ("start_create", "plan_done", "create_done", "design_done", "validate_pass", "start_dev"):
+            for event in ("start_create", "create_done", "design_done", "validate_pass", "start_dev"):
                 await sm.send(event)
                 await save_story_state(db, _STORY_ID, sm.current_state_value)
                 await db.commit()
@@ -170,7 +169,7 @@ class TestStatePersistenceIntegration:
             try:
                 record = await get_story(db3, _STORY_ID)
                 assert record is not None
-                assert record.current_phase == "planning"
+                assert record.current_phase == "creating"
                 assert record.status == "planning"
             finally:
                 await db3.close()
@@ -192,7 +191,7 @@ class TestStatePersistenceIntegration:
             assert record1 is not None
             ts1 = record1.updated_at
 
-            await sm.send("plan_done")
+            await sm.send("create_done")
             await save_story_state(db, _STORY_ID, sm.current_state_value)
             await db.commit()
 

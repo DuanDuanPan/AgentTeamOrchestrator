@@ -1,7 +1,7 @@
 """state_machine — StoryLifecycle 状态机。
 
 基于 python-statemachine 3.0 async API 实现 Story 生命周期状态推进。
-状态机定义 14 个规范阶段与所有合法 transition，配合 save_story_state()
+状态机定义 13 个规范阶段与所有合法 transition，配合 save_story_state()
 将阶段变更持久化到 SQLite（不自动 commit，由 TransitionQueue 统一事务边界）。
 """
 
@@ -23,7 +23,6 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 CANONICAL_PHASES: tuple[str, ...] = (
-    "planning",
     "creating",
     "designing",
     "validating",
@@ -44,7 +43,6 @@ CANONICAL_PHASES: tuple[str, ...] = (
 
 PHASE_TO_STATUS: dict[str, StoryStatus] = {
     "queued": "backlog",
-    "planning": "planning",
     "creating": "planning",
     "designing": "planning",
     "validating": "planning",
@@ -82,7 +80,6 @@ class HasPhaseInfo(Protocol):
 
 # 规范 transition 映射：phase_name → (next_on_success, next_on_failure | None)
 CANONICAL_TRANSITIONS: dict[str, tuple[str, str | None]] = {
-    "planning": ("creating", None),
     "creating": ("designing", None),
     "designing": ("validating", None),
     "validating": ("dev_ready", "creating"),
@@ -105,13 +102,12 @@ CANONICAL_TRANSITIONS: dict[str, tuple[str, str | None]] = {
 class StoryLifecycle(StateMachine):
     """Story 生命周期状态机。
 
-    15 个规范状态，覆盖从 queued（等待启动）到 done（完成）的完整流程，
+    14 个规范状态，覆盖从 queued（等待启动）到 done（完成）的完整流程，
     以及 blocked（升级阻塞）的 sink state。
 
     状态图::
 
-        queued ──start_create──→ planning
-        planning ──plan_done──→ creating
+        queued ──start_create──→ creating
         creating ──create_done──→ designing
         designing ──design_done──→ validating
         validating ──validate_pass──→ dev_ready
@@ -133,7 +129,6 @@ class StoryLifecycle(StateMachine):
 
     # --- States ---
     queued = State(initial=True)
-    planning = State()
     creating = State()
     designing = State()
     validating = State()
@@ -149,8 +144,7 @@ class StoryLifecycle(StateMachine):
     blocked = State(final=True)
 
     # --- Transitions ---
-    start_create = queued.to(planning)
-    plan_done = planning.to(creating)
+    start_create = queued.to(creating)
     create_done = creating.to(designing)
     design_done = designing.to(validating)
     validate_pass = validating.to(dev_ready)
@@ -171,7 +165,6 @@ class StoryLifecycle(StateMachine):
     # escalate: 任何非 final / 非 blocked 状态可升级到 blocked
     escalate = (
         queued.to(blocked)
-        | planning.to(blocked)
         | creating.to(blocked)
         | designing.to(blocked)
         | validating.to(blocked)

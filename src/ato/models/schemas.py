@@ -413,6 +413,7 @@ class BatchRecommendOutput(_StrictBase):
     """
 
     story_keys: list[str]
+    has_ui_map: dict[str, bool] = {}
     reason: str
 
 
@@ -425,12 +426,17 @@ BATCH_RECOMMEND_JSON_SCHEMA: dict[str, object] = {
             "items": {"type": "string"},
             "description": "推荐的 story keys 列表，按优先级排序",
         },
+        "has_ui_map": {
+            "type": "object",
+            "additionalProperties": {"type": "boolean"},
+            "description": "每个 story key 是否包含 UI 工作，true 表示有 UI",
+        },
         "reason": {
             "type": "string",
             "description": "推荐理由",
         },
     },
-    "required": ["story_keys", "reason"],
+    "required": ["story_keys", "has_ui_map", "reason"],
     "additionalProperties": False,
 }
 

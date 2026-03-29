@@ -34,8 +34,7 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # happy-path phase → 从 queued 出发的 success 事件序列
 _HAPPY_PATH_EVENTS: dict[str, list[str]] = {}
 _HP_EVENTS: list[str] = [
-    "start_create",  # queued → planning
-    "plan_done",  # planning → creating
+    "start_create",  # queued → creating
     "create_done",  # creating → designing
     "design_done",  # designing → validating
     "validate_pass",  # validating → dev_ready
@@ -49,7 +48,6 @@ _HP_EVENTS: list[str] = [
 ]
 _HP_PHASES: list[str] = [
     "queued",
-    "planning",
     "creating",
     "designing",
     "validating",
@@ -77,6 +75,9 @@ _SPECIAL_REPLAY: dict[str, list[str]] = {
     "fixing": _HAPPY_PATH_EVENTS["reviewing"] + ["review_fail"],
     # blocked 从任意非 final 状态 escalate 到达；最短：queued → escalate
     "blocked": ["escalate"],
+    # planning: Story 9.4 移除了真实 planning phase，但 DB 中可能残留旧数据。
+    # start_create 现在直接到 creating，replay 后 machine 停在 creating（语义等价）。
+    "planning": ["start_create"],
 }
 
 

@@ -40,7 +40,7 @@ def _make_settings() -> MagicMock:
 def _make_story_record(
     story_id: str,
     *,
-    current_phase: str = "planning",
+    current_phase: str = "creating",
     status: str = "planning",
 ) -> StoryRecord:
     now = datetime.now(tz=UTC)
@@ -57,7 +57,7 @@ def _make_story_record(
 async def _insert_story(
     db_path: Path,
     story_id: str,
-    current_phase: str = "planning",
+    current_phase: str = "creating",
     status: str = "planning",
     *,
     batch_status: str = "active",
@@ -92,7 +92,7 @@ async def _insert_task_for_story(
     db_path: Path,
     story_id: str,
     status: str = "running",
-    phase: str = "planning",
+    phase: str = "creating",
 ) -> None:
     db = await get_connection(db_path)
     try:
@@ -101,7 +101,7 @@ async def _insert_task_for_story(
             task_id=f"task-{uuid.uuid4().hex[:8]}",
             story_id=story_id,
             phase=phase,
-            role="planner",
+            role="creator",
             cli_tool="claude",
             status=status,
             pid=12345,
@@ -120,10 +120,10 @@ async def _insert_task_for_story(
 
 class TestGetUndispatchedStories:
     @pytest.mark.asyncio
-    async def test_planning_story_without_task_detected(self, tmp_path: Path) -> None:
-        """planning 阶段无 task 的 story 应被返回。"""
+    async def test_creating_story_without_task_detected(self, tmp_path: Path) -> None:
+        """creating 阶段无 task 的 story 应被返回。"""
         db_path = await _setup_db(tmp_path)
-        await _insert_story(db_path, "s-1", "planning", "planning")
+        await _insert_story(db_path, "s-1", "creating", "planning")
 
         db = await get_connection(db_path)
         try:
@@ -138,7 +138,7 @@ class TestGetUndispatchedStories:
     async def test_story_with_running_task_not_detected(self, tmp_path: Path) -> None:
         """有 running task 的 story 不应被返回。"""
         db_path = await _setup_db(tmp_path)
-        await _insert_story(db_path, "s-1", "planning", "planning")
+        await _insert_story(db_path, "s-1", "creating", "planning")
         await _insert_task_for_story(db_path, "s-1", status="running")
 
         db = await get_connection(db_path)
@@ -153,7 +153,7 @@ class TestGetUndispatchedStories:
     async def test_story_with_pending_task_not_detected(self, tmp_path: Path) -> None:
         """有 pending task 的 story 不应被返回。"""
         db_path = await _setup_db(tmp_path)
-        await _insert_story(db_path, "s-1", "planning", "planning")
+        await _insert_story(db_path, "s-1", "creating", "planning")
         await _insert_task_for_story(db_path, "s-1", status="pending")
 
         db = await get_connection(db_path)
@@ -196,7 +196,7 @@ class TestGetUndispatchedStories:
     async def test_inactive_batch_not_detected(self, tmp_path: Path) -> None:
         """非 active batch 中的 story 不应被返回。"""
         db_path = await _setup_db(tmp_path)
-        await _insert_story(db_path, "s-1", "planning", "planning", batch_status="completed")
+        await _insert_story(db_path, "s-1", "creating", "planning", batch_status="completed")
 
         db = await get_connection(db_path)
         try:
@@ -210,7 +210,7 @@ class TestGetUndispatchedStories:
     async def test_completed_task_still_detected(self, tmp_path: Path) -> None:
         """只有 completed task（非 running/pending/paused）的 story 应被返回。"""
         db_path = await _setup_db(tmp_path)
-        await _insert_story(db_path, "s-1", "planning", "planning")
+        await _insert_story(db_path, "s-1", "creating", "planning")
         await _insert_task_for_story(db_path, "s-1", status="completed")
 
         db = await get_connection(db_path)

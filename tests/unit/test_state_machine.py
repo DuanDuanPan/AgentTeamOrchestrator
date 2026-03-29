@@ -67,7 +67,6 @@ async def _advance_to(sm: StoryLifecycle, target_state: str) -> None:
     """将状态机推进到指定状态（沿 happy path）。"""
     happy_path: list[str] = [
         "start_create",
-        "plan_done",
         "create_done",
         "design_done",
         "validate_pass",
@@ -80,8 +79,7 @@ async def _advance_to(sm: StoryLifecycle, target_state: str) -> None:
         "regression_pass",
     ]
     state_after_event: dict[str, str] = {
-        "start_create": "planning",
-        "plan_done": "creating",
+        "start_create": "creating",
         "create_done": "designing",
         "design_done": "validating",
         "validate_pass": "dev_ready",
@@ -128,12 +126,6 @@ class TestLegalTransitions:
     async def test_start_create(self) -> None:
         sm = await _make_sm()
         await sm.send("start_create")
-        assert sm.current_state_value == "planning"
-
-    async def test_plan_done(self) -> None:
-        sm = await _make_sm()
-        await _advance_to(sm, "planning")
-        await sm.send("plan_done")
         assert sm.current_state_value == "creating"
 
     async def test_create_done(self) -> None:
@@ -230,7 +222,6 @@ class TestEscalateTransitions:
 
     _ESCALATABLE_STATES: ClassVar[list[str]] = [
         "queued",
-        "planning",
         "creating",
         "designing",
         "validating",
@@ -372,8 +363,7 @@ class TestHappyPath:
         """完整 happy path：queued → ... → done。"""
         sm = await _make_sm()
         events = [
-            ("start_create", "planning"),
-            ("plan_done", "creating"),
+            ("start_create", "creating"),
             ("create_done", "designing"),
             ("design_done", "validating"),
             ("validate_pass", "dev_ready"),
@@ -598,7 +588,7 @@ class TestSaveStoryState:
                 await save_story_state(db, "nonexistent-story", "developing")
 
     async def test_all_phases_mapped(self) -> None:
-        """PHASE_TO_STATUS 覆盖所有 14 个状态。"""
+        """PHASE_TO_STATUS 覆盖所有 13 个状态 + done + blocked。"""
         sm = await _make_sm()
         all_states = {s.id for s in sm.states}
         mapped = set(PHASE_TO_STATUS.keys())
@@ -608,7 +598,6 @@ class TestSaveStoryState:
         """验证映射表与 story spec 一致。"""
         expected = {
             "queued": "backlog",
-            "planning": "planning",
             "creating": "planning",
             "designing": "planning",
             "validating": "planning",
@@ -687,7 +676,6 @@ class TestRegressionFail:
 
         # Navigate to regression state
         await sm.send("start_create")
-        await sm.send("plan_done")
         await sm.send("create_done")
         await sm.send("design_done")
         await sm.send("validate_pass")

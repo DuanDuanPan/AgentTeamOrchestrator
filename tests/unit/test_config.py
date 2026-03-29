@@ -1003,7 +1003,7 @@ class TestConfigTemplate:
     def test_example_has_required_roles(self) -> None:
         """模板包含至少 6 个角色。"""
         config = load_config(Path("ato.yaml.example"))
-        expected_roles = {"planner", "creator", "validator", "developer", "reviewer", "fixer", "qa"}
+        expected_roles = {"creator", "validator", "developer", "reviewer", "fixer", "qa"}
         assert expected_roles.issubset(set(config.roles.keys()))
 
     def test_example_has_full_lifecycle_phases(self) -> None:
@@ -1011,7 +1011,6 @@ class TestConfigTemplate:
         config = load_config(Path("ato.yaml.example"))
         phase_names = [p.name for p in config.phases]
         expected = [
-            "planning",
             "creating",
             "designing",
             "validating",
@@ -1289,7 +1288,7 @@ roles:
   rev:
     cli: codex
 phases:
-  - name: planning
+  - name: creating
     role: dev
     type: structured_job
     next_on_success: reviewing
@@ -1297,12 +1296,12 @@ phases:
     role: rev
     type: convergent_loop
     next_on_success: done
-    next_on_failure: planning
+    next_on_failure: creating
 """
         p = _write_yaml(tmp_path, yaml_content)
         config = load_config(p)
         defs = build_phase_definitions(config)
-        # planning 在已知 main phase 列表中
+        # creating 在已知 main phase 列表中
         assert defs[0].workspace == "main"
         # reviewing 不在已知 main phase 列表中 → worktree
         assert defs[1].workspace == "worktree"
@@ -1316,14 +1315,15 @@ roles:
   rev:
     cli: codex
 phases:
-  - name: planning
-    role: dev
-    type: structured_job
-    next_on_success: creating
   - name: creating
     role: dev
     type: structured_job
+    next_on_success: validating
+  - name: validating
+    role: rev
+    type: convergent_loop
     next_on_success: fixing
+    next_on_failure: creating
   - name: fixing
     role: dev
     type: structured_job
@@ -1338,8 +1338,8 @@ phases:
         config = load_config(p)
         defs = build_phase_definitions(config)
         ws = {d.name: d.workspace for d in defs}
-        assert ws["planning"] == "main"
         assert ws["creating"] == "main"
+        assert ws["validating"] == "main"
         assert ws["fixing"] == "worktree"
         assert ws["reviewing"] == "worktree"
 

@@ -345,12 +345,12 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
 
 # 已知的 main-workspace phase 名（省略 workspace 时用于向后兼容推断）。
 # 这些 phase 在 workspace 字段出现前就在 project_root 上执行：
-# - planning/creating/designing: pre-worktree structured_job
+# - creating/designing: pre-worktree structured_job
 # - validating: convergent_loop 但 gate 在 main 上运行
 # - dev_ready: worktree 创建前的最后一个 main phase
 # - merging/regression: merge_queue 控制流，在 main 上执行
 _KNOWN_MAIN_PHASES: frozenset[str] = frozenset(
-    {"planning", "creating", "designing", "validating", "dev_ready", "merging", "regression"}
+    {"creating", "designing", "validating", "dev_ready", "merging", "regression"}
 )
 
 

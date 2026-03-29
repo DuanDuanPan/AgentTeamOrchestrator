@@ -113,7 +113,6 @@ _STATUS_ICONS: dict[str, str] = {
 }
 _PHASE_ICONS: dict[str, str] = {
     "queued": "⏳",
-    "planning": "📋",
     "creating": "🔄",
     "designing": "🎨",
 }

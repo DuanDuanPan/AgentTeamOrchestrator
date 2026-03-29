@@ -4,6 +4,7 @@
   "result": "Based on repository analysis, I recommend these stories.",
   "structured_output": {
     "story_keys": ["1-2-sqlite", "1-1-scaffolding"],
+    "has_ui_map": {"1-2-sqlite": false, "1-1-scaffolding": false},
     "reason": "1-2 has critical dependency chain; 1-1 scaffolding is foundational."
   },
   "session_id": "sess-batch-recommend-001",

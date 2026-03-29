@@ -258,17 +258,17 @@ class TestFourRecoveryScenarios:
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
-    async def test_reschedule_planning_phase_submits_plan_done(
+    async def test_reschedule_dev_ready_phase_submits_start_dev(
         self,
         mock_alive: MagicMock,
         mock_artifact: MagicMock,
         initialized_db_path: Path,
     ) -> None:
-        """Story 8.2: planning phase（首阶段）reschedule 提交 plan_done 事件。"""
+        """dev_ready phase reschedule 提交 start_dev 事件。"""
         db = await get_connection(initialized_db_path)
         try:
             await insert_story(db, _make_story("s1"))
-            await insert_task(db, _make_running_task("t1", "s1", pid=99999, phase="planning"))
+            await insert_task(db, _make_running_task("t1", "s1", pid=99999, phase="dev_ready"))
         finally:
             await db.close()
 
@@ -287,7 +287,7 @@ class TestFourRecoveryScenarios:
 
         mock_tq.submit.assert_called_once()
         event = mock_tq.submit.call_args[0][0]
-        assert event.event_name == "plan_done"
+        assert event.event_name == "start_dev"
         assert event.story_id == "s1"
 
     @patch("ato.recovery._artifact_exists", return_value=False)

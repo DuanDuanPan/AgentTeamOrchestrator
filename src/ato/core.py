@@ -1105,7 +1105,7 @@ class Orchestrator:
         2. 按 phase_type 复用既有 restart/recovery 管道
 
         这样 validating/reviewing/qa_testing 会自动走 convergent-loop 的
-        BMAD parse/fallback/findings 流程，planning/creating/designing 等
+        BMAD parse/fallback/findings 流程，creating/designing 等
         structured_job 也与 restart 路径保持同一实现。
         """
         from ato.models.db import insert_task

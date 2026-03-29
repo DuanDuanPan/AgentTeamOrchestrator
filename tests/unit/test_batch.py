@@ -249,7 +249,7 @@ class TestBuildCanonicalKeyMap:
 
 
 def _make_epic(
-    short_key: str, story_key: str, title: str, deps: list[str] | None = None
+    short_key: str, story_key: str, title: str, deps: list[str] | None = None, *, has_ui: bool = False
 ) -> EpicInfo:
     return EpicInfo(
         story_key=story_key,
@@ -257,6 +257,7 @@ def _make_epic(
         title=title,
         epic_key=short_key.split("-")[0],
         dependencies=deps or [],
+        has_ui=has_ui,
     )
 
 
@@ -372,7 +373,7 @@ class TestConfirmBatch:
             s1 = await get_story(db, "1-1-scaffolding")
             assert s1 is not None
             assert s1.status == "planning"
-            assert s1.current_phase == "planning"
+            assert s1.current_phase == "creating"
 
             s2 = await get_story(db, "1-2-sqlite")
             assert s2 is not None
@@ -425,7 +426,7 @@ class TestConfirmBatch:
             story = await get_story(db, "1-1-existing")
             assert story is not None
             assert story.status == "planning"
-            assert story.current_phase == "planning"
+            assert story.current_phase == "creating"
         finally:
             await db.close()
 
@@ -552,7 +553,7 @@ class TestConfirmBatch:
 
             # 1-2 is seq=0 → creating
             assert links[0][1].status == "planning"
-            assert links[0][1].current_phase == "planning"
+            assert links[0][1].current_phase == "creating"
         finally:
             await db.close()
 
@@ -678,7 +679,7 @@ class TestConfirmBatch:
             # 1-2 is seq=0 → creating
             assert links[0][1].story_id == "1-2-backlog"
             assert links[0][1].status == "planning"
-            assert links[0][1].current_phase == "planning"
+            assert links[0][1].current_phase == "creating"
             # 1-3 is seq=1 → queued
             assert links[1][1].story_id == "1-3-new"
             assert links[1][1].status == "backlog"
@@ -785,6 +786,12 @@ class TestBuildLlmRecommendPrompt:
         prompt = build_llm_recommend_prompt(5, epics_path="/epics.md")
         assert "阅读 sprint 状态文件" not in prompt
 
+    def test_contains_has_ui_instruction(self) -> None:
+        """prompt 包含 has_ui_map / UI 判断相关指令。"""
+        prompt = build_llm_recommend_prompt(5, epics_path="/epics.md")
+        assert "has_ui_map" in prompt
+        assert "UI" in prompt
+
 
 # ---------------------------------------------------------------------------
 # LLMBatchRecommender (Story 2B.5a)
@@ -808,7 +815,7 @@ def _make_mock_adapter(fixture_data: dict | None = None) -> AsyncMock:
 
 class TestLLMBatchRecommender:
     async def test_success_returns_llm_ordered_stories(self) -> None:
-        """LLM 成功返回时按 LLM 排序构造 proposal。"""
+        """LLM 成功返回时按 LLM 排序构造 proposal，并回写 has_ui。"""
         epics = [
             _make_epic("1-1", "1-1-scaffolding", "Scaffolding"),
             _make_epic("1-2", "1-2-sqlite", "SQLite", ["1-1"]),
@@ -818,6 +825,7 @@ class TestLLMBatchRecommender:
         fixture = _load_fixture()
         fixture["structured_output"] = {
             "story_keys": ["1-2-sqlite"],
+            "has_ui_map": {"1-2-sqlite": False},
             "reason": "1-2 is the next priority.",
         }
 
@@ -827,6 +835,7 @@ class TestLLMBatchRecommender:
 
         assert len(proposal.stories) == 1
         assert proposal.stories[0].story_key == "1-2-sqlite"
+        assert proposal.stories[0].has_ui is False
         assert "LLM" in proposal.reason
         adapter.execute.assert_called_once()
 
@@ -1033,3 +1042,65 @@ class TestLLMBatchRecommender:
         assert len(proposal.stories) == 2
         assert proposal.stories[0].story_key == "1-2-b"
         assert proposal.stories[1].story_key == "1-1-a"
+
+    async def test_has_ui_map_propagated_to_epic_info(self) -> None:
+        """LLM 返回 has_ui_map 时，对应 EpicInfo.has_ui 正确回写。"""
+        epics = [
+            _make_epic("1-1", "1-1-scaffolding", "Scaffolding"),
+            _make_epic("1-2", "1-2-tui", "TUI Dashboard"),
+        ]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding", "1-2-tui"],
+            "has_ui_map": {"1-1-scaffolding": False, "1-2-tui": True},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        proposal = await recommender.recommend(epics, existing, 5)
+
+        assert proposal.stories[0].has_ui is False
+        assert proposal.stories[1].has_ui is True
+
+    async def test_missing_key_in_has_ui_map_defaults_false(self) -> None:
+        """has_ui_map 缺少某个 story key 时，该 story 的 has_ui 默认 False。"""
+        epics = [
+            _make_epic("1-1", "1-1-scaffolding", "Scaffolding"),
+            _make_epic("1-2", "1-2-sqlite", "SQLite"),
+        ]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding", "1-2-sqlite"],
+            "has_ui_map": {"1-1-scaffolding": True},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        proposal = await recommender.recommend(epics, existing, 5)
+
+        assert proposal.stories[0].has_ui is True
+        assert proposal.stories[1].has_ui is False
+
+    async def test_empty_has_ui_map_all_default_false(self) -> None:
+        """has_ui_map 为空字典时所有 story 的 has_ui 为 False。"""
+        epics = [_make_epic("1-1", "1-1-scaffolding", "Scaffolding")]
+        existing: dict[str, StoryRecord] = {}
+
+        fixture = _load_fixture()
+        fixture["structured_output"] = {
+            "story_keys": ["1-1-scaffolding"],
+            "has_ui_map": {},
+            "reason": "test",
+        }
+
+        adapter = _make_mock_adapter(fixture)
+        recommender = LLMBatchRecommender(adapter, Path("/fake/root"), epics_path=Path("/fake/epics.md"))
+        proposal = await recommender.recommend(epics, existing, 5)
+
+        assert proposal.stories[0].has_ui is False

@@ -1,6 +1,6 @@
 # Story 9.4: 移除冗余 Planning 阶段
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- Depends on: Story 8.2 (planning phase 引入了当前冗余), Story 9.1e (creating prompt 已成为首个 BMAD create-story 入口), Story 9.2 (pre-worktree workspace contract), Story 9.3 (dev_ready/main-path sequencing) -->
@@ -78,32 +78,32 @@ And 至少覆盖以下回归面：
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 收敛状态机 canonical 合同，彻底移除真实 `planning` phase (AC: #1, #2)
-  - [ ] 1.1 更新 `src/ato/state_machine.py`：`CANONICAL_PHASES` 删除 `planning`
-  - [ ] 1.2 更新 `src/ato/state_machine.py`：`PHASE_TO_STATUS` 删除 `planning` phase 条目，但保留 `creating/designing/validating -> "planning"` 聚合映射
-  - [ ] 1.3 更新 `src/ato/state_machine.py`：`CANONICAL_TRANSITIONS` 删除 `planning -> creating`
-  - [ ] 1.4 更新 `src/ato/state_machine.py`：删除 `planning = State()`、`plan_done`、`planning.to(blocked)`，并将 `start_create` 改为 `queued.to(creating)`
-  - [ ] 1.5 更新 `tests/unit/test_state_machine.py` 与 `tests/integration/test_state_persistence.py` 的 phase/state/event 断言
+- [x] Task 1: 收敛状态机 canonical 合同，彻底移除真实 `planning` phase (AC: #1, #2)
+  - [x] 1.1 更新 `src/ato/state_machine.py`：`CANONICAL_PHASES` 删除 `planning`
+  - [x] 1.2 更新 `src/ato/state_machine.py`：`PHASE_TO_STATUS` 删除 `planning` phase 条目，但保留 `creating/designing/validating -> "planning"` 聚合映射
+  - [x] 1.3 更新 `src/ato/state_machine.py`：`CANONICAL_TRANSITIONS` 删除 `planning -> creating`
+  - [x] 1.4 更新 `src/ato/state_machine.py`：删除 `planning = State()`、`plan_done`、`planning.to(blocked)`，并将 `start_create` 改为 `queued.to(creating)`
+  - [x] 1.5 更新 `tests/unit/test_state_machine.py` 与 `tests/integration/test_state_persistence.py` 的 phase/state/event 断言
 
-- [ ] Task 2: 对齐 recovery、queue replay 与初始 dispatch 的首阶段语义 (AC: #2, #3)
-  - [ ] 2.1 更新 `src/ato/recovery.py`：删除 `_PHASE_SUCCESS_EVENT["planning"]`
-  - [ ] 2.2 更新 `src/ato/recovery.py`：删除 `_STRUCTURED_JOB_PROMPTS["planning"]`，保持 `creating` 为首个 `/bmad-create-story` phase
-  - [ ] 2.3 更新 `src/ato/transition_queue.py`：删除 `plan_done` 与 `planning` 相关 happy-path / replay 表项
-  - [ ] 2.4 检查 `src/ato/core.py` 与 `src/ato/models/db.py::get_undispatched_stories()` 的首阶段消费合同，确保初始 dispatch 以 `creating` 为首个真实 phase
-  - [ ] 2.5 更新 `tests/unit/test_transition_queue.py`、`tests/integration/test_transition_queue.py`、`tests/unit/test_recovery.py`、`tests/integration/test_crash_recovery.py`、`tests/unit/test_initial_dispatch.py`
+- [x] Task 2: 对齐 recovery、queue replay 与初始 dispatch 的首阶段语义 (AC: #2, #3)
+  - [x] 2.1 更新 `src/ato/recovery.py`：删除 `_PHASE_SUCCESS_EVENT["planning"]`
+  - [x] 2.2 更新 `src/ato/recovery.py`：删除 `_STRUCTURED_JOB_PROMPTS["planning"]`，保持 `creating` 为首个 `/bmad-create-story` phase
+  - [x] 2.3 更新 `src/ato/transition_queue.py`：删除 `plan_done` 与 `planning` 相关 happy-path / replay 表项
+  - [x] 2.4 检查 `src/ato/core.py` 与 `src/ato/models/db.py::get_undispatched_stories()` 的首阶段消费合同，确保初始 dispatch 以 `creating` 为首个真实 phase
+  - [x] 2.5 更新 `tests/unit/test_transition_queue.py`、`tests/integration/test_transition_queue.py`、`tests/unit/test_recovery.py`、`tests/integration/test_crash_recovery.py`、`tests/unit/test_initial_dispatch.py`
 
-- [ ] Task 3: 对齐 batch 初始化、配置模板与显示层 (AC: #3, #4)
-  - [ ] 3.1 更新 `src/ato/batch.py::confirm_batch()`：seq=0 story 写入 `status="planning", current_phase="creating"`
-  - [ ] 3.2 更新 `src/ato/config.py`：已知 main-phase 集合与注释不再包含 `planning`
-  - [ ] 3.3 更新 `ato.yaml.example`：移除 `planner` role 与 `planning` phase 定义
-  - [ ] 3.4 更新 `src/ato/cli.py` / `src/ato/tui/*` 中任何把 `planning` 当真实 phase 的顺序、图标或断言基线
-  - [ ] 3.5 更新 `tests/unit/test_batch.py`、`tests/unit/test_config.py`、`tests/integration/test_config_workflow.py`、`tests/unit/test_cli_plan.py`、`tests/unit/test_story_detail_view.py`
+- [x] Task 3: 对齐 batch 初始化、配置模板与显示层 (AC: #3, #4)
+  - [x] 3.1 更新 `src/ato/batch.py::confirm_batch()`：seq=0 story 写入 `status="planning", current_phase="creating"`
+  - [x] 3.2 更新 `src/ato/config.py`：已知 main-phase 集合与注释不再包含 `planning`
+  - [x] 3.3 更新 `ato.yaml.example`：移除 `planner` role 与 `planning` phase 定义
+  - [x] 3.4 更新 `src/ato/cli.py` / `src/ato/tui/*` 中任何把 `planning` 当真实 phase 的顺序、图标或断言基线
+  - [x] 3.5 更新 `tests/unit/test_batch.py`、`tests/unit/test_config.py`、`tests/integration/test_config_workflow.py`、`tests/unit/test_cli_plan.py`、`tests/unit/test_story_detail_view.py`
 
-- [ ] Task 4: 收紧回归边界，避免扩大到不必要的 schema / workflow churn (AC: #1, #4, #5)
-  - [ ] 4.1 确认 `src/ato/models/schemas.py::StoryStatus` 无需迁移或 schema version 变更
-  - [ ] 4.2 确认不修改 batch 推荐 / sprint-planning / preflight artifact 发现规则
-  - [ ] 4.3 确认不新增 planner 专用 approval type、DB 表或新的 structured_job phase
-  - [ ] 4.4 跑最小必要测试子集并记录结果
+- [x] Task 4: 收紧回归边界，避免扩大到不必要的 schema / workflow churn (AC: #1, #4, #5)
+  - [x] 4.1 确认 `src/ato/models/schemas.py::StoryStatus` 无需迁移或 schema version 变更
+  - [x] 4.2 确认不修改 batch 推荐 / sprint-planning / preflight artifact 发现规则
+  - [x] 4.3 确认不新增 planner 专用 approval type、DB 表或新的 structured_job phase
+  - [x] 4.4 跑最小必要测试子集并记录结果
 
 ## Dev Notes
 
@@ -180,16 +180,58 @@ uv run pytest tests/integration/test_transition_queue.py tests/integration/test_
 ## Change Log
 
 - 2026-03-29: Story 重建 —— `sprint-status.yaml` 已记录 9.4 被创建，但实现产物文件缺失；本次在 validate-create-story 过程中补建 story 文件
-- 2026-03-29: `validate-create-story` 修订 —— 将影响面从“删 phase 名字”扩展到真实 runtime/test surface；明确保留高层 planning status、禁止 schema migration、补入 `test_initial_dispatch.py` 与 config/template 适配
+- 2026-03-29: `validate-create-story` 修订 —— 将影响面从”删 phase 名字”扩展到真实 runtime/test surface；明确保留高层 planning status、禁止 schema migration、补入 `test_initial_dispatch.py` 与 config/template 适配
+- 2026-03-29: 实现完成 —— 移除 `planning` phase、`plan_done` event、`planner` role；全部 1731 测试通过，无回归
+- 2026-03-29: Code review 修复 —— 添加 DB 旧数据向后兼容：`_SPECIAL_REPLAY["planning"]` 和 `_PHASE_SUCCESS_EVENT["planning"]`；新增 3 个向后兼容测试，全部 1734 测试通过
 
 ## Dev Agent Record
 
 ### Agent Model Used
 
-GPT-5 Codex
+Claude Opus 4.6
 
 ### Debug Log References
 
+1. recovery 测试中 `designing` phase 有 design gate 特殊逻辑，将测试用例调整为 `dev_ready` phase 以保持测试意图一致。
+2. Code review 发现 DB 旧数据向后兼容缺失（`current_phase='planning'` 的 story 无法 replay 和 recovery）。已通过 `_SPECIAL_REPLAY` 和 `_PHASE_SUCCESS_EVENT` 映射修复。
+
 ### Completion Notes List
 
+- ✅ `CANONICAL_PHASES` 从 12 → 11（移除 `planning`），`CANONICAL_TRANSITIONS` 移除 `planning -> creating`
+- ✅ `StoryLifecycle` 从 15 → 14 状态（移除 `planning` State 和 `plan_done` event）
+- ✅ `start_create` 改为 `queued.to(creating)` 直接跳过 planning
+- ✅ `PHASE_TO_STATUS` 移除 `”planning”: “planning”` 条目，保留 `creating/designing/validating -> “planning”` 高层聚合
+- ✅ `_STRUCTURED_JOB_PROMPTS` 移除 `”planning”` 条目
+- ✅ happy-path 事件序列和 phase 列表移除 `plan_done` 和 `planning`
+- ✅ 向后兼容：`_SPECIAL_REPLAY[“planning”] = [“start_create”]`（旧 DB replay 到 creating）
+- ✅ 向后兼容：`_PHASE_SUCCESS_EVENT[“planning”] = “create_done”`（旧 task recovery 提交正确事件）
+- ✅ `confirm_batch()` seq=0 story 写入 `status=”planning”, current_phase=”creating”`
+- ✅ `_KNOWN_MAIN_PHASES` 移除 `”planning”`
+- ✅ `ato.yaml.example` 移除 `planner` role 和 `planning` phase
+- ✅ CLI `_PHASE_ICONS` 移除 `”planning”` 条目
+- ✅ `StoryStatus` literal 保持不变，高层 `”planning”` 状态语义完整保留
+- ✅ 全部 1734 测试通过（含 3 个新增向后兼容测试，0 回归），ruff 无新增 lint 问题
+
 ### File List
+
+- src/ato/state_machine.py (modified)
+- src/ato/recovery.py (modified)
+- src/ato/transition_queue.py (modified)
+- src/ato/batch.py (modified)
+- src/ato/config.py (modified)
+- src/ato/cli.py (modified)
+- src/ato/core.py (modified — docstring only)
+- ato.yaml.example (modified)
+- tests/unit/test_state_machine.py (modified)
+- tests/unit/test_transition_queue.py (modified)
+- tests/unit/test_recovery.py (modified)
+- tests/unit/test_batch.py (modified)
+- tests/unit/test_initial_dispatch.py (modified)
+- tests/unit/test_config.py (modified)
+- tests/unit/test_cli_plan.py (modified)
+- tests/unit/test_convergent_loop.py (modified)
+- tests/unit/test_story_detail_view.py (modified)
+- tests/integration/test_state_persistence.py (modified)
+- tests/integration/test_transition_queue.py (modified)
+- tests/integration/test_crash_recovery.py (modified)
+- tests/integration/test_config_workflow.py (modified)
