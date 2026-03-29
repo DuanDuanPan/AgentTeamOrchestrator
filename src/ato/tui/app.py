@@ -315,6 +315,60 @@ class ATOApp(App[None]):
                 "SELECT story_id, COUNT(*) as cnt FROM tasks GROUP BY story_id"
             )
             self._story_task_counts = {str(row[0]): int(row[1]) for row in await cursor.fetchall()}
+
+            # 13. 最新 task activity（LLM 实时可观测性）
+            # 优先取 running task；若当前 phase 无 running task，回退到最新终态 task
+            cursor = await db.execute(
+                "SELECT t.story_id, t.last_activity_type, t.last_activity_summary "
+                "FROM tasks t "
+                "JOIN stories s ON s.story_id = t.story_id "
+                "WHERE t.status = 'running' "
+                "AND t.phase = s.current_phase "
+                "AND t.started_at IS NOT NULL "
+                "AND t.last_activity_summary IS NOT NULL "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM tasks t2 "
+                "  WHERE t2.story_id = t.story_id "
+                "  AND t2.status = 'running' "
+                "  AND t2.phase = t.phase "
+                "  AND t2.started_at IS NOT NULL "
+                "  AND ("
+                "    t2.started_at > t.started_at "
+                "    OR (t2.started_at = t.started_at AND t2.rowid > t.rowid)"
+                "  )"
+                ") "
+                "UNION ALL "
+                "SELECT t.story_id, t.last_activity_type, t.last_activity_summary "
+                "FROM tasks t "
+                "JOIN stories s ON s.story_id = t.story_id "
+                "WHERE t.status IN ('completed', 'failed') "
+                "AND t.phase = s.current_phase "
+                "AND t.last_activity_summary IS NOT NULL "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM tasks t3 "
+                "  WHERE t3.story_id = t.story_id "
+                "  AND t3.status = 'running' "
+                "  AND t3.phase = s.current_phase "
+                "  AND t3.started_at IS NOT NULL"
+                ") "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM tasks t4 "
+                "  WHERE t4.story_id = t.story_id "
+                "  AND t4.status IN ('completed', 'failed') "
+                "  AND t4.phase = t.phase "
+                "  AND ("
+                "    t4.completed_at > t.completed_at "
+                "    OR (t4.completed_at = t.completed_at AND t4.rowid > t.rowid)"
+                "  )"
+                ")"
+            )
+            # UNION 可能对同一 story 返回多行（running 优先），取第一条
+            activity_rows = await cursor.fetchall()
+            self._story_activity: dict[str, tuple[str, str]] = {}
+            for row in activity_rows:
+                sid = str(row[0])
+                if sid not in self._story_activity:
+                    self._story_activity[sid] = (str(row[1]), str(row[2]))
         finally:
             await db.close()
 
@@ -344,6 +398,7 @@ class ATOApp(App[None]):
                 total_cost_usd=self._total_cost_usd,
                 recent_events=self._recent_events,
                 story_task_counts=self._story_task_counts,
+                story_activity=getattr(self, "_story_activity", None),
             )
         except NoMatches:
             pass  # DashboardScreen 尚未挂载

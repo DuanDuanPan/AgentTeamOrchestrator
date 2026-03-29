@@ -72,7 +72,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     exit_code        INTEGER,
     cost_usd         REAL,
     duration_ms      INTEGER,
-    error_message    TEXT
+    error_message    TEXT,
+    last_activity_type    TEXT,
+    last_activity_summary TEXT
 )"""
 
 _APPROVALS_DDL = """\
@@ -422,6 +424,8 @@ async def update_task_status(
         "context_briefing": str,
         "started_at": datetime,
         "completed_at": datetime,
+        "last_activity_type": str,
+        "last_activity_summary": str,
     }
 
     for key, value in kwargs.items():
@@ -453,6 +457,23 @@ async def update_task_status(
     sql = f"UPDATE tasks SET {', '.join(set_clauses)} WHERE task_id = ?"
     await db.execute(sql, params)
     await db.commit()
+
+
+async def update_task_activity(
+    db: aiosqlite.Connection,
+    task_id: str,
+    *,
+    activity_type: str | None,
+    activity_summary: str | None,
+    commit: bool = True,
+) -> None:
+    """仅更新 tasks.last_activity_* 列，不修改 status。"""
+    await db.execute(
+        "UPDATE tasks SET last_activity_type = ?, last_activity_summary = ? WHERE task_id = ?",
+        (activity_type, activity_summary, task_id),
+    )
+    if commit:
+        await db.commit()
 
 
 def _row_to_task(row: aiosqlite.Row) -> TaskRecord:

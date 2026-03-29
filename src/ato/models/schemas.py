@@ -11,13 +11,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from collections.abc import Awaitable, Callable
+
 from pydantic import BaseModel, ConfigDict, model_validator
 
 # ---------------------------------------------------------------------------
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 8
+SCHEMA_VERSION: int = 9
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -193,6 +195,31 @@ class _StrictBase(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 进度事件模型 (LLM 实时流式可观测性)
+# ---------------------------------------------------------------------------
+
+ProgressEventType = Literal[
+    "init", "text", "tool_use", "tool_result",
+    "turn_end", "result", "error", "other",
+]
+"""ProgressEvent 事件类型。"""
+
+
+class ProgressEvent(_StrictBase):
+    """LLM CLI 调用的实时进度事件（归一化后）。"""
+
+    event_type: ProgressEventType
+    summary: str
+    cli_tool: Literal["claude", "codex"]
+    timestamp: datetime
+    raw: dict[str, Any]
+
+
+ProgressCallback = Callable[[ProgressEvent], Awaitable[None]]
+"""进度回调类型别名。"""
+
+
+# ---------------------------------------------------------------------------
 # Preflight 检查类型
 # ---------------------------------------------------------------------------
 
@@ -347,6 +374,8 @@ class TaskRecord(_StrictBase):
     cost_usd: float | None = None
     duration_ms: int | None = None
     error_message: str | None = None
+    last_activity_type: str | None = None
+    last_activity_summary: str | None = None
 
 
 # Approval 状态

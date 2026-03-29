@@ -40,6 +40,8 @@ class HeartbeatIndicator(Widget):
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self._spinner_index = 0
         self._elapsed_seconds = 0
+        self._activity_type: str = ""
+        self._activity_summary: str = ""
 
     def on_mount(self) -> None:
         """启动 1 秒定时器驱动 spinner 和经过时间更新。"""
@@ -68,11 +70,15 @@ class HeartbeatIndicator(Widget):
         max_rounds: int,
         cost_usd: float,
         started_at: float,
+        activity_type: str = "",
+        activity_summary: str = "",
     ) -> None:
         """接收 ATOApp 推送的心跳数据。
 
         Args:
             started_at: monotonic 时间戳（由 ATOApp 从 DB 的 ISO 时间转换）。
+            activity_type: 当前 agent 活动类型（可选）。
+            activity_summary: 当前 agent 活动摘要（可选）。
         """
         self.story_id = story_id
         self.current_phase = current_phase
@@ -80,6 +86,8 @@ class HeartbeatIndicator(Widget):
         self.max_rounds = max_rounds
         self.cost_usd = cost_usd
         self.started_at = started_at
+        self._activity_type = activity_type
+        self._activity_summary = activity_summary
 
     def render(self) -> Text:
         """渲染：◐ {story_id}  {phase}  R{round}/{max}  {progress}  ${cost}  {elapsed} ◐。"""
@@ -99,5 +107,7 @@ class HeartbeatIndicator(Widget):
         result.append(f"{bar}  ", style=RICH_COLORS["$text"])
         result.append(cost, style=RICH_COLORS["$text"])
         result.append(f"  {elapsed:>6}", style=RICH_COLORS["$muted"])
+        if self._activity_summary:
+            result.append(f"  {self._activity_summary[:40]}", style=RICH_COLORS["$accent"])
         result.append(f" {spinner}", style=color)
         return result

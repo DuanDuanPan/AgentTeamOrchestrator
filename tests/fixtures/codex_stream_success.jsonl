@@ -1,0 +1,5 @@
+{"type": "thread.started", "thread_id": "thread-abc-123"}
+{"type": "turn.started"}
+{"type": "item.started", "item": {"type": "agent_message"}}
+{"type": "item.completed", "item": {"type": "agent_message", "text": "The code looks good. No issues found."}}
+{"type": "turn.completed", "usage": {"input_tokens": 500, "cached_input_tokens": 100, "output_tokens": 200}}

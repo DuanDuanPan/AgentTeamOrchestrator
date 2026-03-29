@@ -254,6 +254,19 @@ async def _migrate_v7_to_v8(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE batches ADD COLUMN spec_committed BOOLEAN DEFAULT 0")
 
 
+@_register(9)
+async def _migrate_v8_to_v9(db: aiosqlite.Connection) -> None:
+    """v8 → v9: tasks 表新增 last_activity 列 + running task 索引（LLM 实时可观测性）。"""
+    for col in ("last_activity_type", "last_activity_summary"):
+        if not await _column_exists(db, "tasks", col):
+            await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_running_activity "
+        "ON tasks(story_id, status, phase, started_at) "
+        "WHERE status = 'running'"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

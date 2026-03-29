@@ -66,6 +66,7 @@ class FakeAdapter:
         options: dict[str, Any] | None = None,
         *,
         on_process_start: Any = None,
+        on_progress: Any = None,
     ) -> AdapterResult:
         self.call_count += 1
         if on_process_start:
@@ -612,3 +613,89 @@ class TestTelemetryPersistence:
         assert data["cache_read_input_tokens"] == 10624
         assert data["cli_tool"] == "codex"
         assert data["cost_usd"] == pytest.approx(0.03)
+
+
+# ---------------------------------------------------------------------------
+# Activity flush — 终态前显式 flush
+# ---------------------------------------------------------------------------
+
+
+class TestActivityFlush:
+    async def test_turn_end_activity_flushed_on_success(self, db_ready: Path) -> None:
+        """Fix: Codex turn_end 不在 _progress_wrapper 终态集合，
+        但 dispatch() 成功路径的显式 flush 仍能把最新 activity 落库。"""
+        from ato.models.schemas import ProgressEvent
+
+        result = _make_adapter_result()
+
+        class EmitTurnEndAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                on_progress = kw.get("on_progress")
+                if on_progress:
+                    # 模拟 Codex 的最后事件：turn_end（非 result/error）
+                    await on_progress(ProgressEvent(
+                        event_type="turn_end",
+                        summary="回合结束 (in=100 out=50)",
+                        cli_tool="codex",
+                        timestamp=datetime.now(tz=UTC),
+                        raw={"type": "turn.completed"},
+                    ))
+                return result
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=EmitTurnEndAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+        await mgr.dispatch(
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="codex",
+            prompt="test",
+        )
+
+        db = await get_connection(db_ready)
+        cursor = await db.execute(
+            "SELECT last_activity_type, last_activity_summary FROM tasks WHERE story_id = 'story-test'"
+        )
+        row = await cursor.fetchone()
+        await db.close()
+        assert row is not None
+        assert row[0] == "turn_end"
+        assert "回合结束" in row[1]
+
+    async def test_activity_flushed_on_failure(self, db_ready: Path) -> None:
+        """失败路径中，最后一条 activity 也被显式 flush 到 DB。"""
+        from ato.models.schemas import ProgressEvent
+
+        error = CLIAdapterError("boom", category=ErrorCategory.UNKNOWN, retryable=False)
+
+        class EmitThenFailAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                on_progress = kw.get("on_progress")
+                if on_progress:
+                    await on_progress(ProgressEvent(
+                        event_type="text",
+                        summary="正在处理...",
+                        cli_tool="claude",
+                        timestamp=datetime.now(tz=UTC),
+                        raw={"type": "assistant"},
+                    ))
+                raise error
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=EmitThenFailAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+        with pytest.raises(CLIAdapterError):
+            await mgr.dispatch(
+                story_id="story-test",
+                phase="dev",
+                role="developer",
+                cli_tool="claude",
+                prompt="test",
+            )
+
+        db = await get_connection(db_ready)
+        cursor = await db.execute(
+            "SELECT last_activity_type, last_activity_summary FROM tasks WHERE story_id = 'story-test'"
+        )
+        row = await cursor.fetchone()
+        await db.close()
+        assert row is not None
+        assert row[0] == "text"
+        assert "正在处理" in row[1]

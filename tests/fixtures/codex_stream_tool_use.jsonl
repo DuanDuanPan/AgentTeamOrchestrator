@@ -1,0 +1,8 @@
+{"type": "thread.started", "thread_id": "thread-tool-456"}
+{"type": "turn.started"}
+{"type": "item.started", "item": {"type": "function_call"}}
+{"type": "item.completed", "item": {"type": "function_call", "name": "read_file", "arguments": "{\"path\": \"/src/main.py\"}"}}
+{"type": "item.completed", "item": {"type": "function_call_output", "output": "file content here"}}
+{"type": "item.completed", "item": {"type": "command_execution", "call": {"command": "pytest tests/"}}}
+{"type": "item.completed", "item": {"type": "agent_message", "text": "All tests pass. The implementation is correct."}}
+{"type": "turn.completed", "usage": {"input_tokens": 1000, "cached_input_tokens": 200, "output_tokens": 400}}

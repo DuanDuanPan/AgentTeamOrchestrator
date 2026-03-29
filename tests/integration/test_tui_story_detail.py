@@ -10,12 +10,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from textual.containers import VerticalScroll
 from textual.widgets import ContentSwitcher
 
 from ato.models.db import get_connection, init_db
 from ato.tui.app import ATOApp
 from ato.tui.dashboard import DashboardScreen
 from ato.tui.story_detail import StoryDetailView
+from ato.tui.widgets.story_status_line import StoryStatusLine
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -376,3 +378,51 @@ async def test_tabbed_escape_restores_story_navigation_focus(
         await pilot.pause()
 
         assert dashboard._selected_item_id == "story:s2"
+
+
+async def test_non_running_story_list_updates_activity_via_story_status_line(
+    tui_db_path: Path,
+) -> None:
+    """非 running story 走终态 fallback 时，StoryStatusLine 渲染最新 activity。"""
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        await db.execute(
+            "INSERT INTO stories (story_id, title, status, current_phase, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s-terminal", "Terminal Story", "blocked", "reviewing", now, now),
+        )
+        await db.execute(
+            "INSERT INTO tasks (task_id, story_id, phase, role, cli_tool, status, "
+            "started_at, completed_at, last_activity_type, last_activity_summary) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "t-terminal",
+                "s-terminal",
+                "reviewing",
+                "reviewer",
+                "codex",
+                "failed",
+                now,
+                now,
+                "error",
+                "退出码 1: unknown",
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    app = ATOApp(db_path=tui_db_path)
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        await app.refresh_data()
+        await pilot.pause()
+
+        dashboard = app.query_one(DashboardScreen)
+        container = dashboard.query_one("#story-list-container", VerticalScroll)
+        story_lines = list(container.query(StoryStatusLine))
+
+        terminal_line = next((line for line in story_lines if line.story_id == "s-terminal"), None)
+        assert terminal_line is not None
+        assert "退出码 1: unknown" in terminal_line.render().plain

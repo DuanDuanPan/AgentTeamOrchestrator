@@ -319,3 +319,35 @@ class TestMigrationV8:
             row = await cursor.fetchone()
             assert row is not None
             assert row[0] == 8
+
+
+class TestMigrationV9:
+    """MIGRATIONS[9] — tasks 表新增 last_activity 列（LLM 实时可观测性）。"""
+
+    async def test_migrate_v8_to_v9(self, db_path: Path) -> None:
+        """AC 14: v8→v9 迁移新增两列。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, 9)
+            cursor = await db.execute("PRAGMA table_info(tasks)")
+            cols = {row[1] for row in await cursor.fetchall()}
+            assert "last_activity_type" in cols
+            assert "last_activity_summary" in cols
+
+    async def test_migrate_v8_to_v9_idempotent(self, db_path: Path) -> None:
+        """AC 14: 重复执行不报错。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, 9)
+            # 重置 version 重跑
+            await db.execute("PRAGMA user_version = 8")
+            await db.commit()
+            await run_migrations(db, 8, 9)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 9

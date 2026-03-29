@@ -7,13 +7,26 @@ BMAD skills 在 OAuth 模式下自动加载。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
-from ato.adapters.base import BaseAdapter, ProcessStartCallback, cleanup_process
-from ato.models.schemas import ClaudeOutput, CLIAdapterError, ErrorCategory
+from ato.adapters.base import (
+    BaseAdapter,
+    ProcessStartCallback,
+    cleanup_process,
+    drain_stderr,
+)
+from ato.models.schemas import (
+    CLIAdapterError,
+    ClaudeOutput,
+    ErrorCategory,
+    ProgressCallback,
+    ProgressEvent,
+)
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
@@ -44,6 +57,99 @@ def _classify_error(exit_code: int | None, stderr: str) -> tuple[ErrorCategory, 
     return ErrorCategory.UNKNOWN, False
 
 
+def _normalize_claude_event(raw: dict[str, Any]) -> ProgressEvent:
+    """将 Claude stream-json 原始事件归一化为 ProgressEvent。"""
+    now = datetime.now(tz=UTC)
+    event_type = raw.get("type", "")
+
+    if event_type == "system":
+        session_id = str(raw.get("session_id", ""))[:8]
+        return ProgressEvent(
+            event_type="init",
+            summary=f"会话初始化 (session={session_id})",
+            cli_tool="claude",
+            timestamp=now,
+            raw=raw,
+        )
+
+    if event_type == "assistant":
+        content = raw.get("message", {}).get("content", [])
+        # 按优先级扫描：tool_use > text
+        has_tool_use = False
+        tool_name = ""
+        has_text = False
+        text_preview = ""
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_use" and not has_tool_use:
+                has_tool_use = True
+                tool_name = item.get("name", "unknown")
+            elif item.get("type") == "text" and not has_text:
+                has_text = True
+                text_preview = str(item.get("text", ""))[:100]
+
+        if has_tool_use:
+            return ProgressEvent(
+                event_type="tool_use",
+                summary=f"调用工具: {tool_name}",
+                cli_tool="claude",
+                timestamp=now,
+                raw=raw,
+            )
+        if has_text:
+            return ProgressEvent(
+                event_type="text",
+                summary=text_preview,
+                cli_tool="claude",
+                timestamp=now,
+                raw=raw,
+            )
+        return ProgressEvent(
+            event_type="other",
+            summary="assistant",
+            cli_tool="claude",
+            timestamp=now,
+            raw=raw,
+        )
+
+    if event_type == "user":
+        return ProgressEvent(
+            event_type="tool_result",
+            summary="工具返回",
+            cli_tool="claude",
+            timestamp=now,
+            raw=raw,
+        )
+
+    if event_type == "result":
+        cost = raw.get("total_cost_usd", 0.0)
+        return ProgressEvent(
+            event_type="result",
+            summary=f"完成 (cost=${cost:.4f})",
+            cli_tool="claude",
+            timestamp=now,
+            raw=raw,
+        )
+
+    if event_type == "rate_limit_event":
+        return ProgressEvent(
+            event_type="other",
+            summary="rate_limit_event",
+            cli_tool="claude",
+            timestamp=now,
+            raw=raw,
+        )
+
+    return ProgressEvent(
+        event_type="other",
+        summary=str(event_type) if event_type else "unknown",
+        cli_tool="claude",
+        timestamp=now,
+        raw=raw,
+    )
+
+
 def build_interactive_command(
     prompt: str,
     *,
@@ -68,7 +174,7 @@ class ClaudeAdapter(BaseAdapter):
     """Claude CLI 适配器。
 
     通过 ``asyncio.create_subprocess_exec`` 执行 ``claude -p`` 命令，
-    解析 JSON stdout，分类 stderr 错误。
+    解析 stream-json stdout 事件流，分类 stderr 错误。
     """
 
     def _build_command(
@@ -77,7 +183,10 @@ class ClaudeAdapter(BaseAdapter):
         options: dict[str, Any] | None = None,
     ) -> list[str]:
         """构建 claude CLI 命令参数列表。"""
-        cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt, "--output-format", "json"]
+        cmd = [
+            "claude", "--dangerously-skip-permissions", "-p", prompt,
+            "--output-format", "stream-json", "--verbose",
+        ]
         if options:
             if model := options.get("model"):
                 cmd.extend(["--model", str(model)])
@@ -91,12 +200,46 @@ class ClaudeAdapter(BaseAdapter):
                 cmd.extend(["--resume", str(resume)])
         return cmd
 
+    async def _consume_stream(
+        self,
+        stdout: asyncio.StreamReader,
+        on_progress: ProgressCallback | None,
+    ) -> dict[str, Any] | None:
+        """逐行读取 stream-json stdout，收集 result 事件并透传 ProgressEvent。
+
+        Returns:
+            result 事件 dict，或 None（如果未收到 result 事件）。
+            调用方根据 exit_code 决定如何处理 None。
+        """
+        result_data: dict[str, Any] | None = None
+        while True:
+            line = await stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except json.JSONDecodeError:
+                logger.warning("claude_stream_json_parse_skip", line_preview=text[:100])
+                continue
+            if event.get("type") == "result":
+                result_data = event
+            if on_progress is not None:
+                try:
+                    await on_progress(_normalize_claude_event(event))
+                except Exception:
+                    logger.warning("progress_callback_error", exc_info=True)
+        return result_data
+
     async def execute(
         self,
         prompt: str,
         options: dict[str, Any] | None = None,
         *,
         on_process_start: ProcessStartCallback | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> ClaudeOutput:
         """执行 Claude CLI 并返回结构化结果。"""
         cmd = self._build_command(prompt, options)
@@ -111,15 +254,29 @@ class ClaudeAdapter(BaseAdapter):
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
+        stderr_task = asyncio.create_task(drain_stderr(proc.stderr))  # type: ignore[arg-type]
         try:
             if on_process_start is not None:
                 await on_process_start(proc)
 
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=timeout_seconds,
-            )
+            # timeout 覆盖整个子进程生命周期（stdout + stderr + wait），
+            # 而非仅 _consume_stream，防止进程关闭 stdout 后僵死
+            async with asyncio.timeout(timeout_seconds):
+                result_data = await self._consume_stream(
+                    proc.stdout, on_progress,  # type: ignore[arg-type]
+                )
+                stderr = await stderr_task
+                await proc.wait()
         except TimeoutError as exc:
+            if on_progress:
+                with contextlib.suppress(Exception):
+                    await on_progress(ProgressEvent(
+                        event_type="error",
+                        summary=f"超时 ({timeout_seconds}s)",
+                        cli_tool="claude",
+                        timestamp=datetime.now(tz=UTC),
+                        raw={},
+                    ))
             await cleanup_process(proc)
             raise CLIAdapterError(
                 f"Claude CLI timed out after {timeout_seconds}s",
@@ -129,15 +286,15 @@ class ClaudeAdapter(BaseAdapter):
         except BaseException:
             await cleanup_process(proc)
             raise
-        else:
-            # communicate() 完成后 proc.returncode 已设置，无需额外清理
-            pass
+        finally:
+            if not stderr_task.done():
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stderr_task
 
         exit_code = proc.returncode or 0
-        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-
         if exit_code != 0:
+            stderr = stderr_task.result() if stderr_task.done() else ""
             category, retryable = _classify_error(exit_code, stderr)
             logger.warning(
                 "claude_adapter_error",
@@ -145,6 +302,15 @@ class ClaudeAdapter(BaseAdapter):
                 category=category.value,
                 stderr_preview=stderr[:200],
             )
+            if on_progress:
+                with contextlib.suppress(Exception):
+                    await on_progress(ProgressEvent(
+                        event_type="error",
+                        summary=f"退出码 {exit_code}: {category.value}",
+                        cli_tool="claude",
+                        timestamp=datetime.now(tz=UTC),
+                        raw={},
+                    ))
             raise CLIAdapterError(
                 f"Claude CLI exited with code {exit_code}",
                 category=category,
@@ -153,19 +319,24 @@ class ClaudeAdapter(BaseAdapter):
                 retryable=retryable,
             )
 
-        # 解析 JSON stdout
-        try:
-            json_data = json.loads(stdout)
-        except (json.JSONDecodeError, ValueError) as exc:
+        # exit_code == 0 但未收到 result 事件 → parse error
+        if result_data is None:
+            if on_progress:
+                with contextlib.suppress(Exception):
+                    await on_progress(ProgressEvent(
+                        event_type="error",
+                        summary="stream-json 未收到 result 事件",
+                        cli_tool="claude",
+                        timestamp=datetime.now(tz=UTC),
+                        raw={},
+                    ))
             raise CLIAdapterError(
-                f"Failed to parse Claude CLI JSON output: {exc}",
+                "stream-json 未收到 result 事件",
                 category=ErrorCategory.PARSE_ERROR,
-                stderr=stderr,
-                exit_code=exit_code,
                 retryable=False,
-            ) from exc
+            )
 
-        result = ClaudeOutput.from_json(json_data, exit_code=exit_code)
+        result = ClaudeOutput.from_json(result_data, exit_code=exit_code)
         logger.info(
             "claude_adapter_success",
             cost_usd=result.cost_usd,

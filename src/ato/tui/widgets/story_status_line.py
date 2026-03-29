@@ -66,6 +66,9 @@ class StoryStatusLine(Widget):
     cl_round: reactive[int] = reactive(0)
     cl_max_rounds: reactive[int] = reactive(3)
 
+    _activity_type: str = ""
+    _activity_summary: str = ""
+
     def update_data(
         self,
         *,
@@ -76,6 +79,8 @@ class StoryStatusLine(Widget):
         elapsed_seconds: int,
         cl_round: int,
         cl_max_rounds: int,
+        activity_type: str = "",
+        activity_summary: str = "",
     ) -> None:
         """批量更新 reactive 属性。"""
         self.story_id = story_id
@@ -85,6 +90,8 @@ class StoryStatusLine(Widget):
         self.elapsed_seconds = elapsed_seconds
         self.cl_round = cl_round
         self.cl_max_rounds = cl_max_rounds
+        self._activity_type = activity_type
+        self._activity_summary = activity_summary
 
     def render(self) -> Text:
         """渲染格式：{icon} {story_id}  {phase}  {progress_bar}  {elapsed}  ${cost}。"""
@@ -104,4 +111,6 @@ class StoryStatusLine(Widget):
         result.append(f"  {bar}  ", style=RICH_COLORS["$text"])
         result.append(f"{elapsed:>6}", style=RICH_COLORS["$muted"])
         result.append(f"  {cost}", style=RICH_COLORS["$text"])
+        if self._activity_summary:
+            result.append(f"  {self._activity_summary[:40]}", style=RICH_COLORS["$accent"])
         return result

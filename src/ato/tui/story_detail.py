@@ -20,6 +20,7 @@ from textual.widgets import Static
 
 from ato.state_machine import CANONICAL_PHASES
 from ato.tui.theme import RICH_COLORS
+from ato.tui.widgets.agent_activity import AgentActivityWidget
 from ato.tui.widgets.convergent_loop_progress import ConvergentLoopProgress
 
 # Phase order for flow visualization — aligned with state_machine.py
@@ -66,6 +67,7 @@ class StoryDetailView(Widget):
             yield Static(id="detail-phase-flow")
             yield Static(id="detail-summary")
             yield ConvergentLoopProgress(id="detail-cl-progress")
+            yield AgentActivityWidget(id="detail-agent-activity")
             yield Static(id="detail-expanded")
 
     def update_detail(
@@ -95,6 +97,23 @@ class StoryDetailView(Widget):
         # 进入详情页时重置展开状态
         self._expanded_view = None
         self._render_all()
+
+    def update_activity_only(self, *, activity_type: str, activity_summary: str) -> None:
+        """仅更新 agent activity 指示器，不影响其他 UI 状态。"""
+        try:
+            self.query_one("#detail-agent-activity", AgentActivityWidget).update_activity(
+                activity_type=activity_type,
+                activity_summary=activity_summary,
+            )
+        except Exception:
+            pass  # widget 尚未挂载
+
+    def clear_activity_only(self) -> None:
+        """清除 agent activity 指示器。"""
+        try:
+            self.query_one("#detail-agent-activity", AgentActivityWidget).clear_activity()
+        except Exception:
+            pass  # widget 尚未挂载
 
     def _render_all(self) -> None:
         """渲染所有区块。"""

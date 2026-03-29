@@ -1,0 +1,7 @@
+{"type": "system", "subtype": "init", "session_id": "sess-tool-789", "tools": ["Read", "Write"], "model": "claude-opus-4-6"}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "tu_1", "name": "Read", "input": {"file_path": "/src/main.py"}}]}, "session_id": "sess-tool-789"}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "file content here"}]}, "session_id": "sess-tool-789"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I've read the file. Here is the analysis."}, {"type": "tool_use", "id": "tu_2", "name": "Write", "input": {"file_path": "/src/main.py", "content": "updated"}}]}, "session_id": "sess-tool-789"}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu_2", "content": "ok"}]}, "session_id": "sess-tool-789"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Done, the file has been updated."}]}, "session_id": "sess-tool-789"}
+{"type": "result", "subtype": "success", "result": "Done, the file has been updated.", "session_id": "sess-tool-789", "total_cost_usd": 0.035, "usage": {"input_tokens": 2048, "output_tokens": 512, "cache_read_input_tokens": 1024}, "duration_ms": 8500, "modelUsage": {"model": "claude-opus-4-6"}}

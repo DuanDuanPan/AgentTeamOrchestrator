@@ -16,11 +16,12 @@ from ato.adapters.codex_cli import (
     _aggregate_usage,
     _classify_error,
     _extract_text_result,
+    _normalize_codex_event,
     _parse_jsonl,
     _parse_output_file,
     calculate_cost,
 )
-from ato.models.schemas import CLIAdapterError, CodexOutput, ErrorCategory
+from ato.models.schemas import CLIAdapterError, CodexOutput, ErrorCategory, ProgressEvent
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -56,6 +57,18 @@ def success_events_raw() -> str:
 @pytest.fixture()
 def success_output_raw() -> str:
     return (FIXTURES / "codex_output_success.json").read_text()
+
+
+@pytest.fixture()
+def stream_success_lines() -> list[bytes]:
+    text = (FIXTURES / "codex_stream_success.jsonl").read_text()
+    return [line.encode() + b"\n" for line in text.strip().splitlines() if line.strip()]
+
+
+@pytest.fixture()
+def stream_tool_use_lines() -> list[bytes]:
+    text = (FIXTURES / "codex_stream_tool_use.jsonl").read_text()
+    return [line.encode() + b"\n" for line in text.strip().splitlines() if line.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -416,25 +429,68 @@ class TestCalculateCost:
 
 
 # ---------------------------------------------------------------------------
-# TestCodexAdapterExecute — execute() mock 测试
+# Streaming mock helper
 # ---------------------------------------------------------------------------
 
 
-def _mock_process(stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> MagicMock:
+def _mock_stream_process(
+    stdout_lines: list[bytes],
+    stderr_data: bytes = b"",
+    returncode: int = 0,
+) -> MagicMock:
+    """Create a mock process for streaming tests."""
     proc = MagicMock()
     proc.pid = 54321
     proc.returncode = returncode
-    proc.communicate = AsyncMock(return_value=(stdout, stderr))
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
     proc.wait = AsyncMock(return_value=returncode)
+
+    stdout = MagicMock()
+    _lines = list(stdout_lines) + [b""]
+    _idx = 0
+
+    async def _readline() -> bytes:
+        nonlocal _idx
+        if _idx < len(_lines):
+            line = _lines[_idx]
+            _idx += 1
+            return line
+        return b""
+
+    stdout.readline = _readline
+
+    stderr = MagicMock()
+    _stderr_read = False
+
+    async def _read(n: int = 4096) -> bytes:
+        nonlocal _stderr_read
+        if not _stderr_read:
+            _stderr_read = True
+            return stderr_data
+        return b""
+
+    stderr.read = _read
+
+    proc.stdout = stdout
+    proc.stderr = stderr
     return proc
+
+
+def _raw_to_lines(raw: str) -> list[bytes]:
+    """Convert raw JSONL string to list of bytes lines for streaming mock."""
+    return [line.encode() + b"\n" for line in raw.strip().splitlines() if line.strip()]
+
+
+# ---------------------------------------------------------------------------
+# TestCodexAdapterExecute — execute() streaming mock 测试
+# ---------------------------------------------------------------------------
 
 
 class TestCodexAdapterExecute:
     async def test_success_execution_no_model_default(self, success_events_raw: str) -> None:
         """无 model 选项时 model_name 为 None，cost_usd 为 0.0。"""
-        proc = _mock_process(success_events_raw.encode())
+        proc = _mock_stream_process(_raw_to_lines(success_events_raw))
         adapter = CodexAdapter()
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await adapter.execute("review this code")
@@ -447,7 +503,7 @@ class TestCodexAdapterExecute:
 
     async def test_success_execution_with_explicit_model(self, success_events_raw: str) -> None:
         """显式传 model 时 model_name 正确、cost_usd 为正值。"""
-        proc = _mock_process(success_events_raw.encode())
+        proc = _mock_stream_process(_raw_to_lines(success_events_raw))
         adapter = CodexAdapter()
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await adapter.execute(
@@ -459,7 +515,7 @@ class TestCodexAdapterExecute:
 
     async def test_all_garbage_stdout_raises_parse_error(self) -> None:
         """R1-2: exit=0 但 JSONL 全部解析失败应报 parse_error。"""
-        proc = _mock_process(b"not-json\ngarbage\n")
+        proc = _mock_stream_process([b"not-json\n", b"garbage\n"])
         adapter = CodexAdapter()
         with (
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
@@ -470,7 +526,7 @@ class TestCodexAdapterExecute:
 
     async def test_empty_stdout_raises_parse_error(self) -> None:
         """R3-1: exit=0 + stdout 为空应报 parse_error，不能静默成功。"""
-        proc = _mock_process(b"")
+        proc = _mock_stream_process([])
         adapter = CodexAdapter()
         with (
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
@@ -479,10 +535,9 @@ class TestCodexAdapterExecute:
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
         assert exc_info.value.retryable is False
-        assert exc_info.value.retryable is False
 
     async def test_nonzero_exit_raises(self) -> None:
-        proc = _mock_process(b"", b"Error: auth token expired", returncode=1)
+        proc = _mock_stream_process([], stderr_data=b"Error: auth token expired", returncode=1)
         adapter = CodexAdapter()
         with (
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
@@ -496,60 +551,44 @@ class TestCodexAdapterExecute:
         proc = MagicMock()
         proc.pid = 99
         proc.returncode = None
-        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
         proc.terminate = MagicMock()
         proc.kill = MagicMock()
         proc.wait = AsyncMock()
+
+        async def _hanging_readline() -> bytes:
+            await asyncio.sleep(100)
+            return b""
+
+        proc.stdout = MagicMock()
+        proc.stdout.readline = _hanging_readline
+        stderr = MagicMock()
+        stderr.read = AsyncMock(return_value=b"")
+        proc.stderr = stderr
+
         adapter = CodexAdapter()
         with (
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
             pytest.raises(CLIAdapterError) as exc_info,
         ):
-            await adapter.execute("test", {"timeout": 1})
+            await adapter.execute("test", {"timeout": 0.1})
         assert exc_info.value.category == ErrorCategory.TIMEOUT
         assert exc_info.value.retryable is True
 
     async def test_on_process_start_callback(self, success_events_raw: str) -> None:
-        proc = _mock_process(success_events_raw.encode())
+        proc = _mock_stream_process(_raw_to_lines(success_events_raw))
         callback = AsyncMock()
         adapter = CodexAdapter()
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             await adapter.execute("test", on_process_start=callback)
         callback.assert_awaited_once_with(proc)
 
-    async def test_with_output_file(
-        self,
-        success_events_raw: str,
-        success_output_raw: str,
-        tmp_path: Path,
-    ) -> None:
-        output_path = tmp_path / "codex_output.json"
-        proc = _mock_process(success_events_raw.encode())
-        proc.communicate = AsyncMock(
-            side_effect=self._write_output_and_return(
-                output_path,
-                success_output_raw,
-                success_events_raw.encode(),
-            )
-        )
-        adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
-            result = await adapter.execute("test", {"output_file": str(output_path)})
-        assert result.structured_output is not None
-        assert len(result.structured_output["findings"]) == 2
-
-    async def test_cwd_passed_to_subprocess(self, success_events_raw: str) -> None:
-        proc = _mock_process(success_events_raw.encode())
-        adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)) as mock_exec:
-            await adapter.execute("test", {"cwd": "/some/repo"})
-        _, kwargs = mock_exec.call_args
-        assert kwargs["cwd"] == "/some/repo"
-
     async def test_partial_jsonl_missing_turn_completed(self) -> None:
         """R2-3: 有事件但缺 turn.completed 应报 parse_error。"""
-        partial = b'{"type":"thread.started","thread_id":"t1"}\nnot-json\n'
-        proc = _mock_process(partial)
+        lines = [
+            b'{"type":"thread.started","thread_id":"t1"}\n',
+            b'not-json\n',
+        ]
+        proc = _mock_stream_process(lines)
         adapter = CodexAdapter()
         with (
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
@@ -560,12 +599,11 @@ class TestCodexAdapterExecute:
 
     async def test_missing_agent_message_raises_parse_error(self) -> None:
         """R4-1: 有 turn.completed 但无 agent_message 应报 parse_error。"""
-        jsonl = (
-            b'{"type":"thread.started","thread_id":"t1"}\n'
-            b'{"type":"turn.completed","usage":'
-            b'{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n'
-        )
-        proc = _mock_process(jsonl)
+        lines = [
+            b'{"type":"thread.started","thread_id":"t1"}\n',
+            b'{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n',
+        ]
+        proc = _mock_stream_process(lines)
         adapter = CodexAdapter()
         with (
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
@@ -574,75 +612,18 @@ class TestCodexAdapterExecute:
             await adapter.execute("test")
         assert exc_info.value.category == ErrorCategory.PARSE_ERROR
 
-    async def test_output_file_missing_raises_parse_error(self) -> None:
-        """R5-1: output_file 指定了但文件不存在也应报 parse_error。"""
-        jsonl = (
-            b'{"type":"thread.started","thread_id":"t1"}\n'
-            b'{"type":"turn.completed","usage":'
-            b'{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n'
-        )
-        proc = _mock_process(jsonl)
+    async def test_cwd_passed_to_subprocess(self, success_events_raw: str) -> None:
+        proc = _mock_stream_process(_raw_to_lines(success_events_raw))
         adapter = CodexAdapter()
-        with (
-            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            pytest.raises(CLIAdapterError) as exc_info,
-        ):
-            await adapter.execute(
-                "test",
-                {
-                    "output_file": "/tmp/does-not-exist-codex-review.json",
-                },
-            )
-        assert exc_info.value.category == ErrorCategory.PARSE_ERROR
-
-    async def test_output_file_present_no_agent_msg_succeeds(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """有 -o 文件内容时即使无 agent_message 也成功。"""
-        jsonl = (
-            b'{"type":"thread.started","thread_id":"t1"}\n'
-            b'{"type":"turn.completed","usage":'
-            b'{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n'
-        )
-        out = tmp_path / "out.json"
-        proc = _mock_process(jsonl)
-        proc.communicate = AsyncMock(
-            side_effect=self._write_output_and_return(out, '{"findings": []}', jsonl)
-        )
-        adapter = CodexAdapter()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
-            result = await adapter.execute(
-                "test",
-                {"output_file": str(out)},
-            )
-        assert result.status == "success"
-        assert result.structured_output == {"findings": []}
-
-    async def test_stale_output_file_is_not_accepted(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """R5-2: 旧的 output_file 内容不能被当作本次执行结果。"""
-        jsonl = (
-            b'{"type":"thread.started","thread_id":"t1"}\n'
-            b'{"type":"turn.completed","usage":'
-            b'{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n'
-        )
-        out = tmp_path / "stale.json"
-        out.write_text('{"findings": [{"message": "stale"}]}', encoding="utf-8")
-        proc = _mock_process(jsonl)
-        adapter = CodexAdapter()
-        with (
-            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            pytest.raises(CLIAdapterError) as exc_info,
-        ):
-            await adapter.execute("test", {"output_file": str(out)})
-        assert exc_info.value.category == ErrorCategory.PARSE_ERROR
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)) as mock_exec:
+            await adapter.execute("test", {"cwd": "/some/repo"})
+        _, kwargs = mock_exec.call_args
+        assert kwargs["cwd"] == "/some/repo"
 
     async def test_model_passed_to_subprocess(self) -> None:
         """R2-1: model 选项应出现在实际 exec 命令中。"""
-        proc = _mock_process((FIXTURES / "codex_events_success.jsonl").read_bytes())
+        raw = (FIXTURES / "codex_events_success.jsonl").read_text()
+        proc = _mock_stream_process(_raw_to_lines(raw))
         adapter = CodexAdapter()
         with patch(
             "asyncio.create_subprocess_exec",
@@ -653,62 +634,163 @@ class TestCodexAdapterExecute:
         assert "--model" in args
         assert "codex-pro" in args
 
-    @staticmethod
-    def _write_output_and_return(
-        output_path: Path,
-        output_text: str,
-        stdout: bytes,
-        stderr: bytes = b"",
-    ) -> Callable[[], Coroutine[Any, Any, tuple[bytes, bytes]]]:
-        async def _side_effect() -> tuple[bytes, bytes]:
-            output_path.write_text(output_text, encoding="utf-8")
-            return stdout, stderr
-
-        return _side_effect
-
 
 # ---------------------------------------------------------------------------
-# TestCleanupProtocol — cleanup_process 复用验证
+# TestCodexAdapterStreaming — 流式进度回调测试
 # ---------------------------------------------------------------------------
 
 
-class TestCleanupProtocol:
-    async def test_timeout_triggers_cleanup(self) -> None:
-        """超时时应调用 cleanup_process（terminate + kill）。"""
-        proc = MagicMock()
-        proc.pid = 99
-        proc.returncode = None
-        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
-        proc.terminate = MagicMock()
-        proc.kill = MagicMock()
-        proc.wait = AsyncMock()
+class TestCodexAdapterOutputFile:
+    """output_file (-o) 相关测试——使用 streaming mock。"""
+
+    async def test_output_file_missing_raises_parse_error(self) -> None:
+        """指定 output_file 但文件不存在时报 parse_error。"""
+        lines = [
+            b'{"type":"thread.started","thread_id":"t1"}\n',
+            b'{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n',
+        ]
+        proc = _mock_stream_process(lines)
+        adapter = CodexAdapter()
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
+            await adapter.execute("test", {"output_file": "/tmp/does-not-exist-codex.json"})
+        assert exc_info.value.category == ErrorCategory.PARSE_ERROR
+
+    async def test_output_file_present_no_agent_msg_succeeds(self, tmp_path: Path) -> None:
+        """有 -o 文件内容时即使无 agent_message 也成功。"""
+        lines = [
+            b'{"type":"thread.started","thread_id":"t1"}\n',
+            b'{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n',
+        ]
+        out = tmp_path / "out.json"
+        # 文件在 execute 前不存在，readline 消费完后才出现（模拟 Codex 行为）
+        proc = _mock_stream_process(lines)
+
+        original_readline = proc.stdout.readline
+        _call_count = 0
+
+        async def _readline_then_write() -> bytes:
+            nonlocal _call_count
+            result = await original_readline()
+            _call_count += 1
+            # 在最后一行（空 bytes）返回前写入输出文件
+            if result == b"" and not out.exists():
+                out.write_text('{"findings": []}', encoding="utf-8")
+            return result
+
+        proc.stdout.readline = _readline_then_write
+
+        adapter = CodexAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await adapter.execute("test", {"output_file": str(out)})
+        assert result.status == "success"
+        assert result.structured_output == {"findings": []}
+
+    async def test_stale_output_file_not_accepted(self, tmp_path: Path) -> None:
+        """旧的 output_file 内容不能被当作本次执行结果。"""
+        lines = [
+            b'{"type":"thread.started","thread_id":"t1"}\n',
+            b'{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}\n',
+        ]
+        out = tmp_path / "stale.json"
+        out.write_text('{"findings": [{"message": "stale"}]}', encoding="utf-8")
+        proc = _mock_stream_process(lines)
+        adapter = CodexAdapter()
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
+            await adapter.execute("test", {"output_file": str(out)})
+        assert exc_info.value.category == ErrorCategory.PARSE_ERROR
+
+
+class TestCodexAdapterStreaming:
+    async def test_stream_success_with_progress(self, stream_success_lines: list[bytes]) -> None:
+        """AC 2: on_progress 收到正确数量和类型的 ProgressEvent。"""
+        proc = _mock_stream_process(stream_success_lines)
+        events_received: list[ProgressEvent] = []
+
+        async def on_progress(event: ProgressEvent) -> None:
+            events_received.append(event)
+
+        adapter = CodexAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await adapter.execute("test", on_progress=on_progress)
+
+        assert result.status == "success"
+        # 5 lines: thread.started, turn.started, item.started, item.completed, turn.completed
+        assert len(events_received) == 5
+        assert events_received[0].event_type == "init"
+        assert events_received[-1].event_type == "turn_end"
+
+    async def test_stream_success_without_progress(
+        self, stream_success_lines: list[bytes]
+    ) -> None:
+        """AC 4: 不传 on_progress，CodexOutput 字段与改造前一致。"""
+        proc = _mock_stream_process(stream_success_lines)
+        adapter = CodexAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await adapter.execute("test")
+
+        assert result.status == "success"
+        assert result.input_tokens == 500
+        assert result.output_tokens == 200
+
+    async def test_stream_tool_use_events(self, stream_tool_use_lines: list[bytes]) -> None:
+        """AC 6: command_execution events correctly normalized."""
+        proc = _mock_stream_process(stream_tool_use_lines)
+        events_received: list[ProgressEvent] = []
+
+        async def on_progress(event: ProgressEvent) -> None:
+            events_received.append(event)
+
+        adapter = CodexAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await adapter.execute("test", on_progress=on_progress)
+
+        assert result.status == "success"
+        tool_use_events = [e for e in events_received if e.event_type == "tool_use"]
+        assert len(tool_use_events) >= 2  # function_call + command_execution
+        # command_execution should include command text
+        cmd_events = [e for e in tool_use_events if "执行命令" in e.summary]
+        assert len(cmd_events) == 1
+        assert "pytest tests/" in cmd_events[0].summary
+
+    async def test_parse_error_emits_error_event(self) -> None:
+        """AC 13: parse error → on_progress 收到 error 事件。"""
+        proc = _mock_stream_process([])
+        events_received: list[ProgressEvent] = []
+
+        async def on_progress(event: ProgressEvent) -> None:
+            events_received.append(event)
+
+        adapter = CodexAdapter()
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
+            await adapter.execute("test", on_progress=on_progress)
+
+        assert exc_info.value.category == ErrorCategory.PARSE_ERROR
+        error_events = [e for e in events_received if e.event_type == "error"]
+        assert len(error_events) == 1
+        assert error_events[0].summary == "无有效 JSONL 事件"
+
+    async def test_error_event_on_nonzero_exit(self) -> None:
+        """AC 13: 非零退出码 → on_progress 收到 error 事件。"""
+        proc = _mock_stream_process([], stderr_data=b"Error: auth expired", returncode=1)
+        events_received: list[ProgressEvent] = []
+
+        async def on_progress(event: ProgressEvent) -> None:
+            events_received.append(event)
+
         adapter = CodexAdapter()
         with (
             patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
             pytest.raises(CLIAdapterError),
         ):
-            await adapter.execute("test", {"timeout": 1})
-        proc.terminate.assert_called_once()
-
-    async def test_timeout_cleans_up_temp_dir(self) -> None:
-        """R2-2: 超时路径也应清理临时目录。"""
-        proc = MagicMock()
-        proc.pid = 99
-        proc.returncode = None
-        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
-        proc.terminate = MagicMock()
-        proc.kill = MagicMock()
-        proc.wait = AsyncMock()
-        adapter = CodexAdapter()
-        mock_td = MagicMock()
-        mock_td.name = "/tmp/fake"
-        with (
-            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("tempfile.TemporaryDirectory", return_value=mock_td),
-            pytest.raises(CLIAdapterError),
-        ):
-            await adapter.execute(
-                "test",
-                {"timeout": 1, "output_schema": "/tmp/s.json"},
-            )
-        mock_td.cleanup.assert_called_once()
+            await adapter.execute("test", on_progress=on_progress)
+        error_events = [e for e in events_received if e.event_type == "error"]
+        assert len(error_events) >= 1

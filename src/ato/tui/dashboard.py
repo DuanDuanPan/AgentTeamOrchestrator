@@ -133,6 +133,8 @@ class DashboardScreen(Widget):
         self._detail_story_id: str | None = None
         # Task 计数（轻量轮询）
         self._story_task_counts: dict[str, int] = {}
+        # Story 级 activity 数据（LLM 实时可观测性）
+        self._story_activity: dict[str, tuple[str, str]] = {}
 
     def compose(self) -> ComposeResult:
         yield SearchPanel(id="search-panel")
@@ -834,6 +836,7 @@ class DashboardScreen(Widget):
         total_cost_usd: float | None = None,
         recent_events: list[dict[str, str]] | None = None,
         story_task_counts: dict[str, int] | None = None,
+        story_activity: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         """更新仪表盘数据（所有模式同步）。保持向后兼容。"""
         self._story_count = story_count
@@ -870,8 +873,36 @@ class DashboardScreen(Widget):
             self._recent_events = recent_events
         if story_task_counts is not None:
             self._story_task_counts = story_task_counts
+        if story_activity is not None:
+            self._story_activity = story_activity
 
         self._refresh_placeholders()
+
+        # detail mode 下仅刷新 agent activity，不重置展开状态
+        if self._in_detail_mode:
+            self._refresh_detail_activity()
+
+    def _refresh_detail_activity(self) -> None:
+        """detail mode 下仅刷新 agent activity，不重置展开状态。"""
+        if not self._in_detail_mode or not self._detail_story_id:
+            return
+        activity = getattr(self, "_story_activity", {}).get(self._detail_story_id)
+        from ato.tui.app import ATOApp
+
+        app = self.app
+        layout = getattr(app, "layout_mode", "three-panel") if isinstance(app, ATOApp) else "three-panel"
+        selector = "#right-top-detail" if layout == "three-panel" else "#tab-story-detail"
+        try:
+            detail_view = self.query_one(selector, StoryDetailView)
+            if activity:
+                detail_view.update_activity_only(
+                    activity_type=activity[0],
+                    activity_summary=activity[1],
+                )
+            else:
+                detail_view.clear_activity_only()
+        except Exception:
+            pass  # view 尚未挂载
 
     # ------------------------------------------------------------------
     # 渲染逻辑
@@ -1045,6 +1076,7 @@ class DashboardScreen(Widget):
                 cl_round = self._story_cl_rounds.get(sid, 0)
                 elapsed = self._compute_elapsed(sid)
 
+                act = self._story_activity.get(sid, ("", ""))
                 if status == "in_progress" and sid in self._story_started_at:
                     hb_w = HeartbeatIndicator(id=f"{prefix_hb}-{sid}", classes="story-row")
                     container.mount(hb_w)
@@ -1056,6 +1088,8 @@ class DashboardScreen(Widget):
                         max_rounds=self._convergent_loop_max_rounds,
                         cost_usd=cost,
                         started_at=started_mono,
+                        activity_type=act[0],
+                        activity_summary=act[1],
                     )
                 else:
                     ssl_w = StoryStatusLine(id=f"{prefix_ssl}-{sid}", classes="story-row")
@@ -1068,6 +1102,8 @@ class DashboardScreen(Widget):
                         elapsed_seconds=elapsed,
                         cl_round=cl_round,
                         cl_max_rounds=self._convergent_loop_max_rounds,
+                        activity_type=act[0],
+                        activity_summary=act[1],
                     )
 
             if is_primary:
@@ -1104,6 +1140,7 @@ class DashboardScreen(Widget):
                 cl_round = self._story_cl_rounds.get(sid, 0)
                 elapsed = self._compute_elapsed(sid)
 
+                act = self._story_activity.get(sid, ("", ""))
                 if status == "in_progress" and sid in self._story_started_at:
                     try:
                         hb = container.query_one(f"#{prefix}-{sid}", HeartbeatIndicator)
@@ -1115,6 +1152,8 @@ class DashboardScreen(Widget):
                             max_rounds=self._convergent_loop_max_rounds,
                             cost_usd=cost,
                             started_at=started_mono,
+                            activity_type=act[0],
+                            activity_summary=act[1],
                         )
                     except Exception:
                         pass
@@ -1129,6 +1168,8 @@ class DashboardScreen(Widget):
                             elapsed_seconds=elapsed,
                             cl_round=cl_round,
                             cl_max_rounds=self._convergent_loop_max_rounds,
+                            activity_type=act[0],
+                            activity_summary=act[1],
                         )
                     except Exception:
                         pass

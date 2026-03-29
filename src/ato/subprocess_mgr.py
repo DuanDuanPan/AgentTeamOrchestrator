@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,6 +26,8 @@ from ato.models.schemas import (
     CLIAdapterError,
     CodexOutput,
     CostLogRecord,
+    ProgressCallback,
+    ProgressEvent,
     TaskRecord,
 )
 
@@ -170,6 +174,7 @@ class SubprocessManager:
         options: dict[str, Any] | None = None,
         task_id: str | None = None,
         is_retry: bool = False,
+        on_progress: ProgressCallback | None = None,
     ) -> AdapterResult:
         """调度一次 CLI agent 调用。
 
@@ -179,8 +184,15 @@ class SubprocessManager:
             task_id: 外部提供的 task_id，用于重试场景复用同一逻辑任务。
                      为 None 时自动生成。
             is_retry: True 表示此次调用是对同一 task_id 的重试（UPDATE 而非 INSERT）。
+            on_progress: 实时进度回调，透传给 adapter.execute()。
         """
-        from ato.models.db import get_connection, insert_cost_log, insert_task, update_task_status
+        from ato.models.db import (
+            get_connection,
+            insert_cost_log,
+            insert_task,
+            update_task_activity,
+            update_task_status,
+        )
 
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -206,6 +218,56 @@ class SubprocessManager:
                 finally:
                     await db2.close()
                 logger.info("pid_registered", pid=pid)
+
+        # --- latest-only, serialized activity writer ---
+        _THROTTLE_INTERVAL: float = 1.0
+        _last_flush_mono: float = 0.0
+        _latest_event: ProgressEvent | None = None
+        _delayed_flush_task: asyncio.Task[None] | None = None
+
+        async def _flush_latest_activity() -> None:
+            nonlocal _latest_event, _last_flush_mono
+            event = _latest_event
+            if event is None:
+                return
+            _latest_event = None
+            try:
+                db_conn = await get_connection(self._db_path)
+                try:
+                    await update_task_activity(
+                        db_conn,
+                        task_id,
+                        activity_type=event.event_type,
+                        activity_summary=event.summary,
+                    )
+                finally:
+                    await db_conn.close()
+                _last_flush_mono = time.monotonic()
+            except Exception:
+                logger.warning("progress_db_write_failed", exc_info=True)
+
+        async def _delayed_flush() -> None:
+            nonlocal _latest_event
+            while _latest_event is not None:
+                delay = max(0.0, _THROTTLE_INTERVAL - (time.monotonic() - _last_flush_mono))
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await _flush_latest_activity()
+
+        async def _progress_wrapper(event: ProgressEvent) -> None:
+            nonlocal _latest_event, _delayed_flush_task
+            _latest_event = event
+            if event.event_type in ("result", "error"):
+                # Terminal events: cancel pending flush and force-flush now
+                if _delayed_flush_task and not _delayed_flush_task.done():
+                    _delayed_flush_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await _delayed_flush_task
+                await _flush_latest_activity()
+            elif _delayed_flush_task is None or _delayed_flush_task.done():
+                _delayed_flush_task = asyncio.create_task(_delayed_flush())
+            if on_progress is not None:
+                await on_progress(event)
 
         # Fix #2: 先获取 semaphore，再创建/更新 TaskRecord 为 running
         async with self._semaphore:
@@ -241,6 +303,8 @@ class SubprocessManager:
                         completed_at=None,
                         duration_ms=None,
                         cost_usd=None,
+                        last_activity_type=None,
+                        last_activity_summary=None,
                     )
                 finally:
                     await db.close()
@@ -252,8 +316,16 @@ class SubprocessManager:
                     prompt,
                     options,
                     on_process_start=_on_process_start,
+                    on_progress=_progress_wrapper,
                 )
             except CLIAdapterError as exc:
+                # 终态前强制 flush 最新 activity（Fix: Codex turn_end 不在终态集合）
+                if _delayed_flush_task and not _delayed_flush_task.done():
+                    _delayed_flush_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await _delayed_flush_task
+                await _flush_latest_activity()
+
                 completed_at = datetime.now(tz=UTC)
                 db = await get_connection(self._db_path)
                 try:
@@ -287,6 +359,13 @@ class SubprocessManager:
                 self._unregister_running(task_id)
                 raise
             else:
+                # 终态前强制 flush 最新 activity（Fix: Codex turn_end 不在终态集合）
+                if _delayed_flush_task and not _delayed_flush_task.done():
+                    _delayed_flush_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await _delayed_flush_task
+                await _flush_latest_activity()
+
                 completed_at = datetime.now(tz=UTC)
                 # Fix #4: 从 ClaudeOutput/CodexOutput 提取 cache_read_input_tokens 和 model
                 cache_tokens = 0
@@ -335,6 +414,12 @@ class SubprocessManager:
                     await db.close()
                 self._unregister_running(task_id)
                 return result
+            finally:
+                # 清理后台 flush task，防止悬挂
+                if _delayed_flush_task and not _delayed_flush_task.done():
+                    _delayed_flush_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await _delayed_flush_task
 
     async def dispatch_with_retry(
         self,
@@ -348,6 +433,7 @@ class SubprocessManager:
         max_retries: int = 1,
         task_id: str | None = None,
         is_retry: bool = False,
+        on_progress: ProgressCallback | None = None,
     ) -> AdapterResult:
         """带自动重试的调度。retryable 错误最多重试 max_retries 次。
 
@@ -369,6 +455,7 @@ class SubprocessManager:
                     options=options,
                     task_id=task_id,
                     is_retry=is_retry or attempt > 0,
+                    on_progress=on_progress,
                 )
             except CLIAdapterError as exc:
                 last_exc = exc

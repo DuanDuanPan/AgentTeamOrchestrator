@@ -1081,3 +1081,113 @@ class TestFindingCrud:
             assert isinstance(results[0].created_at, datetime)
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# update_task_status — last_activity 字段测试
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateTaskStatusActivity:
+    async def test_update_task_status_last_activity(self, initialized_db_path: Path) -> None:
+        """update_task_status 白名单接受 last_activity 字段。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-act"))
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-act",
+                    story_id="s-act",
+                    phase="developing",
+                    role="dev",
+                    cli_tool="claude",
+                    status="running",
+                    started_at=_NOW,
+                ),
+            )
+            await update_task_status(
+                db,
+                "t-act",
+                "running",
+                last_activity_type="tool_use",
+                last_activity_summary="调用工具: Read",
+            )
+            tasks = await get_tasks_by_story(db, "s-act")
+            t = tasks[0]
+            assert t.last_activity_type == "tool_use"
+            assert t.last_activity_summary == "调用工具: Read"
+        finally:
+            await db.close()
+
+    async def test_update_task_status_clear_activity(self, initialized_db_path: Path) -> None:
+        """设为 None 可清空 last_activity 字段。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-clr"))
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-clr",
+                    story_id="s-clr",
+                    phase="developing",
+                    role="dev",
+                    cli_tool="claude",
+                    status="running",
+                    started_at=_NOW,
+                ),
+            )
+            await update_task_status(
+                db, "t-clr", "running",
+                last_activity_type="text",
+                last_activity_summary="hello",
+            )
+            await update_task_status(
+                db, "t-clr", "running",
+                last_activity_type=None,
+                last_activity_summary=None,
+            )
+            tasks = await get_tasks_by_story(db, "s-clr")
+            assert tasks[0].last_activity_type is None
+            assert tasks[0].last_activity_summary is None
+        finally:
+            await db.close()
+
+
+class TestUpdateTaskActivityOnly:
+    async def test_update_task_activity_only_updates_activity_columns(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC 15: update_task_activity 不改 status。"""
+        from ato.models.db import update_task_activity
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-aonly"))
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-aonly",
+                    story_id="s-aonly",
+                    phase="developing",
+                    role="dev",
+                    cli_tool="claude",
+                    status="completed",
+                    started_at=_NOW,
+                    completed_at=_NOW,
+                ),
+            )
+            await update_task_activity(
+                db, "t-aonly",
+                activity_type="tool_use",
+                activity_summary="调用工具: Write",
+            )
+            tasks = await get_tasks_by_story(db, "s-aonly")
+            t = tasks[0]
+            # activity updated
+            assert t.last_activity_type == "tool_use"
+            assert t.last_activity_summary == "调用工具: Write"
+            # status NOT changed
+            assert t.status == "completed"
+        finally:
+            await db.close()
