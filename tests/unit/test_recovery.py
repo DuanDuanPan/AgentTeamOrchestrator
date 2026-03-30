@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 from datetime import UTC, datetime
 from pathlib import Path
@@ -867,6 +868,7 @@ class TestRecoveryProgressLogging:
             await engine.run_recovery()
             await engine.await_background_tasks()
 
+            assert dispatch_mock.await_args is not None
             on_progress = dispatch_mock.await_args.kwargs["on_progress"]
             assert callable(on_progress)
 
@@ -936,6 +938,7 @@ class TestRecoveryProgressLogging:
             await engine.run_recovery()
             await engine.await_background_tasks()
 
+            assert dispatch_mock.await_args is not None
             on_progress = dispatch_mock.await_args.kwargs["on_progress"]
             assert callable(on_progress)
 
@@ -1018,21 +1021,21 @@ class TestRecoveryProgressLogging:
         # 构建包含显式 sandbox 和 model 的 settings
         settings = ATOSettings(
             roles={
-                "creator": {"cli": "claude", "model": "opus", "sandbox": None},
-                "reviewer": {
+                "creator": {"cli": "claude", "model": "opus", "sandbox": None},  # type: ignore[dict-item]
+                "reviewer": {  # type: ignore[dict-item]
                     "cli": "codex",
                     "model": "codex-mini-latest",
                     "sandbox": "read-only",
                 },
             },
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
                     "next_on_success": "reviewing",
                 },
-                {
+                {  # type: ignore[list-item]
                     "name": "reviewing",
                     "role": "reviewer",
                     "type": "convergent_loop",
@@ -1956,14 +1959,14 @@ class TestConvergentLoopGenericBranchModelPassthrough:
         # settings 中 validator 角色有显式 model
         settings = ATOSettings(
             roles={
-                "validator": {
+                "validator": {  # type: ignore[dict-item]
                     "cli": "codex",
                     "model": "codex-mini-latest",
                     "sandbox": "read-only",
                 },
             },
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "validating",
                     "role": "validator",
                     "type": "convergent_loop",
@@ -2714,9 +2717,9 @@ class TestValidatingFileFallback:
 
         # validating tests need workspace: worktree so file fallback reads from worktree path
         settings = ATOSettings(
-            roles={"validator": {"cli": "claude"}},
+            roles={"validator": {"cli": "claude"}},  # type: ignore[dict-item]
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "validating",
                     "role": "validator",
                     "type": "convergent_loop",
@@ -2760,16 +2763,21 @@ class TestValidatingFileFallback:
             parsed_at=_NOW,
         )
 
-    def _findings_parse(self, *, blocking: bool = True) -> object:
+    def _findings_parse(
+        self,
+        *,
+        blocking: bool = True,
+        verdict: str | None = None,
+    ) -> object:
         from ato.models.schemas import BmadFinding, BmadParseResult, BmadSkillType
 
         sev = "blocking" if blocking else "suggestion"
         return BmadParseResult(
             skill_type=BmadSkillType.STORY_VALIDATION,
-            verdict="changes_requested",
+            verdict=verdict or ("changes_requested" if blocking else "approved"),  # type: ignore[arg-type]
             findings=[
                 BmadFinding(
-                    severity=sev,
+                    severity=sev,  # type: ignore[arg-type]
                     category="intent_gap",
                     description="test finding",
                     file_path="src/test.py",
@@ -2795,6 +2803,8 @@ class TestValidatingFileFallback:
 
         tmpl = _CONVERGENT_LOOP_PROMPTS["validating"]
         assert "validate-create-story" in tmpl
+        assert "directly fix every story-spec issue" in tmpl
+        assert "PASS criteria: no unresolved actionable issues remain" in tmpl
         assert "{validation_report_path}" in tmpl
         assert "Also write the full validation report to" in tmpl
 
@@ -3156,6 +3166,59 @@ class TestValidatingFileFallback:
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_validating_explicit_fail_with_only_suggestions_still_fails(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """显式 FAIL 即使只有 suggestion findings，也必须走 validate_fail。"""
+        wt = str(tmp_path / "wt-explicit-fail")
+        Path(wt).mkdir()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-explicit-fail", worktree_path=wt))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-explicit-fail",
+                    "s-explicit-fail",
+                    status="pending",
+                    pid=None,
+                    phase="validating",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = self._make_engine(initialized_db_path, mock_tq)
+        task = _make_task(
+            "t-explicit-fail",
+            "s-explicit-fail",
+            status="pending",
+            pid=None,
+            phase="validating",
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = self._findings_parse(
+                blocking=False,
+                verdict="changes_requested",
+            )
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine._dispatch_convergent_loop(task)
+
+        mock_tq.submit.assert_called_once()
+        assert mock_tq.submit.call_args[0][0].event_name == "validate_fail"
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
     async def test_validating_file_fallback_read_error_stays_parse_failed(
         self,
         _mock_alive: MagicMock,
@@ -3207,6 +3270,114 @@ class TestValidatingFileFallback:
         mock_tq.submit.assert_not_called()
 
 
+class TestConvergentLoopMainWorkspaceSerialControl:
+    async def test_workspace_main_convergent_loop_waits_for_limiter(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        from ato.config import ATOSettings
+        from ato.core import get_main_path_limiter, reset_main_path_limiter
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        settings = ATOSettings(
+            roles={"validator": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "validating",
+                    "role": "validator",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "creating",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-main-lock",
+                    title="main lock",
+                    status="planning",
+                    current_phase="validating",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-main-lock",
+                    "s-main-lock",
+                    status="pending",
+                    pid=None,
+                    phase="validating",
+                ),
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"validating"},
+            settings=settings,
+        )
+        task = _make_task(
+            "t-main-lock",
+            "s-main-lock",
+            status="pending",
+            pid=None,
+            phase="validating",
+        )
+
+        dispatch_mock = AsyncMock(
+            return_value=AdapterResult(
+                status="success",
+                exit_code=0,
+                duration_ms=10,
+                text_result="结果: PASS\n## 摘要\n无问题",
+            )
+        )
+        parse_result = BmadParseResult(
+            skill_type=BmadSkillType.STORY_VALIDATION,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="h",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+
+        reset_main_path_limiter()
+        limiter = get_main_path_limiter()
+        await limiter.acquire()
+        try:
+            with (
+                patch("ato.subprocess_mgr.SubprocessManager.dispatch_with_retry", dispatch_mock),
+                patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
+            ):
+                mock_bmad = AsyncMock()
+                mock_bmad.parse.return_value = parse_result
+                mock_bmad_cls.return_value = mock_bmad
+
+                bg = asyncio.create_task(engine._dispatch_convergent_loop(task))
+                await asyncio.sleep(0.05)
+                dispatch_mock.assert_not_called()
+
+                limiter.release()
+                await asyncio.wait_for(bg, timeout=1.0)
+
+            dispatch_mock.assert_awaited_once()
+        finally:
+            if limiter.locked():
+                limiter.release()
+            reset_main_path_limiter()
+
+
 # ---------------------------------------------------------------------------
 # Story 9.2: Workspace-aware dispatch
 # ---------------------------------------------------------------------------
@@ -3232,10 +3403,10 @@ class TestWorkspaceAwareDispatch:
 
         settings = ATOSettings(
             roles={
-                "creator": {"cli": "claude"},
+                "creator": {"cli": "claude"},  # type: ignore[dict-item]
             },
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
@@ -3292,9 +3463,9 @@ class TestWorkspaceAwareDispatch:
         from ato.config import ATOSettings
 
         settings = ATOSettings(
-            roles={"dev": {"cli": "claude"}},
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item]
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "developing",
                     "role": "dev",
                     "type": "structured_job",
@@ -3308,9 +3479,9 @@ class TestWorkspaceAwareDispatch:
         assert result["workspace"] == "worktree"
 
         settings_main = ATOSettings(
-            roles={"creator": {"cli": "claude"}},
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item]
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
@@ -3325,25 +3496,23 @@ class TestWorkspaceAwareDispatch:
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
-    async def test_dev_ready_main_workspace_dispatch_uses_project_root(
+    async def test_dev_ready_recovery_reconciles_without_adapter(
         self,
         mock_alive: MagicMock,
         mock_artifact: MagicMock,
         initialized_db_path: Path,
         _mock_recovery_adapter: AsyncMock,
     ) -> None:
-        """dev_ready（workspace: main）恢复时 cwd 应使用 project_root 而非 worktree。"""
+        """dev_ready 恢复走自动 gate，不应再启动 adapter。"""
         from ato.config import ATOSettings
-        from ato.core import derive_project_root
-
-        expected_root = str(derive_project_root(initialized_db_path))
+        from ato.models.db import get_tasks_by_story
 
         settings = ATOSettings(
             roles={
-                "dev": {"cli": "claude"},
+                "dev": {"cli": "claude"},  # type: ignore[dict-item]
             },
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "dev_ready",
                     "role": "dev",
                     "type": "structured_job",
@@ -3381,13 +3550,20 @@ class TestWorkspaceAwareDispatch:
         await engine.run_recovery()
         await engine.await_background_tasks()
 
-        _mock_recovery_adapter.execute.assert_called_once()
-        call_args = _mock_recovery_adapter.execute.call_args
-        options = call_args[0][1]
-        assert options is not None
-        # workspace: main → cwd 必须精确等于 project_root，不是 worktree
-        assert options["cwd"] == expected_root
-        assert options["cwd"] != "/tmp/wt"
+        _mock_recovery_adapter.execute.assert_not_called()
+        mock_tq.submit.assert_called_once()
+        event = mock_tq.submit.call_args[0][0]
+        assert event.story_id == "s-dr"
+        assert event.event_name == "start_dev"
+
+        db2 = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db2, "s-dr")
+        finally:
+            await db2.close()
+
+        assert tasks[0].status == "completed"
+        assert tasks[0].expected_artifact == "dev_ready_gate_reconciled"
 
     async def test_regression_phase_config_workspace_main(
         self,
@@ -3399,18 +3575,18 @@ class TestWorkspaceAwareDispatch:
 
         settings = ATOSettings(
             roles={
-                "qa": {"cli": "codex"},
-                "dev": {"cli": "claude"},
+                "qa": {"cli": "codex"},  # type: ignore[dict-item]
+                "dev": {"cli": "claude"},  # type: ignore[dict-item]
             },
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "merging",
                     "role": "dev",
                     "type": "structured_job",
                     "next_on_success": "regression",
                     "workspace": "main",
                 },
-                {
+                {  # type: ignore[list-item]
                     "name": "regression",
                     "role": "qa",
                     "type": "structured_job",
@@ -3443,10 +3619,10 @@ class TestWorkspaceAwareDispatch:
 
         settings = ATOSettings(
             roles={
-                "fixer": {"cli": "claude"},
+                "fixer": {"cli": "claude"},  # type: ignore[dict-item]
             },
             phases=[
-                {
+                {  # type: ignore[list-item]
                     "name": "fixing",
                     "role": "fixer",
                     "type": "structured_job",

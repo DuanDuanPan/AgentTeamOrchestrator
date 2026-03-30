@@ -254,7 +254,7 @@ class TestShutdownDirty:
         async def stop_immediately() -> None:
             orchestrator._request_shutdown()
 
-        orchestrator._poll_cycle = stop_immediately  # type: ignore[method-assign]
+        orchestrator._poll_cycle = stop_immediately  # type: ignore[method-assign, unused-ignore]
 
         # 在 _shutdown 中 patch get_connection 使 mark_running_tasks_paused 失败
         original_shutdown = orchestrator._shutdown
@@ -266,7 +266,7 @@ class TestShutdownDirty:
             ):
                 await original_shutdown()
 
-        orchestrator._shutdown = shutdown_with_db_failure  # type: ignore[method-assign]
+        orchestrator._shutdown = shutdown_with_db_failure  # type: ignore[method-assign, unused-ignore]
 
         with pytest.raises(RuntimeError, match="DB crash"):
             await orchestrator.run()
@@ -287,7 +287,7 @@ class TestStartupFailureCleanup:
             # 模拟信号注册失败
             raise RuntimeError("simulated signal handler failure")
 
-        orchestrator._startup = failing_startup  # type: ignore[method-assign]
+        orchestrator._startup = failing_startup  # type: ignore[method-assign, unused-ignore]
 
         with pytest.raises(RuntimeError, match="simulated signal handler failure"):
             await orchestrator.run()
@@ -296,7 +296,7 @@ class TestStartupFailureCleanup:
         assert not pid_path.exists()
         # TransitionQueue.stop() 应被调用
         assert orchestrator._tq is not None
-        orchestrator._tq.stop.assert_awaited_once()  # type: ignore[attr-defined]
+        orchestrator._tq.stop.assert_awaited_once()  # type: ignore[attr-defined, unused-ignore]
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +344,7 @@ async def _insert_test_task(
             phase="developing",
             role="developer",
             cli_tool="claude",
-            status=status,  # type: ignore[arg-type]
+            status=status,  # type: ignore[arg-type, unused-ignore]
             started_at=now,
         )
         await insert_task(db, task)
@@ -388,7 +388,7 @@ async def _insert_test_approval(
                 approval_id=approval_id,
                 story_id=story_id,
                 approval_type=approval_type,
-                status=status,  # type: ignore[arg-type]
+                status=status,  # type: ignore[arg-type, unused-ignore]
                 decision=decision,
                 decided_at=now,
                 created_at=now,
@@ -842,6 +842,144 @@ class TestProcessApprovalDecisions:
             release_dispatch.set()
             await asyncio.gather(*orchestrator._background_tasks, return_exceptions=True)
 
+    async def test_duplicate_restart_requests_same_story_phase_are_deduped(
+        self, initialized_db_path: Path
+    ) -> None:
+        """同一 story/phase 的重复 restart_requested 只调度最新一条，其余封口。"""
+        from ato.config import PhaseDefinition
+        from ato.models.db import get_connection, get_tasks_by_story, update_task_status
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t1",
+            story_id="test-story-1",
+        )
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t2",
+            story_id="test-story-1",
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await update_task_status(db, "t1", "pending", expected_artifact="restart_requested")
+            await update_task_status(db, "t2", "pending", expected_artifact="restart_requested")
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        mock_phase_defs = [
+            PhaseDefinition(
+                name="developing",
+                role="developer",
+                cli_tool="claude",
+                model="opus",
+                sandbox=None,
+                phase_type="interactive_session",
+                next_on_success="reviewing",
+                next_on_failure=None,
+                timeout_seconds=7200,
+            ),
+        ]
+
+        with (
+            patch("ato.config.build_phase_definitions", return_value=mock_phase_defs),
+            patch.object(
+                orchestrator,
+                "_dispatch_interactive_restart",
+                new_callable=AsyncMock,
+            ) as mock_dispatch,
+        ):
+            await orchestrator._dispatch_pending_tasks()
+            await asyncio.gather(*orchestrator._background_tasks, return_exceptions=True)
+
+        mock_dispatch.assert_awaited_once()
+        assert mock_dispatch.await_args is not None
+        dispatched_task = mock_dispatch.await_args.args[0]
+        assert dispatched_task.task_id == "t2"
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = {task.task_id: task for task in await get_tasks_by_story(db, "test-story-1")}
+        finally:
+            await db.close()
+
+        assert tasks["t1"].status == "failed"
+        assert tasks["t1"].expected_artifact == "restart_superseded"
+        assert tasks["t1"].error_message == "superseded_by_duplicate_restart_request"
+
+    async def test_pending_restart_blocked_when_same_story_phase_already_running(
+        self, initialized_db_path: Path
+    ) -> None:
+        """已有 running task 时，同 story/phase 的 restart_requested 不应再次 dispatch。"""
+        from ato.config import PhaseDefinition
+        from ato.models.db import get_connection, get_tasks_by_story, update_task_status
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="running",
+            task_id="t-running",
+            story_id="test-story-1",
+        )
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t-pending",
+            story_id="test-story-1",
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await update_task_status(
+                db,
+                "t-pending",
+                "pending",
+                expected_artifact="restart_requested",
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        mock_phase_defs = [
+            PhaseDefinition(
+                name="developing",
+                role="developer",
+                cli_tool="claude",
+                model="opus",
+                sandbox=None,
+                phase_type="interactive_session",
+                next_on_success="reviewing",
+                next_on_failure=None,
+                timeout_seconds=7200,
+            ),
+        ]
+
+        with (
+            patch("ato.config.build_phase_definitions", return_value=mock_phase_defs),
+            patch.object(
+                orchestrator,
+                "_dispatch_interactive_restart",
+                new_callable=AsyncMock,
+            ) as mock_dispatch,
+        ):
+            await orchestrator._dispatch_pending_tasks()
+
+        mock_dispatch.assert_not_called()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = {task.task_id: task for task in await get_tasks_by_story(db, "test-story-1")}
+        finally:
+            await db.close()
+
+        assert tasks["t-pending"].status == "failed"
+        assert tasks["t-pending"].expected_artifact == "restart_superseded"
+        assert tasks["t-pending"].error_message == "superseded_by_running_story_phase"
+
     async def test_interactive_restart_deletes_sidecar(self, initialized_db_path: Path) -> None:
         """restart 模式下 _dispatch_interactive_restart 删除 sidecar，
         防止 dispatch_interactive fallback 读取旧 session_id。
@@ -1028,6 +1166,85 @@ class TestProcessApprovalDecisions:
             assert row[0] == "pending"
         finally:
             await db3.close()
+
+    async def test_dispatch_interactive_restart_developing_includes_open_suggestions(
+        self, initialized_db_path: Path
+    ) -> None:
+        """developing restart prompt 应携带 open suggestion findings 作为上下文。"""
+        from ato.models.db import get_connection, insert_findings_batch
+        from ato.models.schemas import FindingRecord, TaskRecord, compute_dedup_hash
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="pending",
+            task_id="t-dev-suggest",
+            story_id="test-story-1",
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE stories SET current_phase = ?, worktree_path = ? WHERE story_id = ?",
+                ("developing", "/tmp/test-worktree", "test-story-1"),
+            )
+            now = datetime.now(tz=UTC)
+            await insert_findings_batch(
+                db,
+                [
+                    FindingRecord(
+                        finding_id="f-suggest-1",
+                        story_id="test-story-1",
+                        round_num=1,
+                        severity="suggestion",
+                        description="sync story dependency notes with implementation plan",
+                        status="open",
+                        file_path="_bmad-output/implementation-artifacts/test-story-1.md",
+                        rule_id="story_validation.remaining_risk",
+                        dedup_hash=compute_dedup_hash(
+                            "_bmad-output/implementation-artifacts/test-story-1.md",
+                            "story_validation.remaining_risk",
+                            "suggestion",
+                            "sync story dependency notes with implementation plan",
+                        ),
+                        created_at=now,
+                    ),
+                ],
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        task = TaskRecord(
+            task_id="t-dev-suggest",
+            story_id="test-story-1",
+            phase="developing",
+            role="developer",
+            cli_tool="claude",
+            status="pending",
+        )
+
+        with (
+            patch("ato.subprocess_mgr.SubprocessManager") as mock_mgr_cls,
+            patch("ato.adapters.claude_cli.ClaudeAdapter"),
+            patch.object(
+                orchestrator,
+                "_get_base_commit",
+                new_callable=AsyncMock,
+                return_value="abc123",
+            ),
+        ):
+            mock_mgr = AsyncMock()
+            mock_mgr.dispatch_interactive = AsyncMock(return_value="new-task-id")
+            mock_mgr_cls.return_value = mock_mgr
+
+            await orchestrator._dispatch_interactive_restart(task, resume=False)
+
+        prompt = mock_mgr.dispatch_interactive.call_args.kwargs["prompt"]
+        assert "## Open Suggestions" in prompt
+        assert "open_suggestion_findings" in prompt
+        assert "sync story dependency notes with implementation plan" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1227,7 +1444,7 @@ class TestConvergentRestartSingleApproval:
                 transition_queue=MagicMock(),
                 nudge=MagicMock(),
             )
-            await engine._mark_dispatch_failed(task)  # type: ignore[arg-type]
+            await engine._mark_dispatch_failed(task)  # type: ignore[arg-type, unused-ignore]
             return False
 
         with (
@@ -1929,10 +2146,10 @@ class TestBatchRestartPhaseOptions:
 
         settings = ATOSettings(
             roles={
-                "creator": {"cli": "claude", "model": "opus", "sandbox": None},
+                "creator": {"cli": "claude", "model": "opus", "sandbox": None},  # type: ignore[dict-item, unused-ignore]
             },
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
@@ -1998,10 +2215,10 @@ class TestBatchRestartPhaseOptions:
 
         settings = ATOSettings(
             roles={
-                "creator": {"cli": "claude"},  # 无 model 无 sandbox
+                "creator": {"cli": "claude"},  # type: ignore[dict-item]  # 无 model 无 sandbox
             },
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
@@ -2064,9 +2281,9 @@ class TestBatchRestartPhaseOptions:
         from ato.models.schemas import AdapterResult, ProgressEvent, TaskRecord
 
         settings = ATOSettings(
-            roles={"creator": {"cli": "claude"}},
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
@@ -2101,6 +2318,7 @@ class TestBatchRestartPhaseOptions:
         ):
             await orchestrator._dispatch_batch_restart(task)
 
+            assert dispatch_mock.await_args is not None
             on_progress = dispatch_mock.await_args.kwargs["on_progress"]
             assert callable(on_progress)
 
@@ -2144,16 +2362,16 @@ class TestPreWorktreeSerialControl:
         from ato.recovery import RecoveryEngine
 
         settings = ATOSettings(
-            roles={"dev": {"cli": "claude"}},
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "planning",
                     "role": "dev",
                     "type": "structured_job",
                     "next_on_success": "developing",
                     "workspace": "main",
                 },
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "developing",
                     "role": "dev",
                     "type": "structured_job",
@@ -2246,7 +2464,9 @@ class TestDesignGate:
         ux.mkdir()
         (ux / "ux-spec.md").touch()
         (ux / "prototype.pen").write_text(self._VALID_PEN)
-        (ux / "prototype.snapshot.json").write_text('{"version":"1.0.0","children":[]}')
+        (ux / "prototype.snapshot.json").write_text(
+            '[{"id":"frame-1","type":"FRAME","name":"Screen 1","children":[]}]'
+        )
         (ux / "prototype.save-report.json").write_text(self._VALID_SAVE_REPORT)
         exports = ux / "exports"
         exports.mkdir()
@@ -2668,7 +2888,7 @@ class TestDesignGate:
         assert "failure_codes" in payload
         assert "missing_files" in payload
         assert "reason" in payload
-        assert "PEN_MISSING" in payload["failure_codes"]
+        assert "PEN_MISSING" in payload["failure_codes"]  # type: ignore[operator, unused-ignore]
 
     async def test_build_payload_includes_save_report_summary(self, tmp_path: Path) -> None:
         """save-report 存在时 payload 包含摘要。"""
@@ -2932,9 +3152,9 @@ class TestBatchRestartCreatingFindings:
         )
 
         settings = ATOSettings(
-            roles={"creator": {"cli": "claude"}},
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
@@ -2962,9 +3182,9 @@ class TestBatchRestartCreatingFindings:
                         finding_id="f-core-1",
                         story_id="s-cr",
                         round_num=1,
-                        severity="blocking",  # type: ignore[arg-type]
+                        severity="blocking",
                         description="missing acceptance criteria",
-                        status="open",  # type: ignore[arg-type]
+                        status="open",
                         file_path="story.md",
                         rule_id="SV001",
                         dedup_hash=compute_dedup_hash(
@@ -3019,9 +3239,9 @@ class TestBatchRestartCreatingFindings:
         from ato.models.schemas import AdapterResult, TaskRecord
 
         settings = ATOSettings(
-            roles={"creator": {"cli": "claude"}},
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "creating",
                     "role": "creator",
                     "type": "structured_job",
@@ -3087,21 +3307,18 @@ class TestBatchRestartWorkspaceBranches:
     防止两条路径实现漂移。
     """
 
-    async def test_batch_restart_main_workspace_uses_project_root(
+    async def test_batch_restart_dev_ready_reconciles_without_adapter(
         self, initialized_db_path: Path
     ) -> None:
-        """workspace: main 的 restart dispatch 使用 project_root 作为 cwd。"""
+        """dev_ready restart 走自动 gate，不应再启动 adapter。"""
         from ato.config import ATOSettings
-        from ato.core import derive_project_root
-        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.db import get_connection, get_tasks_by_story, update_story_worktree_path
         from ato.models.schemas import AdapterResult, TaskRecord
 
-        expected_root = str(derive_project_root(initialized_db_path))
-
         settings = ATOSettings(
-            roles={"dev": {"cli": "claude"}},
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "dev_ready",
                     "role": "dev",
                     "type": "structured_job",
@@ -3150,9 +3367,20 @@ class TestBatchRestartWorkspaceBranches:
         with patch("ato.recovery._create_adapter", return_value=mock_adapter):
             await orchestrator._dispatch_batch_restart(task)
 
-        mock_adapter.execute.assert_called_once()
-        options = mock_adapter.execute.call_args[0][1]
-        assert options["cwd"] == expected_root
+        mock_adapter.execute.assert_not_called()
+        orchestrator._tq.submit.assert_awaited_once()
+        event = orchestrator._tq.submit.call_args.args[0]
+        assert event.story_id == "s-ws1"
+        assert event.event_name == "start_dev"
+
+        db2 = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db2, "s-ws1")
+        finally:
+            await db2.close()
+
+        assert tasks[0].status == "completed"
+        assert tasks[0].expected_artifact == "dev_ready_gate_reconciled"
 
     async def test_batch_restart_worktree_workspace_missing_worktree_dispatch_failed(
         self, initialized_db_path: Path
@@ -3162,9 +3390,9 @@ class TestBatchRestartWorkspaceBranches:
         from ato.models.schemas import AdapterResult, TaskRecord
 
         settings = ATOSettings(
-            roles={"fixer": {"cli": "claude"}},
+            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "fixing",
                     "role": "fixer",
                     "type": "structured_job",
@@ -3214,9 +3442,9 @@ class TestBatchRestartWorkspaceBranches:
         from ato.models.schemas import AdapterResult, TaskRecord
 
         settings = ATOSettings(
-            roles={"fixer": {"cli": "claude"}},
+            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
             phases=[
-                {
+                {  # type: ignore[list-item, unused-ignore]
                     "name": "fixing",
                     "role": "fixer",
                     "type": "structured_job",
