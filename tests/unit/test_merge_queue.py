@@ -28,43 +28,6 @@ _EARLIER = _NOW - timedelta(minutes=5)
 
 
 # ---------------------------------------------------------------------------
-# Helper: mock subprocess 兼容 drain 架构
-# ---------------------------------------------------------------------------
-
-
-def _make_mock_proc(
-    returncode: int = 0,
-    stdout_data: bytes = b"",
-    stderr_data: bytes = b"",
-) -> MagicMock:
-    """创建兼容 drain 架构的 mock subprocess。
-
-    新的 _run_regression_test 使用 proc.wait() + StreamReader drain，
-    而不是 proc.communicate()。此 helper 正确模拟两种 pipe 读取路径。
-    """
-    import asyncio as _aio
-
-    mock_proc = MagicMock()
-    mock_proc.returncode = returncode
-
-    # proc.wait() 返回 future（立即完成）
-    wait_future: _aio.Future[int] = _aio.get_event_loop().create_future()
-    wait_future.set_result(returncode)
-    mock_proc.wait = MagicMock(return_value=wait_future)
-
-    # stdout/stderr 作为 StreamReader（drain tasks 读取）
-    mock_proc.stdout = _aio.StreamReader()
-    mock_proc.stdout.feed_data(stdout_data)
-    mock_proc.stdout.feed_eof()
-
-    mock_proc.stderr = _aio.StreamReader()
-    mock_proc.stderr.feed_data(stderr_data)
-    mock_proc.stderr.feed_eof()
-
-    return mock_proc
-
-
-# ---------------------------------------------------------------------------
 # Helper: 插入 story 以满足外键约束
 # ---------------------------------------------------------------------------
 
@@ -882,7 +845,7 @@ class TestCrashRecoveryScenarios:
             # payload 合同必须与正常失败路径一致（AC3）
             import json
 
-            payload = json.loads(reg_approvals[0].payload)
+            payload = json.loads(reg_approvals[0].payload)  # type: ignore[arg-type]
             assert payload["story_id"] == "s1", (
                 "crash recovery path must include story_id in payload"
             )
@@ -922,7 +885,7 @@ class TestCrashRecoveryScenarios:
 
 
 class TestRegressionTestExecution:
-    """_run_regression_test 正确性验证。"""
+    """Regression 相关测试：completion / unfreeze / merge 流程。"""
 
     def _make_queue(self, db_path: Path) -> Any:
         from ato.merge_queue import MergeQueue
@@ -945,102 +908,6 @@ class TestRegressionTestExecution:
             settings=settings,
         )
         return queue, worktree_mgr, tq
-
-    async def test_run_regression_test_completed_at_is_datetime(
-        self, initialized_db_path: Path
-    ) -> None:
-        """completed_at 必须是 datetime，不能是 ISO 字符串 — 验证 Fix #1。"""
-        from ato.models.db import get_connection, insert_task
-        from ato.models.schemas import TaskRecord
-
-        queue, _, _ = self._make_queue(initialized_db_path)
-        await _insert_test_story(initialized_db_path, "s1")
-
-        # 手动创建 task record 以便调用 _run_regression_test
-        task_id = "test-regression-task-1"
-        now = datetime.now(tz=UTC)
-        task = TaskRecord(
-            task_id=task_id,
-            story_id="s1",
-            phase="regression",
-            role="qa",
-            cli_tool="codex",
-            status="running",
-            expected_artifact="regression_test",
-            started_at=now,
-        )
-        db = await get_connection(initialized_db_path)
-        try:
-            await insert_task(db, task)
-        finally:
-            await db.close()
-
-        # Mock subprocess to succeed quickly
-        mock_proc = _make_mock_proc(returncode=0, stdout_data=b"ok")
-
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
-            await queue._run_regression_test("s1", task_id)
-
-        # Verify task was updated without TypeError
-        from ato.models.db import get_tasks_by_story
-
-        db = await get_connection(initialized_db_path)
-        try:
-            tasks = await get_tasks_by_story(db, "s1")
-            regression_task = next(t for t in tasks if t.task_id == task_id)
-            assert regression_task.status == "completed"
-            assert regression_task.exit_code == 0
-            assert regression_task.completed_at is not None
-        finally:
-            await db.close()
-
-    async def test_run_regression_test_uses_shell_aware_split(
-        self, initialized_db_path: Path
-    ) -> None:
-        """带引号和空格的 regression_test_command 必须被正确解析。"""
-        from ato.models.db import get_connection, insert_task
-        from ato.models.schemas import TaskRecord
-
-        queue, _, _ = self._make_queue(initialized_db_path)
-        queue._settings.regression_test_command = 'pytest --cov="src dir" "tests/unit/test file.py"'
-        queue._settings.get_regression_commands = MagicMock(
-            return_value=['pytest --cov="src dir" "tests/unit/test file.py"']
-        )
-        await _insert_test_story(initialized_db_path, "s1")
-
-        task_id = "test-regression-task-quoted"
-        now = datetime.now(tz=UTC)
-        task = TaskRecord(
-            task_id=task_id,
-            story_id="s1",
-            phase="regression",
-            role="qa",
-            cli_tool="codex",
-            status="running",
-            expected_artifact="regression_test",
-            started_at=now,
-        )
-        db = await get_connection(initialized_db_path)
-        try:
-            await insert_task(db, task)
-        finally:
-            await db.close()
-
-        mock_proc = _make_mock_proc(returncode=0, stdout_data=b"ok")
-
-        with patch(
-            "ato.merge_queue.asyncio.create_subprocess_exec",
-            new_callable=AsyncMock,
-            return_value=mock_proc,
-        ) as mock_exec:
-            await queue._run_regression_test("s1", task_id)
-
-        assert mock_exec.await_args is not None
-        assert mock_exec.await_args.args == (
-            "pytest",
-            "--cov=src dir",
-            "tests/unit/test file.py",
-        )
 
     async def test_check_regression_completion_unfreezes_recovery_story(
         self, initialized_db_path: Path
@@ -1250,9 +1117,7 @@ class TestHappyPathMergeRegressionPassToDone:
         )
         return queue, worktree_mgr, tq
 
-    async def test_complete_regression_pass_full_flow(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_complete_regression_pass_full_flow(self, initialized_db_path: Path) -> None:
         """_complete_regression_pass: transition + merge merged + lock released + cleanup。"""
         from ato.models.db import insert_task
         from ato.models.schemas import TaskRecord
@@ -1411,7 +1276,7 @@ class TestRegressionFailurePayloadContent:
             pending = await get_pending_approvals(db)
             reg = [a for a in pending if a.approval_type == "regression_failure"]
             assert len(reg) == 1
-            payload = json.loads(reg[0].payload)
+            payload = json.loads(reg[0].payload)  # type: ignore[arg-type]
             assert payload["story_id"] == "s1"
             assert set(payload["options"]) == {"revert", "fix_forward", "pause"}
         finally:
@@ -1445,7 +1310,7 @@ class TestRegressionFailurePayloadContent:
             pending = await get_pending_approvals(db)
             reg = [a for a in pending if a.approval_type == "regression_failure"]
             assert len(reg) == 1
-            payload = json.loads(reg[0].payload)
+            payload = json.loads(reg[0].payload)  # type: ignore[arg-type]
             assert "test_output_summary" in payload
             assert "FAILED" in payload["test_output_summary"]
         finally:
@@ -1498,182 +1363,22 @@ class TestRegressionFailurePayloadContent:
             pending = await get_pending_approvals(db)
             reg = [a for a in pending if a.approval_type == "regression_failure"]
             assert len(reg) == 1
-            payload = json.loads(reg[0].payload)
+            payload = json.loads(reg[0].payload)  # type: ignore[arg-type]
             assert "test_output_summary" in payload
             assert "FAILED" in payload["test_output_summary"]
         finally:
             await db.close()
 
-    async def test_run_regression_test_stores_stderr_on_failure(
-        self, initialized_db_path: Path
-    ) -> None:
-        """regression test 失败时 stderr 存入 task.error_message。"""
-        from ato.models.db import insert_task
-        from ato.models.schemas import TaskRecord
-
-        queue = self._make_queue(initialized_db_path)
-        await _insert_test_story(initialized_db_path, "s1")
-
-        task_id = "task-reg-stderr"
-        now = datetime.now(tz=UTC)
-        db = await get_connection(initialized_db_path)
-        try:
-            await insert_task(
-                db,
-                TaskRecord(
-                    task_id=task_id,
-                    story_id="s1",
-                    phase="regression",
-                    role="qa",
-                    cli_tool="codex",
-                    status="running",
-                    expected_artifact="regression_test",
-                    started_at=now,
-                ),
-            )
-        finally:
-            await db.close()
-
-        mock_proc = _make_mock_proc(
-            returncode=1,
-            stderr_data=b"FAILED test_bar.py::test_x - AssertionError",
-        )
-
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
-            await queue._run_regression_test("s1", task_id)
-
-        db = await get_connection(initialized_db_path)
-        try:
-            cursor = await db.execute(
-                "SELECT error_message FROM tasks WHERE task_id = ?",
-                (task_id,),
-            )
-            row = await cursor.fetchone()
-            assert row is not None
-            assert row[0] is not None
-            assert "FAILED" in row[0]
-        finally:
-            await db.close()
-
-    async def test_run_regression_test_captures_stdout_on_failure(
-        self, initialized_db_path: Path
-    ) -> None:
-        """失败详情在 stdout 时（如 pytest）也应被捕获到 error_message。"""
-        from ato.models.db import insert_task
-        from ato.models.schemas import TaskRecord
-
-        queue = self._make_queue(initialized_db_path)
-        await _insert_test_story(initialized_db_path, "s1")
-
-        task_id = "task-reg-stdout"
-        now = datetime.now(tz=UTC)
-        db = await get_connection(initialized_db_path)
-        try:
-            await insert_task(
-                db,
-                TaskRecord(
-                    task_id=task_id,
-                    story_id="s1",
-                    phase="regression",
-                    role="qa",
-                    cli_tool="codex",
-                    status="running",
-                    expected_artifact="regression_test",
-                    started_at=now,
-                ),
-            )
-        finally:
-            await db.close()
-
-        # pytest 把失败详情输出到 stdout，stderr 为空
-        mock_proc = _make_mock_proc(
-            returncode=1,
-            stdout_data=b"FAILED tests/test_foo.py::test_bar - assert 1 == 2",
-        )
-
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
-            await queue._run_regression_test("s1", task_id)
-
-        db = await get_connection(initialized_db_path)
-        try:
-            cursor = await db.execute(
-                "SELECT error_message FROM tasks WHERE task_id = ?",
-                (task_id,),
-            )
-            row = await cursor.fetchone()
-            assert row is not None
-            assert row[0] is not None
-            assert "FAILED" in row[0], (
-                "stdout failure details must be captured when stderr is empty"
-            )
-            assert "assert 1 == 2" in row[0]
-        finally:
-            await db.close()
-
-    async def test_run_regression_test_combines_stdout_and_stderr(
-        self, initialized_db_path: Path
-    ) -> None:
-        """stdout 和 stderr 都有内容时合并到 error_message。"""
-        from ato.models.db import insert_task
-        from ato.models.schemas import TaskRecord
-
-        queue = self._make_queue(initialized_db_path)
-        await _insert_test_story(initialized_db_path, "s1")
-
-        task_id = "task-reg-combined"
-        now = datetime.now(tz=UTC)
-        db = await get_connection(initialized_db_path)
-        try:
-            await insert_task(
-                db,
-                TaskRecord(
-                    task_id=task_id,
-                    story_id="s1",
-                    phase="regression",
-                    role="qa",
-                    cli_tool="codex",
-                    status="running",
-                    expected_artifact="regression_test",
-                    started_at=now,
-                ),
-            )
-        finally:
-            await db.close()
-
-        mock_proc = _make_mock_proc(
-            returncode=1,
-            stdout_data=b"FAILED test_bar",
-            stderr_data=b"ERROR: coverage below threshold",
-        )
-
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", return_value=mock_proc):
-            await queue._run_regression_test("s1", task_id)
-
-        db = await get_connection(initialized_db_path)
-        try:
-            cursor = await db.execute(
-                "SELECT error_message FROM tasks WHERE task_id = ?",
-                (task_id,),
-            )
-            row = await cursor.fetchone()
-            assert row is not None
-            assert row[0] is not None
-            # 两个来源都应该出现
-            assert "coverage below threshold" in row[0]
-            assert "FAILED test_bar" in row[0]
-        finally:
-            await db.close()
-
 
 # ---------------------------------------------------------------------------
-# Story 8.4: 多命令 regression runner 测试
+# LLM-Assisted Regression Runner (Codex) 测试
 # ---------------------------------------------------------------------------
 
 
-class TestMultiCommandRegression:
-    """AC3-AC5: 多命令 regression 顺序执行、失败中止、独立超时。"""
+class TestCodexRegressionRunner:
+    """Codex-based regression runner 正确性验证。"""
 
-    def _make_queue(self, db_path: Path) -> tuple[Any, Any, Any]:
+    def _make_queue(self, db_path: Path) -> Any:
         from ato.merge_queue import MergeQueue
 
         worktree_mgr = AsyncMock()
@@ -1683,15 +1388,17 @@ class TestMultiCommandRegression:
         settings = MagicMock()
         settings.merge_rebase_timeout = 120
         settings.merge_conflict_resolution_max_attempts = 1
-        settings.regression_test_command = "echo ok"
-        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
-        settings.timeout.structured_job = 1800
-        # 使用 get_regression_commands 返回多命令
-        settings.get_regression_commands = MagicMock(return_value=[
+        settings.regression_test_commands = [
             "uv run pytest tests/unit/",
             "uv run pytest tests/integration/",
-            "uv run pytest tests/smoke/",
-        ])
+        ]
+        settings.get_regression_commands = MagicMock(
+            return_value=[
+                "uv run pytest tests/unit/",
+                "uv run pytest tests/integration/",
+            ]
+        )
+        settings.timeout.structured_job = 1800
 
         queue = MergeQueue(
             db_path=db_path,
@@ -1699,7 +1406,7 @@ class TestMultiCommandRegression:
             transition_queue=tq,
             settings=settings,
         )
-        return queue, worktree_mgr, tq
+        return queue
 
     async def _setup_task(self, db_path: Path, story_id: str = "s1") -> str:
         """辅助：创建 story 和 running 状态的 regression task。"""
@@ -1707,7 +1414,7 @@ class TestMultiCommandRegression:
         from ato.models.schemas import TaskRecord
 
         await _insert_test_story(db_path, story_id)
-        task_id = f"task-multi-{story_id}"
+        task_id = f"task-codex-{story_id}"
         now = datetime.now(tz=UTC)
         task = TaskRecord(
             task_id=task_id,
@@ -1726,55 +1433,187 @@ class TestMultiCommandRegression:
             await db.close()
         return task_id
 
-    async def test_all_commands_succeed(self, initialized_db_path: Path) -> None:
-        """AC3/AC5: 所有命令成功 → task completed, exit_code=0。"""
-        queue, _, _ = self._make_queue(initialized_db_path)
-        task_id = await self._setup_task(initialized_db_path)
+    def _make_adapter_result(
+        self,
+        *,
+        structured_output: dict[str, Any] | None = None,
+        exit_code: int = 0,
+        text_result: str = "All tests passed.",
+    ) -> Any:
+        """构造 mock AdapterResult。"""
+        from ato.models.schemas import AdapterResult
 
-        call_count = 0
+        return AdapterResult(
+            status="success" if exit_code == 0 else "failure",
+            exit_code=exit_code,
+            text_result=text_result,
+            structured_output=structured_output,
+            cost_usd=0.01,
+            input_tokens=100,
+            output_tokens=50,
+        )
 
-        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-            nonlocal call_count
-            call_count += 1
-            return _make_mock_proc(returncode=0, stdout_data=b"ok")
+    async def test_build_regression_prompt_with_explicit_plural_commands(
+        self,
+    ) -> None:
+        """regression_test_commands 显式配置 → prompt 包含基线命令。"""
+        from ato.merge_queue import _build_regression_prompt
 
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
-            await queue._run_regression_test("s1", task_id)
+        settings = MagicMock()
+        settings.regression_test_commands = ["uv run pytest tests/unit/"]
+        settings.regression_test_command = "uv run pytest"
+        settings.get_regression_commands = MagicMock(return_value=["uv run pytest tests/unit/"])
 
-        assert call_count == 3, "All 3 commands should be executed"
+        prompt = _build_regression_prompt(Path("/repo"), settings)
+        assert "uv run pytest tests/unit/" in prompt
+        assert "MUST execute them first" in prompt
 
-        from ato.models.db import get_tasks_by_story
+    async def test_build_regression_prompt_with_explicit_singular_command(
+        self,
+    ) -> None:
+        """singular 被用户改为非默认值 → 作为 baseline 命令。"""
+        from ato.merge_queue import _build_regression_prompt
+
+        settings = MagicMock()
+        settings.regression_test_commands = None
+        settings.regression_test_command = "make test"
+        settings.get_regression_commands = MagicMock(return_value=["make test"])
+
+        prompt = _build_regression_prompt(Path("/repo"), settings)
+        assert "make test" in prompt
+        assert "MUST execute them first" in prompt
+
+    async def test_build_regression_prompt_defaults_use_autonomous_discovery(
+        self,
+    ) -> None:
+        """两者均为默认/未配置 → autonomous discovery（AC7 可达路径）。"""
+        from ato.merge_queue import _build_regression_prompt
+
+        settings = MagicMock()
+        settings.regression_test_commands = None
+        settings.regression_test_command = "uv run pytest"
+        settings.get_regression_commands = MagicMock(return_value=["uv run pytest"])
+
+        prompt = _build_regression_prompt(Path("/repo"), settings)
+        assert "Discover the project" in prompt
+
+    async def test_dispatch_regression_preserves_single_task_contract(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC1: _dispatch_regression_test 立即返回 task_id，task 表存在 running record。"""
+        queue = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        # Mock 后台 runner 使其不真正执行
+        with patch.object(queue, "_run_regression_via_codex", new_callable=AsyncMock):
+            task_id = await queue._dispatch_regression_test("s1")
+
+        assert task_id is not None
 
         db = await get_connection(initialized_db_path)
         try:
-            tasks = await get_tasks_by_story(db, "s1")
-            reg_task = next(t for t in tasks if t.task_id == task_id)
-            assert reg_task.status == "completed"
-            assert reg_task.exit_code == 0
-            assert reg_task.error_message is None
+            cursor = await db.execute(
+                "SELECT status, phase, expected_artifact FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "running"
+            assert row[1] == "regression"
+            assert row[2] == "regression_test"
         finally:
             await db.close()
 
-    async def test_second_command_fails_short_circuits(self, initialized_db_path: Path) -> None:
-        """AC4: 第 2 条命令失败 → 第 3 条不执行，error_message 包含序号和命令。"""
-        queue, _, _ = self._make_queue(initialized_db_path)
+    async def test_run_regression_via_codex_pass_normalizes_to_exit_code_zero(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC3: structured pass + clean workspace → exit_code=0。"""
+        from ato.core import reset_main_path_limiter
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
 
-        call_count = 0
+        result = self._make_adapter_result(
+            structured_output={
+                "regression_status": "pass",
+                "summary": "All 42 tests passed",
+                "commands_attempted": ["uv run pytest tests/unit/"],
+                "skipped_command_reason": None,
+                "discovery_notes": "pytest detected",
+            },
+        )
 
-        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
-                return _make_mock_proc(
-                    returncode=1, stdout_data=b"FAILED test_x", stderr_data=b"err output",
-                )
-            return _make_mock_proc(returncode=0, stdout_data=b"ok")
+        mock_update = AsyncMock()
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                side_effect=[set(), set()],  # pre and post: no changes
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+            patch(
+                "ato.models.db.update_task_status",
+                mock_update,
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
 
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
-            await queue._run_regression_test("s1", task_id)
+        # pass + clean workspace → runner 不应调用 update_task_status
+        # （保留 SubprocessManager 写的状态）
+        mock_update.assert_not_called()
 
-        assert call_count == 2, "Third command should NOT be executed"
+    async def test_run_regression_via_codex_fail_normalizes_to_completed_exit_code_one(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC4: structured fail → status=completed, exit_code=1, error_message=summary。"""
+        from ato.core import reset_main_path_limiter
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        result = self._make_adapter_result(
+            structured_output={
+                "regression_status": "fail",
+                "summary": "3 tests failed in test_auth.py",
+                "commands_attempted": ["uv run pytest tests/unit/"],
+                "skipped_command_reason": None,
+                "discovery_notes": "pytest detected",
+            },
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                return_value=set(),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
 
         db = await get_connection(initialized_db_path)
         try:
@@ -1784,163 +1623,255 @@ class TestMultiCommandRegression:
             )
             row = await cursor.fetchone()
             assert row is not None
-            assert row[0] == "completed"  # status
-            assert row[1] != 0  # exit_code
-            error_msg = row[2]
-            assert error_msg is not None
-            # AC4: error_message 包含失败命令的 1-based 序号和命令文本
-            assert "2" in error_msg
-            assert "uv run pytest tests/integration/" in error_msg
+            assert row[0] == "completed"
+            assert row[1] == 1
+            assert "3 tests failed" in row[2]
         finally:
             await db.close()
 
-    async def test_each_command_uses_independent_shlex_split(
+    async def test_run_regression_via_codex_invalid_structured_output_fails_closed(
         self, initialized_db_path: Path
     ) -> None:
-        """AC5: 每条命令独立使用 shlex.split() 解析。"""
-        queue, _, _ = self._make_queue(initialized_db_path)
-        queue._settings.get_regression_commands = MagicMock(
-            return_value=['pytest --cov="src dir"', 'pytest "tests/unit/test file.py"']
+        """无效 structured_output → 标记失败。"""
+        from ato.core import reset_main_path_limiter
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        # structured_output 缺少 regression_status 字段
+        result = self._make_adapter_result(
+            structured_output={"unexpected": "format"},
         )
-        task_id = await self._setup_task(initialized_db_path)
 
-        exec_calls: list[tuple[Any, ...]] = []
-
-        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-            exec_calls.append(args)
-            return _make_mock_proc(returncode=0, stdout_data=b"ok")
-
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
-            await queue._run_regression_test("s1", task_id)
-
-        assert len(exec_calls) == 2
-        # 第一条命令
-        assert exec_calls[0] == ("pytest", "--cov=src dir")
-        # 第二条命令
-        assert exec_calls[1] == ("pytest", "tests/unit/test file.py")
-
-    async def test_singular_fallback_still_works(self, initialized_db_path: Path) -> None:
-        """AC2: 仅 singular 配置时行为不变。"""
-        queue, _, _ = self._make_queue(initialized_db_path)
-        queue._settings.get_regression_commands = MagicMock(return_value=["echo ok"])
-        task_id = await self._setup_task(initialized_db_path)
-
-        call_count = 0
-
-        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-            nonlocal call_count
-            call_count += 1
-            return _make_mock_proc(returncode=0, stdout_data=b"ok")
-
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
-            await queue._run_regression_test("s1", task_id)
-
-        assert call_count == 1
-
-        from ato.models.db import get_tasks_by_story
-
-        db = await get_connection(initialized_db_path)
-        try:
-            tasks = await get_tasks_by_story(db, "s1")
-            reg_task = next(t for t in tasks if t.task_id == task_id)
-            assert reg_task.status == "completed"
-            assert reg_task.exit_code == 0
-        finally:
-            await db.close()
-
-    async def test_error_message_within_1000_chars(self, initialized_db_path: Path) -> None:
-        """AC4: 失败摘要遵循 <=1000 字符截断合同。"""
-        queue, _, _ = self._make_queue(initialized_db_path)
-        task_id = await self._setup_task(initialized_db_path)
-
-        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-            # 生成超长输出
-            return _make_mock_proc(
-                returncode=1, stdout_data=b"X" * 2000, stderr_data=b"Y" * 2000,
-            )
-
-        with patch("ato.merge_queue.asyncio.create_subprocess_exec", side_effect=fake_exec):
-            await queue._run_regression_test("s1", task_id)
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                return_value=set(),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
 
         db = await get_connection(initialized_db_path)
         try:
             cursor = await db.execute(
-                "SELECT error_message FROM tasks WHERE task_id = ?",
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
                 (task_id,),
             )
             row = await cursor.fetchone()
             assert row is not None
-            assert row[0] is not None
-            assert len(row[0]) <= 1000
+            assert row[0] == "completed"
+            assert row[1] == 1
+            assert "invalid" in row[2].lower() or "validation" in row[2].lower()
         finally:
             await db.close()
 
-    async def test_timeout_captures_partial_output_via_drain(
+    async def test_run_regression_via_codex_partial_schema_fails_closed(
         self, initialized_db_path: Path
     ) -> None:
-        """AC4/AC5: 超时 → error_message 包含 drain 缓冲区中的部分输出。
+        """半残 payload（有 regression_status 但缺其他 required 字段）→ fail-closed。"""
+        from ato.core import reset_main_path_limiter
 
-        架构：_drain tasks 在超时前持续累积 pipe 数据到外部 bytearray，
-        超时后取消 task 但 bytearray 已有数据可用。不依赖超时后读 pipe。
-        """
-        import asyncio as _aio
+        reset_main_path_limiter()
 
-        queue, _, _ = self._make_queue(initialized_db_path)
+        queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
 
-        exec_count = 0
-
-        async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-            nonlocal exec_count
-            exec_count += 1
-
-            mock_proc = MagicMock()
-            mock_proc.returncode = None
-
-            # 模拟 stdout/stderr pipe：先输出部分数据，然后挂起
-            # 这模拟了真实场景：子进程已输出部分内容但未退出
-            async def make_reader(data: bytes) -> _aio.StreamReader:
-                reader = _aio.StreamReader()
-                reader.feed_data(data)
-                # 不 feed_eof → read 会在读完 data 后等待
-                return reader
-
-            mock_proc.stdout = _aio.StreamReader()
-            mock_proc.stdout.feed_data(b"partial test output")
-            # 不 feed_eof，模拟进程仍在运行
-
-            mock_proc.stderr = _aio.StreamReader()
-            mock_proc.stderr.feed_data(b"partial error log")
-
-            # proc.wait() 永不返回（模拟超时）
-            wait_future: _aio.Future[int] = _aio.get_event_loop().create_future()
-            mock_proc.wait = MagicMock(return_value=wait_future)
-
-            # kill 后标记退出 + 关闭 pipe
-            def do_kill() -> None:
-                mock_proc.returncode = -9
-                mock_proc.stdout.feed_eof()
-                mock_proc.stderr.feed_eof()
-                if not wait_future.done():
-                    wait_future.set_result(-9)
-
-            mock_proc.kill = MagicMock(side_effect=do_kill)
-            mock_proc.terminate = MagicMock(side_effect=do_kill)
-
-            return mock_proc
+        # 只有 regression_status，缺 summary/commands_attempted 等
+        result = self._make_adapter_result(
+            structured_output={"regression_status": "pass"},
+        )
 
         with (
             patch(
-                "ato.merge_queue.asyncio.create_subprocess_exec",
-                side_effect=fake_exec,
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
             ),
-            patch("ato.adapters.base.cleanup_process", new_callable=AsyncMock),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                return_value=set(),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
         ):
-            # 设置极短超时触发 timeout
-            queue._settings.timeout.structured_job = 0.1
-            await queue._run_regression_test("s1", task_id)
+            await queue._run_regression_via_codex("s1", task_id)
 
-        assert exec_count == 1, "Timed out on first → second should NOT run"
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "completed"
+            assert row[1] == 1
+            # Pydantic ValidationError 会列出缺失字段
+            assert "summary" in row[2].lower()
+        finally:
+            await db.close()
+
+    async def test_run_regression_via_codex_unknown_status_fails_closed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """非�� regression_status 枚举值 → fail-closed。"""
+        from ato.core import reset_main_path_limiter
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        result = self._make_adapter_result(
+            structured_output={
+                "regression_status": "unknown",
+                "summary": "Something happened",
+                "commands_attempted": [],
+                "skipped_command_reason": None,
+                "discovery_notes": "",
+            },
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                return_value=set(),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "completed"
+            assert row[1] == 1
+            # Pydantic Literal 校验拒绝 "unknown"
+            assert "invalid" in row[2].lower() or "regression_status" in row[2]
+        finally:
+            await db.close()
+
+    async def test_run_regression_via_codex_type_error_in_payload_fails_closed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """字段类型错误（如 commands_attempted 为 str）→ fail-closed。"""
+        from ato.core import reset_main_path_limiter
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        result = self._make_adapter_result(
+            structured_output={
+                "regression_status": "pass",
+                "summary": "ok",
+                "commands_attempted": "not a list",  # 类型错误
+                "skipped_command_reason": None,
+                "discovery_notes": "detected",
+            },
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                return_value=set(),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "completed"
+            assert row[1] == 1
+            assert "commands_attempted" in row[2]
+        finally:
+            await db.close()
+
+    async def test_run_regression_via_codex_snapshot_failure_fails_closed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """git status 失败 → fail-closed，不放行 regression pass。"""
+        from ato.core import reset_main_path_limiter
+        from ato.merge_queue import _WorkspaceSnapshotError
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                side_effect=_WorkspaceSnapshotError("git status failed (exit=128)"),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
 
         db = await get_connection(initialized_db_path)
         try:
@@ -1952,16 +1883,118 @@ class TestMultiCommandRegression:
             assert row is not None
             assert row[0] == "failed"
             assert row[1] == -1
-            error_msg = row[2]
-            # AC4: 序号 + 命令文本
-            assert "1" in error_msg
-            assert "timed out" in error_msg.lower()
-            # AC4: 超时前已累积的 stdout/stderr 摘要
-            assert "partial test output" in error_msg, (
-                f"Drain buffer should capture partial stdout. Got: {error_msg}"
+            assert "snapshot failed" in row[2].lower()
+        finally:
+            await db.close()
+
+    async def test_run_regression_via_codex_workspace_dirty_fails_closed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC8: workspace 新增脏文件 → 即使 regression_status=pass 也判失败。"""
+        from ato.core import reset_main_path_limiter
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        result = self._make_adapter_result(
+            structured_output={
+                "regression_status": "pass",
+                "summary": "All tests passed",
+                "commands_attempted": ["uv run pytest"],
+                "skipped_command_reason": None,
+                "discovery_notes": "pytest",
+            },
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                # pre: empty, post: new file appeared
+                side_effect=[set(), {"src/new_file.py"}],
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
             )
-            assert "partial error log" in error_msg, (
-                f"Drain buffer should capture partial stderr. Got: {error_msg}"
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "completed"
+            assert row[1] == 1
+            assert "modified main workspace" in row[2].lower()
+            assert "src/new_file.py" in row[2]
+        finally:
+            await db.close()
+
+    async def test_run_regression_via_codex_cli_error_leaves_subprocess_mgr_terminal_state(
+        self, initialized_db_path: Path
+    ) -> None:
+        """AC5: CLIAdapterError → SubprocessManager 已写终态，runner 只记日志不覆写。"""
+        from ato.core import reset_main_path_limiter
+        from ato.models.schemas import CLIAdapterError, ErrorCategory
+
+        reset_main_path_limiter()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(
+                        side_effect=CLIAdapterError(
+                            "Codex CLI timed out",
+                            category=ErrorCategory.TIMEOUT,
+                            retryable=True,
+                        ),
+                    ),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                return_value=set(),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+        ):
+            # Should NOT raise
+            await queue._run_regression_via_codex("s1", task_id)
+
+        # Task 仍为初始 running 状态（SubprocessManager mock 未写回，
+        # 但 runner 也不应覆写——验证 runner 不会意外标记为其他状态）
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status FROM tasks WHERE task_id = ?",
+                (task_id,),
             )
+            row = await cursor.fetchone()
+            assert row is not None
+            # 在真实场景中 SubprocessManager 会写 failed；
+            # 此处验证 runner 不会额外覆写
+            assert row[0] == "running"  # mock 未修改
         finally:
             await db.close()

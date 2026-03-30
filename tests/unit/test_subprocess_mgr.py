@@ -256,6 +256,7 @@ class TestRetry:
         # R2 review: 上轮失败的残留字段必须被清除
         assert task.error_message is None
         assert task.exit_code == 0  # 成功时覆盖为 0，而非残留 429
+        assert task.text_result == "ok"
 
     async def test_retry_produces_multiple_cost_log_entries(self, db_ready: Path) -> None:
         """Fix #1: 重试时每次尝试都生成独立的 cost_log 条目。"""
@@ -621,6 +622,33 @@ class TestTelemetryPersistence:
 
 
 class TestActivityFlush:
+    async def test_dispatch_persists_full_text_result(self, db_ready: Path) -> None:
+        """完整 agent 输出应落库到 tasks.text_result，供审计追溯。"""
+        from ato.models.db import get_tasks_by_story
+
+        full_output = "# Review\n\n" + ("finding details\n" * 200)
+        mgr = SubprocessManager(
+            max_concurrent=4,
+            adapter=FakeAdapter(result=_make_adapter_result(text_result=full_output)),  # type: ignore[arg-type]
+            db_path=db_ready,
+        )
+        await mgr.dispatch(
+            story_id="story-test",
+            phase="dev",
+            role="reviewer",
+            cli_tool="codex",
+            prompt="test",
+        )
+
+        db = await get_connection(db_ready)
+        try:
+            tasks = await get_tasks_by_story(db, "story-test")
+        finally:
+            await db.close()
+
+        assert len(tasks) == 1
+        assert tasks[0].text_result == full_output
+
     async def test_turn_end_activity_flushed_on_success(self, db_ready: Path) -> None:
         """Fix: Codex turn_end 不在 _progress_wrapper 终态集合，
         但 dispatch() 成功路径的显式 flush 仍能把最新 activity 落库。"""
@@ -633,13 +661,15 @@ class TestActivityFlush:
                 on_progress = kw.get("on_progress")
                 if on_progress:
                     # 模拟 Codex 的最后事件：turn_end（非 result/error）
-                    await on_progress(ProgressEvent(
-                        event_type="turn_end",
-                        summary="回合结束 (in=100 out=50)",
-                        cli_tool="codex",
-                        timestamp=datetime.now(tz=UTC),
-                        raw={"type": "turn.completed"},
-                    ))
+                    await on_progress(
+                        ProgressEvent(
+                            event_type="turn_end",
+                            summary="回合结束 (in=100 out=50)",
+                            cli_tool="codex",
+                            timestamp=datetime.now(tz=UTC),
+                            raw={"type": "turn.completed"},
+                        )
+                    )
                 return result
 
         mgr = SubprocessManager(max_concurrent=4, adapter=EmitTurnEndAdapter(), db_path=db_ready)  # type: ignore[arg-type]
@@ -653,7 +683,8 @@ class TestActivityFlush:
 
         db = await get_connection(db_ready)
         cursor = await db.execute(
-            "SELECT last_activity_type, last_activity_summary FROM tasks WHERE story_id = 'story-test'"
+            "SELECT last_activity_type, last_activity_summary "
+            "FROM tasks WHERE story_id = 'story-test'"
         )
         row = await cursor.fetchone()
         await db.close()
@@ -671,13 +702,15 @@ class TestActivityFlush:
             async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
                 on_progress = kw.get("on_progress")
                 if on_progress:
-                    await on_progress(ProgressEvent(
-                        event_type="text",
-                        summary="正在处理...",
-                        cli_tool="claude",
-                        timestamp=datetime.now(tz=UTC),
-                        raw={"type": "assistant"},
-                    ))
+                    await on_progress(
+                        ProgressEvent(
+                            event_type="text",
+                            summary="正在处理...",
+                            cli_tool="claude",
+                            timestamp=datetime.now(tz=UTC),
+                            raw={"type": "assistant"},
+                        )
+                    )
                 raise error
 
         mgr = SubprocessManager(max_concurrent=4, adapter=EmitThenFailAdapter(), db_path=db_ready)  # type: ignore[arg-type]
@@ -692,7 +725,8 @@ class TestActivityFlush:
 
         db = await get_connection(db_ready)
         cursor = await db.execute(
-            "SELECT last_activity_type, last_activity_summary FROM tasks WHERE story_id = 'story-test'"
+            "SELECT last_activity_type, last_activity_summary "
+            "FROM tasks WHERE story_id = 'story-test'"
         )
         row = await cursor.fetchone()
         await db.close()

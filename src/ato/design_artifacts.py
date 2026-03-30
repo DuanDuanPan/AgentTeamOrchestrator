@@ -211,13 +211,14 @@ def force_persist_pen(
 
 def write_design_snapshot(
     snapshot_path: Path,
-    memory_tree: dict[str, Any],
+    memory_tree: Any,
 ) -> Path:
     """写入全量结构化快照。
 
     Args:
         snapshot_path: 快照文件路径。
-        memory_tree: 完整内存态节点树。
+        memory_tree: 完整内存态节点树。Pencil ``batch_get`` 可能返回
+            ``{"children": [...]}`` 形式，也可能直接返回顶层节点数组。
 
     Returns:
         写入后的文件路径。
@@ -324,7 +325,9 @@ def verify_snapshot(snapshot_path: Path) -> bool:
     """验证 prototype.snapshot.json 为全量结构化快照。
 
     Returns:
-        True 仅当文件存在、JSON 合法、且根对象包含可递归遍历的 children 节点树。
+        True 仅当文件存在、JSON 合法，且 snapshot 为以下任一结构：
+        - 根为 dict，且包含可递归遍历的 ``children`` 节点树
+        - 根为 list，且每个元素都是可递归遍历的节点对象
     """
     try:
         with open(snapshot_path, encoding="utf-8") as f:
@@ -332,10 +335,13 @@ def verify_snapshot(snapshot_path: Path) -> bool:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return False
 
-    if not isinstance(data, dict):
-        return False
+    if isinstance(data, dict):
+        return _has_structured_children_tree(data, require_children=True)
 
-    return _has_structured_children_tree(data, require_children=True)
+    if isinstance(data, list):
+        return all(_has_structured_children_tree(child, require_children=False) for child in data)
+
+    return False
 
 
 def _has_structured_children_tree(node: Any, *, require_children: bool) -> bool:
@@ -421,7 +427,8 @@ def _extract_primary_frames(snapshot_path: Path) -> list[str]:
     """从 prototype.snapshot.json 确定性提取 primary_frames。
 
     规则：取根 children 中 ``type`` 为 ``"FRAME"`` 的节点的 ``name``，
-    按出现顺序排列。若无 FRAME 节点，取所有根 children 的 ``name``。
+    按出现顺序排列。若 snapshot 根直接为节点数组，则数组本身视为根 children。
+    若无 FRAME 节点，取所有根 children 的 ``name``。
     """
     try:
         with open(snapshot_path, encoding="utf-8") as f:
@@ -429,38 +436,33 @@ def _extract_primary_frames(snapshot_path: Path) -> list[str]:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return []
 
-    if not isinstance(data, dict):
-        return []
-
-    children = data.get("children")
-    if not isinstance(children, list):
+    children: Any
+    if isinstance(data, dict):
+        children = data.get("children")
+        if not isinstance(children, list):
+            return []
+    elif isinstance(data, list):
+        children = data
+    else:
         return []
 
     frames = [
         c["name"]
         for c in children
-        if isinstance(c, dict)
-        and c.get("type") == "FRAME"
-        and isinstance(c.get("name"), str)
+        if isinstance(c, dict) and c.get("type") == "FRAME" and isinstance(c.get("name"), str)
     ]
     if frames:
         return frames
 
     # Fallback: 所有根 children 的 name
-    return [
-        c["name"]
-        for c in children
-        if isinstance(c, dict) and isinstance(c.get("name"), str)
-    ]
+    return [c["name"] for c in children if isinstance(c, dict) and isinstance(c.get("name"), str)]
 
 
 def _collect_reference_exports(exports_dir: Path) -> list[str]:
     """收集 exports/ 下真实存在的 .png 文件列表（UX 目录相对路径，确定性排序）。"""
     if not exports_dir.is_dir():
         return []
-    pngs = sorted(
-        p.name for p in exports_dir.iterdir() if p.is_file() and p.suffix == ".png"
-    )
+    pngs = sorted(p.name for p in exports_dir.iterdir() if p.is_file() and p.suffix == ".png")
     return [f"exports/{name}" for name in pngs]
 
 

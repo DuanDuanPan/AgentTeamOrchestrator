@@ -1,6 +1,6 @@
 """claude_cli — Claude CLI 适配器。
 
-通过 ``claude -p`` (OAuth 模式) 调用 Claude CLI 并返回结构化结果。
+通过 Claude CLI 调用 Claude，并返回结构化结果。
 BMAD skills 在 OAuth 模式下自动加载。
 """
 
@@ -14,15 +14,10 @@ from typing import Any
 
 import structlog
 
-from ato.adapters.base import (
-    BaseAdapter,
-    ProcessStartCallback,
-    cleanup_process,
-    drain_stderr,
-)
+from ato.adapters.base import BaseAdapter, ProcessStartCallback, cleanup_process, drain_stderr
 from ato.models.schemas import (
-    CLIAdapterError,
     ClaudeOutput,
+    CLIAdapterError,
     ErrorCategory,
     ProgressCallback,
     ProgressEvent,
@@ -157,16 +152,18 @@ def build_interactive_command(
 ) -> list[str]:
     """构建 interactive session 的 claude CLI 命令参数列表。
 
-    Interactive session 不使用 --output-format json（人类直接交互）。
+    Claude CLI 默认就是 interactive session。
+    这里只传 prompt 作为首条用户消息，不使用 ``-p/--print``。
     支持 --resume 续接已有 session。
 
     Args:
         prompt: 发送给 CLI 的提示文本。
         session_id: 若提供则使用 --resume 续接。
     """
-    cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
+    cmd = ["claude", "--dangerously-skip-permissions"]
     if session_id:  # None 和 "" 都降级为 fresh session
         cmd.extend(["--resume", session_id])
+    cmd.append(prompt)
     return cmd
 
 
@@ -184,8 +181,13 @@ class ClaudeAdapter(BaseAdapter):
     ) -> list[str]:
         """构建 claude CLI 命令参数列表。"""
         cmd = [
-            "claude", "--dangerously-skip-permissions", "-p", prompt,
-            "--output-format", "stream-json", "--verbose",
+            "claude",
+            "--dangerously-skip-permissions",
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+            "--verbose",
         ]
         if options:
             if model := options.get("model"):
@@ -253,6 +255,7 @@ class ClaudeAdapter(BaseAdapter):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            limit=16 * 1024 * 1024,  # 16MB — MCP 工具可能返回超大 JSON
         )
         stderr_task = asyncio.create_task(drain_stderr(proc.stderr))  # type: ignore[arg-type]
         try:
@@ -263,20 +266,23 @@ class ClaudeAdapter(BaseAdapter):
             # 而非仅 _consume_stream，防止进程关闭 stdout 后僵死
             async with asyncio.timeout(timeout_seconds):
                 result_data = await self._consume_stream(
-                    proc.stdout, on_progress,  # type: ignore[arg-type]
+                    proc.stdout,  # type: ignore[arg-type]
+                    on_progress,
                 )
                 stderr = await stderr_task
                 await proc.wait()
         except TimeoutError as exc:
             if on_progress:
                 with contextlib.suppress(Exception):
-                    await on_progress(ProgressEvent(
-                        event_type="error",
-                        summary=f"超时 ({timeout_seconds}s)",
-                        cli_tool="claude",
-                        timestamp=datetime.now(tz=UTC),
-                        raw={},
-                    ))
+                    await on_progress(
+                        ProgressEvent(
+                            event_type="error",
+                            summary=f"超时 ({timeout_seconds}s)",
+                            cli_tool="claude",
+                            timestamp=datetime.now(tz=UTC),
+                            raw={},
+                        )
+                    )
             await cleanup_process(proc)
             raise CLIAdapterError(
                 f"Claude CLI timed out after {timeout_seconds}s",
@@ -304,13 +310,15 @@ class ClaudeAdapter(BaseAdapter):
             )
             if on_progress:
                 with contextlib.suppress(Exception):
-                    await on_progress(ProgressEvent(
-                        event_type="error",
-                        summary=f"退出码 {exit_code}: {category.value}",
-                        cli_tool="claude",
-                        timestamp=datetime.now(tz=UTC),
-                        raw={},
-                    ))
+                    await on_progress(
+                        ProgressEvent(
+                            event_type="error",
+                            summary=f"退出码 {exit_code}: {category.value}",
+                            cli_tool="claude",
+                            timestamp=datetime.now(tz=UTC),
+                            raw={},
+                        )
+                    )
             raise CLIAdapterError(
                 f"Claude CLI exited with code {exit_code}",
                 category=category,
@@ -323,13 +331,15 @@ class ClaudeAdapter(BaseAdapter):
         if result_data is None:
             if on_progress:
                 with contextlib.suppress(Exception):
-                    await on_progress(ProgressEvent(
-                        event_type="error",
-                        summary="stream-json 未收到 result 事件",
-                        cli_tool="claude",
-                        timestamp=datetime.now(tz=UTC),
-                        raw={},
-                    ))
+                    await on_progress(
+                        ProgressEvent(
+                            event_type="error",
+                            summary="stream-json 未收到 result 事件",
+                            cli_tool="claude",
+                            timestamp=datetime.now(tz=UTC),
+                            raw={},
+                        )
+                    )
             raise CLIAdapterError(
                 "stream-json 未收到 result 事件",
                 category=ErrorCategory.PARSE_ERROR,

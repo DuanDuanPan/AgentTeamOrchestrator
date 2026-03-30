@@ -287,7 +287,7 @@ class TestForcePersistPen:
         from ato.design_artifacts import force_persist_pen
 
         original = {"version": "1.0.0", "children": [{"id": "old"}], "variables": {}}
-        pen = self._make_pen(tmp_path, original)
+        pen = self._make_pen(tmp_path, original)  # type: ignore[arg-type]
 
         with patch("ato.design_artifacts.os.replace", side_effect=OSError("disk full")):
             result = force_persist_pen(pen, [{"id": "new"}])
@@ -465,21 +465,36 @@ class TestVerifyPenIntegrity:
 class TestVerifySnapshot:
     """验证 snapshot 结构校验 (9.1b AC#3, AC#4)。"""
 
-    def test_valid_snapshot_with_children_list_passes(self, tmp_path: Path) -> None:
+    def test_valid_snapshot_with_dict_root_passes(self, tmp_path: Path) -> None:
         from ato.design_artifacts import verify_snapshot
 
         snapshot = tmp_path / "prototype.snapshot.json"
         snapshot.write_text(json.dumps({"version": "1.0.0", "children": [{"id": "n1"}]}))
         assert verify_snapshot(snapshot) is True
 
+    def test_valid_snapshot_with_list_root_passes(self, tmp_path: Path) -> None:
+        from ato.design_artifacts import verify_snapshot
+
+        snapshot = tmp_path / "prototype.snapshot.json"
+        snapshot.write_text(
+            json.dumps(
+                [
+                    {"id": "frame-1", "type": "FRAME", "children": [{"id": "text-1"}]},
+                    {"id": "frame-2", "type": "FRAME"},
+                ]
+            )
+        )
+        assert verify_snapshot(snapshot) is True
+
     @pytest.mark.parametrize(
         ("payload"),
         [
-            [],
             True,
+            ["not-a-node"],
             {"foo": 1},
             {"children": {}},
             {"children": ["not-a-node"]},
+            [{"children": ["not-a-node"]}],
         ],
     )
     def test_invalid_snapshot_shapes_fail(self, tmp_path: Path, payload: object) -> None:
@@ -644,17 +659,27 @@ class TestWritePrototypeManifest:
         (arts / f"{story_id}.md").touch()
         (ux / "ux-spec.md").touch()
         (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
-        snapshot = {"children": [
-            {"type": "FRAME", "name": "Dashboard", "children": []},
-            {"type": "FRAME", "name": "Settings", "children": []},
-        ]}
+        snapshot = {
+            "children": [
+                {"type": "FRAME", "name": "Dashboard", "children": []},
+                {"type": "FRAME", "name": "Settings", "children": []},
+            ]
+        }
         (ux / "prototype.snapshot.json").write_text(json.dumps(snapshot))
-        (ux / "prototype.save-report.json").write_text(json.dumps({
-            "story_id": story_id, "saved_at": "2026-03-28T00:00:00+00:00",
-            "pen_file": "prototype.pen", "snapshot_file": "prototype.snapshot.json",
-            "children_count": 0, "json_parse_verified": True,
-            "reopen_verified": True, "exported_png_count": 1,
-        }))
+        (ux / "prototype.save-report.json").write_text(
+            json.dumps(
+                {
+                    "story_id": story_id,
+                    "saved_at": "2026-03-28T00:00:00+00:00",
+                    "pen_file": "prototype.pen",
+                    "snapshot_file": "prototype.snapshot.json",
+                    "children_count": 0,
+                    "json_parse_verified": True,
+                    "reopen_verified": True,
+                    "exported_png_count": 1,
+                }
+            )
+        )
         (exports / "frame-1.png").write_bytes(b"PNG")
         (exports / "frame-2.png").write_bytes(b"PNG")
         return root
@@ -668,9 +693,16 @@ class TestWritePrototypeManifest:
         m = read_prototype_manifest(path)
         assert m is not None
         for key in (
-            "story_id", "story_file", "ux_spec", "pen_file",
-            "snapshot_file", "save_report_file", "reference_exports",
-            "primary_frames", "dev_lookup_order", "notes",
+            "story_id",
+            "story_file",
+            "ux_spec",
+            "pen_file",
+            "snapshot_file",
+            "save_report_file",
+            "reference_exports",
+            "primary_frames",
+            "dev_lookup_order",
+            "notes",
         ):
             assert key in m, f"Missing key: {key}"
 
@@ -689,6 +721,26 @@ class TestWritePrototypeManifest:
         from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
 
         root = self._setup_ux_dir(tmp_path)
+        path = write_prototype_manifest("s1", root)
+        m = read_prototype_manifest(path)
+        assert m is not None
+        assert m["primary_frames"] == ["Dashboard", "Settings"]
+
+    def test_primary_frames_from_list_root_snapshot(self, tmp_path: Path) -> None:
+        """list-root snapshot 也能提取 primary_frames。"""
+        from ato.design_artifacts import read_prototype_manifest, write_prototype_manifest
+
+        root = self._setup_ux_dir(tmp_path)
+        snapshot_path = root / "_bmad-output/implementation-artifacts/s1-ux/prototype.snapshot.json"
+        snapshot_path.write_text(
+            json.dumps(
+                [
+                    {"type": "FRAME", "name": "Dashboard", "children": []},
+                    {"type": "FRAME", "name": "Settings", "children": []},
+                ]
+            )
+        )
+
         path = write_prototype_manifest("s1", root)
         m = read_prototype_manifest(path)
         assert m is not None
@@ -734,6 +786,7 @@ class TestWritePrototypeManifest:
         root = self._setup_ux_dir(tmp_path)
         # 删除 exports 目录
         import shutil
+
         exports = root / "_bmad-output/implementation-artifacts/s1-ux/exports"
         shutil.rmtree(exports)
         path = write_prototype_manifest("s1", root)
@@ -779,9 +832,10 @@ class TestBuildUxContextFromManifest:
         (ux / "ux-spec.md").touch()
         (ux / "prototype.pen").write_text('{"version":"1.0.0","children":[]}')
         (ux / "prototype.snapshot.json").write_text('{"children":[]}')
-        (ux / "prototype.save-report.json").write_text('{}')
+        (ux / "prototype.save-report.json").write_text("{}")
         (exports / "a.png").write_bytes(b"PNG")
         from ato.design_artifacts import write_prototype_manifest
+
         write_prototype_manifest("s1", root)
         return root
 

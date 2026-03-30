@@ -192,6 +192,31 @@ class TestDeterministicFastPath:
         assert result.verdict == "changes_requested"
         assert all(f.severity == "blocking" for f in result.findings)
 
+    async def test_story_validation_explicit_fail_overrides_suggestion_only_findings(self) -> None:
+        md = """\
+Result: FAIL
+
+## Summary
+- Story still has unresolved issues.
+
+## Key Issues Found
+None
+
+## Enhancements Applied
+- Fixed dependency formatting.
+
+## Remaining Risks
+- Acceptance criteria still contradict architecture.
+
+## Final Conclusion
+Validation failed.
+"""
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.STORY_VALIDATION, story_id="s1")
+        assert result.parser_mode == "deterministic"
+        assert result.verdict == "changes_requested"
+        assert all(f.severity == "suggestion" for f in result.findings)
+
     async def test_architecture_review_ready(self) -> None:
         md = _load_fixture("bmad_architecture_review_01.md")
         adapter = BmadAdapter()
@@ -695,3 +720,42 @@ class TestReviewFinding5BlankLineBetweenBullets:
             story_id="s1",
         )
         assert len(result.findings) == 3
+
+
+class TestReviewFinding6StandaloneBoldAndOrderedLists:
+    """回归：Codex 常用的 `**Patch**` + 有序列表格式不应漏检。"""
+
+    async def test_code_review_standalone_bold_section_with_ordered_items(self) -> None:
+        md = (
+            "**Patch**\n"
+            "1. High: loadDocument() race can drop the latest file contents.\n"
+            "   Location: `src/ato/tui/app.py:87`\n"
+        )
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
+        assert result.parser_mode == "deterministic"
+        assert result.verdict == "changes_requested"
+        assert len(result.findings) == 1
+        assert result.findings[0].category == "patch"
+        assert result.findings[0].file_path == "src/ato/tui/app.py"
+        assert result.findings[0].line == 87
+
+    async def test_qa_report_ordered_items_with_plain_labels(self) -> None:
+        md = (
+            "Recommendation: Request Changes\n"
+            "Quality Score: 70/100\n\n"
+            "## Critical Issues\n\n"
+            "1. Missing regression coverage for crash recovery.\n"
+            "Severity: P1\n"
+            "Location: tests/integration/test_crash_recovery.py:302\n"
+            "Criterion: Test Coverage\n"
+        )
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
+        assert result.parser_mode == "deterministic"
+        assert result.verdict == "changes_requested"
+        assert len(result.findings) == 1
+        assert result.findings[0].severity == "blocking"
+        assert result.findings[0].category == "test_coverage"
+        assert result.findings[0].file_path == "tests/integration/test_crash_recovery.py"
+        assert result.findings[0].line == 302

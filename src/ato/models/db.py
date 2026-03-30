@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import aiosqlite
 import structlog
@@ -39,6 +39,8 @@ _story_status_validator: TypeAdapter[StoryStatus] = TypeAdapter(StoryStatus)
 _task_status_validator: TypeAdapter[TaskStatus] = TypeAdapter(TaskStatus)
 _batch_status_validator: TypeAdapter[BatchStatus] = TypeAdapter(BatchStatus)
 _finding_status_validator: TypeAdapter[FindingStatus] = TypeAdapter(FindingStatus)
+_VALID_TASK_STATUSES = frozenset(get_args(TaskStatus))
+_VALID_FINDING_STATUSES = frozenset(get_args(FindingStatus))
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     cost_usd         REAL,
     duration_ms      INTEGER,
     error_message    TEXT,
+    text_result      TEXT,
     last_activity_type    TEXT,
     last_activity_summary TEXT
 )"""
@@ -333,6 +336,129 @@ async def update_story_worktree_path(
     await db.commit()
 
 
+async def rollback_story(
+    db: aiosqlite.Connection,
+    story_id: str,
+    target_phase: str,
+    *,
+    reason: str,
+    commit: bool = True,
+) -> dict[str, object]:
+    """Safely roll a story back to a target phase and normalize invalid child rows.
+
+    This helper intentionally uses raw SQL updates so it can repair rows that already
+    contain invalid enum values from manual DB edits.
+    """
+    from ato.state_machine import PHASE_TO_STATUS
+
+    target_status = PHASE_TO_STATUS.get(target_phase)
+    if target_status is None or target_phase in {"done", "blocked"}:
+        msg = f"Unsupported rollback target phase: {target_phase}"
+        raise ValueError(msg)
+
+    cursor = await db.execute(
+        "SELECT current_phase, status, worktree_path FROM stories WHERE story_id = ?",
+        (story_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        msg = f"Story '{story_id}' not found in database"
+        raise ValueError(msg)
+
+    previous_phase = str(row["current_phase"])
+    previous_status = str(row["status"])
+    now = datetime.now(tz=UTC)
+    now_iso = _dt_to_iso(now)
+    reason_suffix = f"{reason} -> {target_phase}"
+
+    await db.execute("SAVEPOINT story_rollback")
+    try:
+        await db.execute(
+            "UPDATE stories SET status = ?, current_phase = ?, updated_at = ? WHERE story_id = ?",
+            (target_status, target_phase, now_iso, story_id),
+        )
+
+        task_cursor = await db.execute(
+            """
+            UPDATE tasks
+            SET status = ?,
+                pid = NULL,
+                completed_at = COALESCE(completed_at, ?),
+                error_message = CASE
+                    WHEN error_message IS NULL OR error_message = '' THEN ?
+                    ELSE error_message || '; ' || ?
+                END
+            WHERE story_id = ?
+              AND status NOT IN (?, ?)
+            """,
+            (
+                "failed",
+                now_iso,
+                reason_suffix,
+                reason_suffix,
+                story_id,
+                "completed",
+                "failed",
+            ),
+        )
+
+        finding_cursor = await db.execute(
+            """
+            UPDATE findings
+            SET status = ?
+            WHERE story_id = ?
+              AND status NOT IN (?, ?, ?)
+            """,
+            (
+                "closed",
+                story_id,
+                *_VALID_FINDING_STATUSES,
+            ),
+        )
+
+        approval_cursor = await db.execute(
+            """
+            UPDATE approvals
+            SET status = ?,
+                decision = ?,
+                decision_reason = ?,
+                decided_at = ?,
+                consumed_at = ?
+            WHERE story_id = ?
+              AND status = ?
+            """,
+            (
+                "rejected",
+                "manual_rollback",
+                reason_suffix,
+                now_iso,
+                now_iso,
+                story_id,
+                "pending",
+            ),
+        )
+
+        await db.execute("RELEASE SAVEPOINT story_rollback")
+    except BaseException:
+        await db.execute("ROLLBACK TO SAVEPOINT story_rollback")
+        await db.execute("RELEASE SAVEPOINT story_rollback")
+        raise
+
+    if commit:
+        await db.commit()
+
+    return {
+        "story_id": story_id,
+        "previous_phase": previous_phase,
+        "previous_status": previous_status,
+        "target_phase": target_phase,
+        "target_status": target_status,
+        "normalized_tasks": task_cursor.rowcount,
+        "normalized_findings": finding_cursor.rowcount,
+        "cleared_pending_approvals": approval_cursor.rowcount,
+    }
+
+
 def _row_to_story(row: aiosqlite.Row) -> StoryRecord:
     """SQLite Row → StoryRecord（先反序列化 datetime 再 model_validate）。"""
     data = dict(row)
@@ -350,14 +476,16 @@ def _row_to_story(row: aiosqlite.Row) -> StoryRecord:
 
 _TASK_COLUMNS = (
     "task_id, story_id, phase, role, cli_tool, status, pid, expected_artifact, "
-    "context_briefing, started_at, completed_at, exit_code, cost_usd, duration_ms, error_message"
+    "context_briefing, started_at, completed_at, exit_code, cost_usd, duration_ms, "
+    "error_message, text_result"
 )
 
 
 async def insert_task(db: aiosqlite.Connection, task: TaskRecord) -> None:
     """插入一条 task 记录。"""
     await db.execute(
-        f"INSERT INTO tasks ({_TASK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO tasks ({_TASK_COLUMNS}) VALUES ("
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             task.task_id,
             task.story_id,
@@ -374,6 +502,7 @@ async def insert_task(db: aiosqlite.Connection, task: TaskRecord) -> None:
             task.cost_usd,
             task.duration_ms,
             task.error_message,
+            task.text_result,
         ),
     )
     await db.commit()
@@ -421,6 +550,7 @@ async def update_task_status(
         "duration_ms": int,
         "expected_artifact": str,
         "error_message": str,
+        "text_result": str,
         "context_briefing": str,
         "started_at": datetime,
         "completed_at": datetime,
@@ -538,9 +668,11 @@ async def get_paused_tasks(db: aiosqlite.Connection) -> list[TaskRecord]:
 
 
 async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord]:
-    """返回 active batch 中处于活跃阶段但没有 running/pending/paused task 的 stories。
+    """返回 active batch 中处于活跃阶段且可被自动调度的 stories。
 
     用于检测需要初始调度的 stories（batch confirm 后首次 dispatch）。
+    存在 pending ``crash_recovery`` approval 的 story 会被排除，避免在等待
+    人工决策期间被初始调度路径再次补发 task。
     """
     cursor = await db.execute(
         """
@@ -555,6 +687,12 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
             SELECT 1 FROM tasks t
             WHERE t.story_id = s.story_id
               AND t.status IN ('running', 'pending', 'paused')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM approvals a
+            WHERE a.story_id = s.story_id
+              AND a.approval_type = 'crash_recovery'
+              AND a.status = 'pending'
           )
         """,
     )

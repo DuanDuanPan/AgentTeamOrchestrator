@@ -86,12 +86,15 @@ def _launch_terminal_session(
     base_json = json.dumps(base_commit)
     safe_base = shlex.quote(base_json)
     safe_sid = shlex.quote(sid_json)
+    # sidecar_path / worktree_path 必须用绝对路径，否则 cd 后相对路径会指向错误位置
+    abs_sidecar = str(sidecar_path.resolve())
+    abs_worktree = str(worktree_path.resolve())
     script_content = (
         f"#!/bin/bash\n"
         f"_ato_bc={safe_base}\n"
         f"_ato_sid={safe_sid}\n"
-        f"cd {shlex.quote(str(worktree_path))}\n"
-        f"cat > {shlex.quote(str(sidecar_path))} <<SIDECAR_EOF\n"
+        f"cd {shlex.quote(abs_worktree)}\n"
+        f"cat > {shlex.quote(abs_sidecar)} <<SIDECAR_EOF\n"
         f'{{"pid": $$, '
         f'"started_at": "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)", '
         f'"base_commit": $_ato_bc, '
@@ -220,17 +223,17 @@ class SubprocessManager:
                 logger.info("pid_registered", pid=pid)
 
         # --- latest-only, serialized activity writer ---
-        _THROTTLE_INTERVAL: float = 1.0
-        _last_flush_mono: float = 0.0
-        _latest_event: ProgressEvent | None = None
-        _delayed_flush_task: asyncio.Task[None] | None = None
+        throttle_interval: float = 1.0
+        last_flush_mono: float = 0.0
+        latest_event: ProgressEvent | None = None
+        delayed_flush_task: asyncio.Task[None] | None = None
 
         async def _flush_latest_activity() -> None:
-            nonlocal _latest_event, _last_flush_mono
-            event = _latest_event
+            nonlocal latest_event, last_flush_mono
+            event = latest_event
             if event is None:
                 return
-            _latest_event = None
+            latest_event = None
             try:
                 db_conn = await get_connection(self._db_path)
                 try:
@@ -242,30 +245,30 @@ class SubprocessManager:
                     )
                 finally:
                     await db_conn.close()
-                _last_flush_mono = time.monotonic()
+                last_flush_mono = time.monotonic()
             except Exception:
                 logger.warning("progress_db_write_failed", exc_info=True)
 
         async def _delayed_flush() -> None:
-            nonlocal _latest_event
-            while _latest_event is not None:
-                delay = max(0.0, _THROTTLE_INTERVAL - (time.monotonic() - _last_flush_mono))
+            nonlocal latest_event
+            while latest_event is not None:
+                delay = max(0.0, throttle_interval - (time.monotonic() - last_flush_mono))
                 if delay > 0:
                     await asyncio.sleep(delay)
                 await _flush_latest_activity()
 
         async def _progress_wrapper(event: ProgressEvent) -> None:
-            nonlocal _latest_event, _delayed_flush_task
-            _latest_event = event
+            nonlocal latest_event, delayed_flush_task
+            latest_event = event
             if event.event_type in ("result", "error"):
                 # Terminal events: cancel pending flush and force-flush now
-                if _delayed_flush_task and not _delayed_flush_task.done():
-                    _delayed_flush_task.cancel()
+                if delayed_flush_task and not delayed_flush_task.done():
+                    delayed_flush_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await _delayed_flush_task
+                        await delayed_flush_task
                 await _flush_latest_activity()
-            elif _delayed_flush_task is None or _delayed_flush_task.done():
-                _delayed_flush_task = asyncio.create_task(_delayed_flush())
+            elif delayed_flush_task is None or delayed_flush_task.done():
+                delayed_flush_task = asyncio.create_task(_delayed_flush())
             if on_progress is not None:
                 await on_progress(event)
 
@@ -305,6 +308,7 @@ class SubprocessManager:
                         cost_usd=None,
                         last_activity_type=None,
                         last_activity_summary=None,
+                        text_result=None,
                     )
                 finally:
                     await db.close()
@@ -320,10 +324,10 @@ class SubprocessManager:
                 )
             except CLIAdapterError as exc:
                 # 终态前强制 flush 最新 activity（Fix: Codex turn_end 不在终态集合）
-                if _delayed_flush_task and not _delayed_flush_task.done():
-                    _delayed_flush_task.cancel()
+                if delayed_flush_task and not delayed_flush_task.done():
+                    delayed_flush_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await _delayed_flush_task
+                        await delayed_flush_task
                 await _flush_latest_activity()
 
                 completed_at = datetime.now(tz=UTC)
@@ -360,10 +364,10 @@ class SubprocessManager:
                 raise
             else:
                 # 终态前强制 flush 最新 activity（Fix: Codex turn_end 不在终态集合）
-                if _delayed_flush_task and not _delayed_flush_task.done():
-                    _delayed_flush_task.cancel()
+                if delayed_flush_task and not delayed_flush_task.done():
+                    delayed_flush_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await _delayed_flush_task
+                        await delayed_flush_task
                 await _flush_latest_activity()
 
                 completed_at = datetime.now(tz=UTC)
@@ -389,6 +393,7 @@ class SubprocessManager:
                         duration_ms=result.duration_ms,
                         completed_at=completed_at,
                         error_message=None,
+                        text_result=result.text_result,
                     )
                     await insert_cost_log(
                         db,
@@ -416,10 +421,10 @@ class SubprocessManager:
                 return result
             finally:
                 # 清理后台 flush task，防止悬挂
-                if _delayed_flush_task and not _delayed_flush_task.done():
-                    _delayed_flush_task.cancel()
+                if delayed_flush_task and not delayed_flush_task.done():
+                    delayed_flush_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await _delayed_flush_task
+                        await delayed_flush_task
 
     async def dispatch_with_retry(
         self,

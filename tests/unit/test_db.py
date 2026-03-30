@@ -28,6 +28,7 @@ from ato.models.db import (
     insert_findings_batch,
     insert_story,
     insert_task,
+    rollback_story,
     update_finding_status,
     update_story_status,
     update_task_status,
@@ -592,6 +593,61 @@ class TestUpdateValidation:
             await db.close()
 
 
+class TestRollbackStory:
+    async def test_rollback_story_normalizes_invalid_child_statuses(
+        self, initialized_db_path: Path
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-rb",
+                    title="rollback target",
+                    status="in_progress",
+                    current_phase="developing",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                ),
+            )
+            await insert_task(db, _make_task("t-rb", "s-rb", pid=321))
+            await insert_finding(db, _make_finding("f-rb", "s-rb"))
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="a-rb",
+                    story_id="s-rb",
+                    approval_type="crash_recovery",
+                    status="pending",
+                    created_at=_NOW,
+                ),
+            )
+
+            await db.execute("UPDATE tasks SET status = 'cancelled' WHERE task_id = 't-rb'")
+            await db.execute("UPDATE findings SET status = 'resolved' WHERE finding_id = 'f-rb'")
+            await db.commit()
+
+            summary = await rollback_story(db, "s-rb", "creating", reason="test rollback")
+
+            story = await get_story(db, "s-rb")
+            tasks = await get_tasks_by_story(db, "s-rb")
+            findings = await get_findings_by_story(db, "s-rb")
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        assert story is not None
+        assert story.current_phase == "creating"
+        assert story.status == "planning"
+        assert tasks[0].status == "failed"
+        assert tasks[0].pid is None
+        assert findings[0].status == "closed"
+        assert approvals == []
+        assert summary["normalized_tasks"] == 1
+        assert summary["normalized_findings"] == 1
+        assert summary["cleared_pending_approvals"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
@@ -1138,18 +1194,52 @@ class TestUpdateTaskStatusActivity:
                 ),
             )
             await update_task_status(
-                db, "t-clr", "running",
+                db,
+                "t-clr",
+                "running",
                 last_activity_type="text",
                 last_activity_summary="hello",
             )
             await update_task_status(
-                db, "t-clr", "running",
+                db,
+                "t-clr",
+                "running",
                 last_activity_type=None,
                 last_activity_summary=None,
             )
             tasks = await get_tasks_by_story(db, "s-clr")
             assert tasks[0].last_activity_type is None
             assert tasks[0].last_activity_summary is None
+        finally:
+            await db.close()
+
+    async def test_update_task_status_text_result(self, initialized_db_path: Path) -> None:
+        """完整原始输出可通过 update_task_status 写入并 round-trip 读取。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-text"))
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-text",
+                    story_id="s-text",
+                    phase="reviewing",
+                    role="reviewer",
+                    cli_tool="codex",
+                    status="running",
+                    started_at=_NOW,
+                ),
+            )
+            full_output = "# Review\n\n" + ("detail line\n" * 50)
+            await update_task_status(
+                db,
+                "t-text",
+                "completed",
+                completed_at=_NOW,
+                text_result=full_output,
+            )
+            tasks = await get_tasks_by_story(db, "s-text")
+            assert tasks[0].text_result == full_output
         finally:
             await db.close()
 
@@ -1178,7 +1268,8 @@ class TestUpdateTaskActivityOnly:
                 ),
             )
             await update_task_activity(
-                db, "t-aonly",
+                db,
+                "t-aonly",
                 activity_type="tool_use",
                 activity_summary="调用工具: Write",
             )

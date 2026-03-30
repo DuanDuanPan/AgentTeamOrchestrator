@@ -593,3 +593,39 @@ class ATOApp(App[None]):
                     orchestrator_pid=current_pid,
                 )
         return True
+
+    async def submit_uat_result(
+        self,
+        *,
+        story_id: str,
+        result: str,
+        reason: str = "",
+    ) -> str:
+        """提交 UAT 结果并 best-effort nudge orchestrator。"""
+        from typing import Literal, cast
+
+        from ato.nudge import send_external_nudge
+        from ato.uat import submit_uat_result as submit_uat_result_helper
+
+        outcome = await submit_uat_result_helper(
+            db_path=self._db_path,
+            story_id=story_id,
+            result=cast(Literal["pass", "fail"], result),
+            reason=reason,
+        )
+
+        current_pid = self._resolve_orchestrator_pid()
+        if current_pid is not None:
+            try:
+                send_external_nudge(current_pid)
+            except ProcessLookupError:
+                logger.warning(
+                    "nudge_skipped_process_not_found",
+                    orchestrator_pid=current_pid,
+                )
+            except PermissionError:
+                logger.warning(
+                    "nudge_skipped_permission_error",
+                    orchestrator_pid=current_pid,
+                )
+        return outcome.message

@@ -213,8 +213,7 @@ class TestEndToEnd:
             ("start_create", "creating", "planning"),
             ("create_done", "designing", "planning"),
             ("design_done", "validating", "planning"),
-            ("validate_pass", "dev_ready", "ready"),
-            ("start_dev", "developing", "in_progress"),
+            ("validate_pass", "developing", "in_progress"),
             ("dev_done", "reviewing", "review"),
         ]
 

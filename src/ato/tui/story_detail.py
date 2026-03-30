@@ -16,7 +16,7 @@ from textual.binding import BindingType
 from textual.containers import VerticalScroll
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from ato.state_machine import CANONICAL_PHASES
 from ato.tui.theme import RICH_COLORS
@@ -37,7 +37,9 @@ class StoryDetailView(Widget):
     DEFAULT_CSS = ""
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        ("f", "toggle_findings", "Findings"),
+        ("p", "submit_uat_pass", "UAT通过"),
+        ("f", "contextual_fail_or_findings", "UAT不通过/Findings"),
+        ("i", "toggle_findings", "Findings"),
         ("c", "toggle_costs", "成本"),
         ("h", "toggle_history", "历史"),
         ("l", "show_log_placeholder", "日志"),
@@ -46,6 +48,21 @@ class StoryDetailView(Widget):
 
     class BackRequested(Message):
         """用户按 ESC 从详情概览请求返回主屏。"""
+
+    class UatPassRequested(Message):
+        """请求提交 UAT 通过。"""
+
+        def __init__(self, story_id: str) -> None:
+            self.story_id = story_id
+            super().__init__()
+
+    class UatFailRequested(Message):
+        """请求提交 UAT 不通过。"""
+
+        def __init__(self, story_id: str, reason: str) -> None:
+            self.story_id = story_id
+            self.reason = reason
+            super().__init__()
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -61,6 +78,10 @@ class StoryDetailView(Widget):
         self._cost_usd: float = 0.0
         # Sub-view state: "findings" | "costs" | "history" | "log" | None
         self._expanded_view: str | None = None
+        # UAT 原生提交状态
+        self._uat_prompt_active: bool = False
+        self._uat_submitting: bool = False
+        self._uat_feedback: str | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="story-detail-scroll"):
@@ -68,6 +89,8 @@ class StoryDetailView(Widget):
             yield Static(id="detail-summary")
             yield ConvergentLoopProgress(id="detail-cl-progress")
             yield AgentActivityWidget(id="detail-agent-activity")
+            yield Static(id="detail-uat-feedback")
+            yield Input(placeholder="输入 UAT 不通过原因后回车提交", id="detail-uat-reason")
             yield Static(id="detail-expanded")
 
     def update_detail(
@@ -81,6 +104,7 @@ class StoryDetailView(Widget):
         cl_round: int = 0,
         cl_max_rounds: int = 3,
         cost_usd: float = 0.0,
+        preserve_expanded_view: bool = False,
     ) -> None:
         """接收并渲染 story 详情数据。"""
         self._story_data = story
@@ -94,32 +118,33 @@ class StoryDetailView(Widget):
             self._cost_logs = cost_logs
         if tasks is not None:
             self._tasks = tasks
-        # 进入详情页时重置展开状态
-        self._expanded_view = None
+        if not preserve_expanded_view:
+            # 进入详情页时重置展开状态
+            self._expanded_view = None
+            self._uat_prompt_active = False
+            self._uat_submitting = False
+            self._uat_feedback = None
         self._render_all()
 
     def update_activity_only(self, *, activity_type: str, activity_summary: str) -> None:
         """仅更新 agent activity 指示器，不影响其他 UI 状态。"""
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#detail-agent-activity", AgentActivityWidget).update_activity(
                 activity_type=activity_type,
                 activity_summary=activity_summary,
             )
-        except Exception:
-            pass  # widget 尚未挂载
 
     def clear_activity_only(self) -> None:
         """清除 agent activity 指示器。"""
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#detail-agent-activity", AgentActivityWidget).clear_activity()
-        except Exception:
-            pass  # widget 尚未挂载
 
     def _render_all(self) -> None:
         """渲染所有区块。"""
         self._render_phase_flow()
         self._render_summary()
         self._render_cl_progress()
+        self._render_uat_submission()
         self._render_expanded()
 
     # ------------------------------------------------------------------
@@ -177,10 +202,17 @@ class StoryDetailView(Widget):
 
         # 快捷键提示 (Task 2.7)
         text.append("\n")
-        text.append(
-            "[f] Findings  [c] 成本  [h] 历史  [l] 日志  [ESC] 返回",
-            style=RICH_COLORS["$muted"],
-        )
+        if self._is_uat_story():
+            text.append(
+                "[p] UAT通过  [f] UAT不通过  [i] Findings  "
+                "[c] 成本  [h] 历史  [l] 日志  [ESC] 返回",
+                style=RICH_COLORS["$muted"],
+            )
+        else:
+            text.append(
+                "[f] Findings  [c] 成本  [h] 历史  [l] 日志  [ESC] 返回",
+                style=RICH_COLORS["$muted"],
+            )
 
         self._update_child("#detail-summary", text)
 
@@ -273,6 +305,95 @@ class StoryDetailView(Widget):
                 max_rounds=self._cl_max_rounds,
                 findings_summary=self._findings_summary,
             )
+
+    def _render_uat_submission(self) -> None:
+        """更新 UAT 原生提交提示与 fail 原因输入框。"""
+        with contextlib.suppress(Exception):
+            feedback = self.query_one("#detail-uat-feedback", Static)
+            reason_input = self.query_one("#detail-uat-reason", Input)
+
+            if not self._is_uat_story():
+                feedback.display = False
+                feedback.update("")
+                reason_input.display = False
+                reason_input.disabled = True
+                reason_input.value = ""
+                return
+
+            if self._uat_feedback:
+                if self._uat_submitting:
+                    style = RICH_COLORS["$info"]
+                elif any(
+                    token in self._uat_feedback
+                    for token in ("不能为空", "不在 UAT", "未找到", "不存在", "未通过")
+                ):
+                    style = RICH_COLORS["$warning"]
+                else:
+                    style = RICH_COLORS["$success"]
+                feedback.display = True
+                feedback.update(Text(self._uat_feedback, style=style))
+            else:
+                feedback.display = False
+                feedback.update("")
+
+            if self._uat_prompt_active:
+                reason_input.display = True
+                reason_input.disabled = self._uat_submitting
+                if not self._uat_submitting:
+                    reason_input.focus()
+            else:
+                reason_input.display = False
+                reason_input.disabled = True
+
+    def _is_uat_story(self) -> bool:
+        """当前详情是否处于 UAT phase。"""
+        return str(self._story_data.get("current_phase", "")) == "uat"
+
+    def _open_uat_fail_prompt(self) -> None:
+        """打开 UAT fail 原因输入。"""
+        if not self._is_uat_story() or self._uat_submitting:
+            return
+        self._expanded_view = None
+        self._uat_prompt_active = True
+        self._uat_feedback = "请输入 UAT 未通过原因，回车提交，ESC 取消。"
+        with contextlib.suppress(Exception):
+            self.query_one("#detail-uat-reason", Input).value = ""
+        self._render_uat_submission()
+        self._render_expanded()
+
+    def _close_uat_fail_prompt(self, *, clear_feedback: bool) -> None:
+        """关闭 UAT fail 原因输入。"""
+        self._uat_prompt_active = False
+        self._uat_submitting = False
+        if clear_feedback:
+            self._uat_feedback = None
+        with contextlib.suppress(Exception):
+            self.query_one("#detail-uat-reason", Input).value = ""
+        self._render_uat_submission()
+
+    def _start_uat_submission(self, message: str) -> None:
+        """进入 UAT 提交中状态。"""
+        self._expanded_view = None
+        self._uat_submitting = True
+        self._uat_feedback = message
+        self._render_uat_submission()
+        self._render_expanded()
+
+    def finish_uat_submission(
+        self,
+        *,
+        success: bool,
+        message: str,
+        keep_prompt: bool = False,
+    ) -> None:
+        """由父级在异步写库完成后回填 UAT 提交结果。"""
+        self._uat_submitting = False
+        self._uat_feedback = message
+        self._uat_prompt_active = keep_prompt and not success and self._is_uat_story()
+        if success or not keep_prompt:
+            with contextlib.suppress(Exception):
+                self.query_one("#detail-uat-reason", Input).value = ""
+        self._render_uat_submission()
 
     # ------------------------------------------------------------------
     # 展开子视图（第 2.5 层）(Task 5)
@@ -426,29 +547,74 @@ class StoryDetailView(Widget):
 
     def action_toggle_findings(self) -> None:
         """f 键：展开/折叠 Findings 列表。"""
+        if self._uat_prompt_active or self._uat_submitting:
+            return
         self._expanded_view = None if self._expanded_view == "findings" else "findings"
         self._render_expanded()
 
     def action_toggle_costs(self) -> None:
         """c 键：展开/折叠成本明细。"""
+        if self._uat_prompt_active or self._uat_submitting:
+            return
         self._expanded_view = None if self._expanded_view == "costs" else "costs"
         self._render_expanded()
 
     def action_toggle_history(self) -> None:
         """h 键：展开/折叠执行历史。"""
+        if self._uat_prompt_active or self._uat_submitting:
+            return
         self._expanded_view = None if self._expanded_view == "history" else "history"
         self._render_expanded()
 
     def action_show_log_placeholder(self) -> None:
         """l 键：显示日志 placeholder。"""
+        if self._uat_prompt_active or self._uat_submitting:
+            return
         text = Text()
         text.append("\n日志查看将在后续版本提供\n", style=RICH_COLORS["$warning"])
         text.append("\n[ESC] 返回概览", style=RICH_COLORS["$muted"])
         self._update_child("#detail-expanded", text)
         self._expanded_view = "log"
 
+    def action_contextual_fail_or_findings(self) -> None:
+        """UAT phase 下 f=fail，其他 phase 保持 findings。"""
+        if self._is_uat_story():
+            self._open_uat_fail_prompt()
+            return
+        self.action_toggle_findings()
+
+    def action_submit_uat_pass(self) -> None:
+        """UAT phase 下 p=pass。"""
+        if not self._is_uat_story() or self._uat_prompt_active or self._uat_submitting:
+            return
+        story_id = str(self._story_data.get("story_id", ""))
+        if not story_id:
+            return
+        self._start_uat_submission("正在提交 UAT 通过...")
+        self.post_message(self.UatPassRequested(story_id))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """提交 fail 原因。"""
+        if event.input.id != "detail-uat-reason":
+            return
+        if not self._is_uat_story() or not self._uat_prompt_active or self._uat_submitting:
+            return
+        reason = event.value.strip()
+        if not reason:
+            self._uat_feedback = "失败原因不能为空"
+            self._render_uat_submission()
+            return
+        story_id = str(self._story_data.get("story_id", ""))
+        if not story_id:
+            return
+        self._start_uat_submission("正在提交 UAT 不通过...")
+        self.post_message(self.UatFailRequested(story_id, reason))
+
     def action_back(self) -> None:
         """ESC 键：从展开子视图返回详情概览，或从详情概览返回主屏。"""
+        if self._uat_prompt_active:
+            self._close_uat_fail_prompt(clear_feedback=True)
+            return
         if self._expanded_view is not None:
             self._expanded_view = None
             self._render_expanded()

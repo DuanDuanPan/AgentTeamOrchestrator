@@ -351,3 +351,33 @@ class TestMigrationV9:
             row = await cursor.fetchone()
             assert row is not None
             assert row[0] == 9
+
+
+class TestMigrationV10:
+    """MIGRATIONS[10] — tasks 表新增 text_result 列（完整原始输出持久化）。"""
+
+    async def test_migrate_v9_to_v10(self, db_path: Path) -> None:
+        """v9→v10 迁移新增 text_result 列。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, 10)
+            cursor = await db.execute("PRAGMA table_info(tasks)")
+            cols = {row[1] for row in await cursor.fetchall()}
+            assert "text_result" in cols
+
+    async def test_migrate_v9_to_v10_idempotent(self, db_path: Path) -> None:
+        """重复执行 v10 迁移不报错。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, 10)
+            await db.execute("PRAGMA user_version = 9")
+            await db.commit()
+            await run_migrations(db, 9, 10)
+            cursor = await db.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == 10

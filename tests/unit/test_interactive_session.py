@@ -142,8 +142,9 @@ class TestClaudeAdapterInteractive:
 
         cmd = build_interactive_command(prompt="开始 UAT 测试")
         assert cmd[0] == "claude"
-        assert "-p" in cmd
-        assert "开始 UAT 测试" in cmd
+        assert "-p" not in cmd
+        assert "--print" not in cmd
+        assert cmd[-1] == "开始 UAT 测试"
         # interactive 不应有 --output-format json
         assert "--output-format" not in cmd
 
@@ -545,6 +546,7 @@ class TestSessionResume:
 
         cmd = build_interactive_command(prompt="开始")
         assert "--resume" not in cmd
+        assert "-p" not in cmd
 
     def test_build_interactive_command_empty_session_id(self) -> None:
         """空字符串 session_id 应降级为 fresh session（无 --resume）。"""
@@ -552,6 +554,7 @@ class TestSessionResume:
 
         cmd = build_interactive_command(prompt="开始", session_id="")
         assert "--resume" not in cmd
+        assert "-p" not in cmd
 
     async def test_dispatch_interactive_with_resume(self, initialized_db_path: Path) -> None:
         """dispatch_interactive 传入 session_id 应在 sidecar 中记录。"""

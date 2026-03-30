@@ -267,6 +267,13 @@ async def _migrate_v8_to_v9(db: aiosqlite.Connection) -> None:
     )
 
 
+@_register(10)
+async def _migrate_v9_to_v10(db: aiosqlite.Connection) -> None:
+    """v9 → v10: tasks 表新增 text_result 列（保留完整 agent 原始输出）。"""
+    if not await _column_exists(db, "tasks", "text_result"):
+        await db.execute("ALTER TABLE tasks ADD COLUMN text_result TEXT")
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

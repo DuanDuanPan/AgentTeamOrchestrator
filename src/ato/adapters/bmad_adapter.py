@@ -178,7 +178,7 @@ class BmadAdapter:
         # Stage 1: deterministic fast-path
         findings = _deterministic_parse(markdown_output, skill_type=skill_type)
         if findings is not None:
-            verdict = _compute_verdict(findings)
+            verdict = _compute_effective_verdict(markdown_output, skill_type, findings)
             return BmadParseResult.model_validate(
                 {
                     "skill_type": skill_type,
@@ -201,7 +201,7 @@ class BmadAdapter:
                     story_id=story_id,
                 )
                 findings_objs = _normalize_raw_findings(raw_findings, skill_type)
-                verdict = _compute_verdict(findings_objs)
+                verdict = _compute_effective_verdict(markdown_output, skill_type, findings_objs)
                 return BmadParseResult.model_validate(
                     {
                         "skill_type": skill_type,
@@ -258,6 +258,68 @@ def _compute_verdict(findings: list[BmadFinding]) -> ParseVerdict:
     if any(f.severity == "blocking" for f in findings):
         return "changes_requested"
     return "approved"
+
+
+def _compute_effective_verdict(
+    markdown_output: str,
+    skill_type: BmadSkillType,
+    findings: list[BmadFinding],
+) -> ParseVerdict:
+    """计算最终 verdict，必要时保留原始文本中的显式判定。"""
+    computed = _compute_verdict(findings)
+    explicit = _extract_explicit_verdict(markdown_output, skill_type)
+    if explicit == "changes_requested":
+        return "changes_requested"
+    if explicit == "approved":
+        return "changes_requested" if computed == "changes_requested" else "approved"
+    return computed
+
+
+def _extract_explicit_verdict(
+    markdown_output: str,
+    skill_type: BmadSkillType,
+) -> ParseVerdict | None:
+    """从原始文本中提取 agent 的显式判定，用于 findings 缺失时兜底。"""
+    if skill_type == BmadSkillType.STORY_VALIDATION:
+        result_match = _SV_RESULT_RE.search(markdown_output)
+        if result_match is not None:
+            explicit_result = result_match.group(1).upper()
+            if explicit_result in ("FAIL", "INVALID"):
+                return "changes_requested"
+            if explicit_result == "PASS":
+                return "approved"
+        return None
+
+    if skill_type == BmadSkillType.QA_REPORT:
+        recommendation_match = _QA_RECOMMENDATION_RE.search(markdown_output)
+        if recommendation_match is not None:
+            recommendation = recommendation_match.group(1).lower()
+            if "request changes" in recommendation or "block" in recommendation:
+                return "changes_requested"
+            if "approve" in recommendation:
+                return "approved"
+        return None
+
+    if skill_type == BmadSkillType.CODE_REVIEW:
+        summary_match = _SUMMARY_RE.search(markdown_output)
+        if summary_match is not None:
+            blocking_total = sum(int(summary_match.group(idx)) for idx in (1, 2, 3))
+            if blocking_total > 0:
+                return "changes_requested"
+            if int(summary_match.group(4)) >= 0:
+                return "approved"
+
+        for pattern in ("intent\\s+gaps?", "bad\\s+spec", "patch"):
+            section_body = _extract_named_section(markdown_output, pattern)
+            if not section_body:
+                section_body = _extract_bold_list_section(markdown_output, pattern)
+            if not section_body:
+                section_body = _extract_bold_section(markdown_output, pattern)
+            if section_body and _section_has_findings(section_body):
+                return "changes_requested"
+        return None
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +489,9 @@ def _parse_code_review(markdown: str) -> list[BmadFinding] | None:
         # 其次 bold-label 列表形式（- **Intent Gaps**: ...）
         if not section_body:
             section_body = _extract_bold_list_section(markdown, pattern)
+        # 最后支持 standalone bold section（**Patch** 换行后接编号项）
+        if not section_body:
+            section_body = _extract_bold_section(markdown, pattern)
         if not section_body:
             continue
 
@@ -697,13 +762,13 @@ def _parse_architecture_review(markdown: str) -> list[BmadFinding] | None:
 # ---------------------------------------------------------------------------
 
 _QA_RECOMMENDATION_RE = re.compile(
-    r"\*\*Recommendation\*\*[：:]\s*(Approve|Approve\s+with\s+Comments|"
+    r"(?:\*\*)?Recommendation(?:\*\*)?\s*[：:]\s*(Approve|Approve\s+with\s+Comments|"
     r"Request\s+Changes|Block)",
     re.IGNORECASE,
 )
 
 _QA_SCORE_RE = re.compile(
-    r"\*\*Quality\s+Score\*\*[：:]\s*(\d+)/100",
+    r"(?:\*\*)?Quality\s+Score(?:\*\*)?\s*[：:]\s*(\d+)/100",
     re.IGNORECASE,
 )
 
@@ -713,17 +778,17 @@ _QA_ISSUE_HEADING_RE = re.compile(
 )
 
 _QA_SEVERITY_RE = re.compile(
-    r"\*\*Severity\*\*[：:]\s*(P0|P1|P2|P3)\s*\(([^)]+)\)",
+    r"(?:\*\*)?Severity(?:\*\*)?\s*[：:]\s*(P0|P1|P2|P3)(?:\s*\(([^)]+)\))?",
     re.IGNORECASE,
 )
 
 _QA_LOCATION_RE = re.compile(
-    r"\*\*Location\*\*[：:]\s*`([^`]+)`",
+    r"(?:\*\*)?Location(?:\*\*)?\s*[：:]\s*`?([^`\n]+)`?",
     re.IGNORECASE,
 )
 
 _QA_CRITERION_RE = re.compile(
-    r"\*\*Criterion\*\*[：:]\s*(.+)",
+    r"(?:\*\*)?Criterion(?:\*\*)?\s*[：:]\s*([^\n]+)",
     re.IGNORECASE,
 )
 
@@ -741,12 +806,18 @@ def _parse_qa_report(markdown: str) -> list[BmadFinding] | None:
     findings: list[BmadFinding] = []
 
     # Parse "Critical Issues (Must Fix)" section
-    critical_section = _extract_named_section(markdown, r"critical\s+issues\s*\(must\s+fix\)")
+    critical_section = _extract_named_section(markdown, r"critical\s+issues(?:\s*\(must\s+fix\))?")
+    if not critical_section:
+        critical_section = _extract_bold_section(
+            markdown, r"critical\s+issues(?:\s*\(must\s+fix\))?"
+        )
     if critical_section:
         findings.extend(_parse_qa_issue_section(critical_section, default_severity="blocking"))
 
     # Parse "Recommendations (Should Fix)" section
-    rec_section = _extract_named_section(markdown, r"recommendations?\s*\(should\s+fix\)")
+    rec_section = _extract_named_section(markdown, r"recommendations?(?:\s*\(should\s+fix\))?")
+    if not rec_section:
+        rec_section = _extract_bold_section(markdown, r"recommendations?(?:\s*\(should\s+fix\))?")
     if rec_section:
         findings.extend(_parse_qa_issue_section(rec_section, default_severity="suggestion"))
 
@@ -771,13 +842,9 @@ def _parse_qa_issue_section(
 ) -> list[BmadFinding]:
     """解析 QA report 的 issue section（Critical Issues / Recommendations）。"""
     findings: list[BmadFinding] = []
-    issue_headings = list(_QA_ISSUE_HEADING_RE.finditer(section))
+    numbered_blocks = _extract_numbered_blocks(section)
 
-    for i, m in enumerate(issue_headings):
-        end = issue_headings[i + 1].start() if i + 1 < len(issue_headings) else len(section)
-        body = section[m.end() : end].strip()
-        title = m.group(2).strip()
-
+    for title, body in numbered_blocks:
         # Extract severity from body
         severity = default_severity
         sev_match = _QA_SEVERITY_RE.search(body)
@@ -964,14 +1031,9 @@ def _extract_items_from_section(
     """从 section 中提取 (title, detail, file_path, line) 项。"""
     items: list[tuple[str, str, str | None, int | None]] = []
 
-    # 尝试按编号子标题分割
-    numbered_re = re.compile(r"^(?:#{3,5})\s+(\d+)[.、]\s*(.+)$", re.MULTILINE)
-    numbered = list(numbered_re.finditer(section))
+    numbered = _extract_numbered_blocks(section)
     if numbered:
-        for i, m in enumerate(numbered):
-            end = numbered[i + 1].start() if i + 1 < len(numbered) else len(section)
-            body = section[m.end() : end].strip()
-            title = m.group(2).strip()
+        for title, body in numbered:
             # 先从 title 提取 location，再从 body 提取
             fp, ln = _extract_location_from_body(title)
             if fp is None:
@@ -994,6 +1056,19 @@ def _extract_items_from_section(
         fp, ln = _extract_location_from_body(bullet)
         items.append((title, detail, fp, ln))
     return items
+
+
+def _extract_numbered_blocks(section: str) -> list[tuple[str, str]]:
+    """提取 `1. title` / `### 1. title` 形式的块。"""
+    numbered_re = re.compile(r"^(?:\s*#{3,5}\s+)?(\d+)[.)、]\s*(.+)$", re.MULTILINE)
+    matches = list(numbered_re.finditer(section))
+    blocks: list[tuple[str, str]] = []
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(section)
+        title = match.group(2).strip()
+        body = section[match.end() : end].strip()
+        blocks.append((title, body))
+    return blocks
 
 
 def _extract_bold_list_section(markdown: str, pattern: str) -> str | None:
@@ -1066,6 +1141,23 @@ def _extract_bullet_items(text: str) -> list[str]:
         if stripped.startswith("- ") or stripped.startswith("* "):
             items.append(stripped[2:].strip())
     return items
+
+
+def _section_has_findings(section: str) -> bool:
+    """判断 section 是否包含非空 finding 内容。"""
+    if _extract_numbered_blocks(section):
+        return True
+    if _extract_bullet_items(section):
+        return True
+    stripped = [
+        line.strip()
+        for line in section.splitlines()
+        if line.strip() and not line.strip().startswith(("**Summary", "Summary"))
+    ]
+    if not stripped:
+        return False
+    lowered = " ".join(stripped).lower()
+    return not lowered.startswith(("none", "no findings", "no issues"))
 
 
 def _extract_file_ref(text: str) -> str | None:

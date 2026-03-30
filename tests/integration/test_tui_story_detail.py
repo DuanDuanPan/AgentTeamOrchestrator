@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from textual.containers import VerticalScroll
-from textual.widgets import ContentSwitcher
+from textual.widgets import ContentSwitcher, Input
 
 from ato.models.db import get_connection, init_db
 from ato.tui.app import ATOApp
@@ -94,6 +94,28 @@ async def tui_db_with_three_stories(tui_db_path: Path) -> Path:
                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (sid, title, "in_progress", "reviewing", now, now),
             )
+        await db.commit()
+    finally:
+        await db.close()
+    return tui_db_path
+
+
+@pytest.fixture()
+async def tui_db_with_uat_story(tui_db_path: Path) -> Path:
+    """创建包含 UAT story + running UAT task 的数据库。"""
+    db = await get_connection(tui_db_path)
+    try:
+        now = datetime.now(tz=UTC).isoformat()
+        await db.execute(
+            "INSERT INTO stories (story_id, title, status, current_phase, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("uat-1", "UAT Story", "in_progress", "uat", now, now),
+        )
+        await db.execute(
+            "INSERT INTO tasks (task_id, story_id, phase, role, cli_tool, "
+            "status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("uat-task-1", "uat-1", "uat", "qa", "claude", "running", now),
+        )
         await db.commit()
     finally:
         await db.close()
@@ -293,6 +315,77 @@ async def test_existing_approval_bindings_still_work(tui_db_with_story: Path) ->
         await pilot.pause()
 
 
+async def test_uat_pass_hotkey_marks_running_task_completed(tui_db_with_uat_story: Path) -> None:
+    """UAT 详情页按 p 会提交 pass 并完成当前 running UAT task。"""
+    app = ATOApp(db_path=tui_db_with_uat_story)
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        dashboard = app.query_one(DashboardScreen)
+        assert dashboard._in_detail_mode is True
+
+        await pilot.press("p")
+        await dashboard.workers.wait_for_complete()
+        await pilot.pause()
+
+        db = await get_connection(tui_db_with_uat_story)
+        try:
+            cursor = await db.execute(
+                "SELECT status, context_briefing FROM tasks WHERE task_id = ?",
+                ("uat-task-1",),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "completed"
+            assert row[1] is not None
+            assert '"uat_result": "pass"' in str(row[1])
+        finally:
+            await db.close()
+
+
+async def test_uat_fail_hotkey_opens_prompt_and_submits_reason(
+    tui_db_with_uat_story: Path,
+) -> None:
+    """UAT 详情页按 f 打开原因输入，并在回车后提交 fail。"""
+    app = ATOApp(db_path=tui_db_with_uat_story)
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        dashboard = app.query_one(DashboardScreen)
+        detail_view = dashboard.query_one("#right-top-detail", StoryDetailView)
+
+        await pilot.press("f")
+        await pilot.pause()
+
+        reason_input = detail_view.query_one("#detail-uat-reason", Input)
+        assert reason_input.display is True
+
+        await pilot.press("b", "u", "g")
+        await pilot.press("enter")
+        await dashboard.workers.wait_for_complete()
+        await pilot.pause()
+
+        db = await get_connection(tui_db_with_uat_story)
+        try:
+            cursor = await db.execute(
+                "SELECT status, expected_artifact, error_message FROM tasks WHERE task_id = ?",
+                ("uat-task-1",),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "failed"
+            assert row[1] == "uat_fail_requested"
+            assert "bug" in str(row[2])
+        finally:
+            await db.close()
+
+
 # ---------------------------------------------------------------------------
 # 回归: 轮询不应踢回详情页 (Fix #1)
 # ---------------------------------------------------------------------------
@@ -322,6 +415,59 @@ async def test_polling_does_not_kick_detail_back(tui_db_with_story: Path) -> Non
         # switcher 应仍指向 detail
         switcher = dashboard.query_one("#right-top-switcher", ContentSwitcher)
         assert switcher.current == "right-top-detail"
+
+
+async def test_polling_refreshes_detail_snapshot_without_collapsing_expanded_view(
+    tui_db_with_story: Path,
+) -> None:
+    """detail mode 轮询后 phase/tasks 更新，且展开态不丢失。"""
+    app = ATOApp(db_path=tui_db_with_story)
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        dashboard = app.query_one(DashboardScreen)
+        assert dashboard._in_detail_mode is True
+
+        detail_view = dashboard.query_one("#right-top-detail", StoryDetailView)
+        assert detail_view._story_data["current_phase"] == "reviewing"
+        assert len(detail_view._tasks) == 2
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert detail_view._expanded_view == "findings"
+
+        db = await get_connection(tui_db_with_story)
+        try:
+            now = datetime.now(tz=UTC).isoformat()
+            await db.execute(
+                "UPDATE stories SET current_phase = ?, updated_at = ? WHERE story_id = ?",
+                ("designing", now, "s1"),
+            )
+            await db.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE task_id = ?",
+                ("completed", now, "t2"),
+            )
+            await db.execute(
+                "INSERT INTO tasks (task_id, story_id, phase, role, cli_tool, "
+                "status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("t3", "s1", "designing", "designer", "codex", "running", now),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        await app.refresh_data()
+        await pilot.pause()
+        await pilot.pause()
+
+        detail_view = dashboard.query_one("#right-top-detail", StoryDetailView)
+        assert detail_view._story_data["current_phase"] == "designing"
+        assert len(detail_view._tasks) == 3
+        assert detail_view._expanded_view == "findings"
 
 
 async def test_detail_mode_blocks_story_selection_drift(

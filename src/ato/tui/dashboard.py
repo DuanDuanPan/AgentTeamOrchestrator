@@ -131,6 +131,8 @@ class DashboardScreen(Widget):
         # Story 详情钻入模式 (Story 6.4)
         self._in_detail_mode: bool = False
         self._detail_story_id: str | None = None
+        self._detail_session_token: int = 0
+        self._detail_refresh_in_flight: bool = False
         # Task 计数（轻量轮询）
         self._story_task_counts: dict[str, int] = {}
         # Story 级 activity 数据（LLM 实时可观测性）
@@ -545,25 +547,26 @@ class DashboardScreen(Widget):
         """进入 story 详情钻入模式。"""
         self._in_detail_mode = True
         self._detail_story_id = story_id
+        self._detail_session_token += 1
+        self._detail_refresh_in_flight = False
 
-        # 加载详情数据并更新视图
-        async def _load_and_show() -> None:
-            from ato.tui.app import ATOApp
+        from ato.tui.app import ATOApp
 
-            app = self.app
-            if not isinstance(app, ATOApp):
-                return
-
-            detail_data = await app.load_story_detail(story_id)
-            story = self._stories_by_id.get(story_id, {})
-
-            # 确定当前活跃的布局模式
+        app = self.app
+        story = self._stories_by_id.get(story_id, {})
+        snapshot: dict[str, object] = {
+            "findings_summary": self._story_findings_summary.get(story_id, {}),
+            "findings": [],
+            "cost_logs": [],
+            "tasks": [],
+        }
+        if isinstance(app, ATOApp):
             if app.layout_mode == "three-panel":
-                self._show_detail_three_panel(story, detail_data, story_id)
+                self._show_detail_three_panel(story, snapshot, story_id)
             elif app.layout_mode == "tabbed":
-                self._show_detail_tabbed(story, detail_data, story_id)
+                self._show_detail_tabbed(story, snapshot, story_id)
 
-        self.run_worker(_load_and_show(), exclusive=False)
+        self._schedule_detail_view_refresh(preserve_expanded_view=False)
 
     def _show_detail_three_panel(
         self,
@@ -615,6 +618,8 @@ class DashboardScreen(Widget):
         story: dict[str, object],
         detail_data: dict[str, object],
         story_id: str,
+        *,
+        preserve_expanded_view: bool = False,
     ) -> None:
         """填充 StoryDetailView 数据。"""
         view.update_detail(
@@ -626,12 +631,84 @@ class DashboardScreen(Widget):
             cl_round=self._story_cl_rounds.get(story_id, 0),
             cl_max_rounds=self._convergent_loop_max_rounds,
             cost_usd=self._story_costs.get(story_id, 0.0),
+            preserve_expanded_view=preserve_expanded_view,
         )
+
+    def _get_active_detail_view(self) -> StoryDetailView | None:
+        """返回当前布局下活跃的 StoryDetailView。"""
+        from ato.tui.app import ATOApp
+
+        app = self.app
+        if not isinstance(app, ATOApp):
+            return None
+        try:
+            if app.layout_mode == "three-panel":
+                return self.query_one("#right-top-detail", StoryDetailView)
+            if app.layout_mode == "tabbed":
+                return self.query_one("#tab-story-detail", StoryDetailView)
+        except Exception:
+            return None
+        return None
+
+    def _submit_detail_uat_result(
+        self,
+        *,
+        story_id: str,
+        result: str,
+        reason: str = "",
+    ) -> None:
+        """从 StoryDetailView 异步提交 UAT 结果。"""
+        from ato.tui.app import ATOApp
+
+        app = self.app
+        if not isinstance(app, ATOApp):
+            return
+
+        session_token = self._detail_session_token
+
+        async def _do_submit() -> None:
+            try:
+                message = await app.submit_uat_result(
+                    story_id=story_id,
+                    result=result,
+                    reason=reason,
+                )
+                await app.refresh_data()
+            except Exception as exc:
+                if (
+                    self._in_detail_mode
+                    and self._detail_story_id == story_id
+                    and self._detail_session_token == session_token
+                ):
+                    detail_view = self._get_active_detail_view()
+                    if detail_view is not None:
+                        detail_view.finish_uat_submission(
+                            success=False,
+                            message=str(exc),
+                            keep_prompt=result == "fail",
+                        )
+                return
+
+            if (
+                self._in_detail_mode
+                and self._detail_story_id == story_id
+                and self._detail_session_token == session_token
+            ):
+                detail_view = self._get_active_detail_view()
+                if detail_view is not None:
+                    detail_view.finish_uat_submission(
+                        success=True,
+                        message=message,
+                    )
+
+        self.run_worker(_do_submit(), exclusive=False)
 
     def _exit_detail_mode(self) -> None:
         """退出���情模式，返回主屏概览。"""
         self._in_detail_mode = False
         self._detail_story_id = None
+        self._detail_session_token += 1
+        self._detail_refresh_in_flight = False
 
         from ato.tui.app import ATOApp
 
@@ -655,6 +732,27 @@ class DashboardScreen(Widget):
     def on_story_detail_view_back_requested(self, _: StoryDetailView.BackRequested) -> None:
         """处理 StoryDetailView 发出的 ESC 返回请求。"""
         self._exit_detail_mode()
+
+    def on_story_detail_view_uat_pass_requested(
+        self,
+        message: StoryDetailView.UatPassRequested,
+    ) -> None:
+        """处理 StoryDetailView 发出的 UAT pass 请求。"""
+        self._submit_detail_uat_result(
+            story_id=message.story_id,
+            result="pass",
+        )
+
+    def on_story_detail_view_uat_fail_requested(
+        self,
+        message: StoryDetailView.UatFailRequested,
+    ) -> None:
+        """处理 StoryDetailView 发出的 UAT fail 请求。"""
+        self._submit_detail_uat_result(
+            story_id=message.story_id,
+            result="fail",
+            reason=message.reason,
+        )
 
     def _is_left_panel_focused(self) -> bool:
         """检查导航列表区域是否获焦（three-panel 或 tabbed 模式）。"""
@@ -881,6 +979,7 @@ class DashboardScreen(Widget):
         # detail mode 下仅刷新 agent activity，不重置展开状态
         if self._in_detail_mode:
             self._refresh_detail_activity()
+            self._schedule_detail_view_refresh(preserve_expanded_view=True)
 
     def _refresh_detail_activity(self) -> None:
         """detail mode 下仅刷新 agent activity，不重置展开状态。"""
@@ -890,7 +989,10 @@ class DashboardScreen(Widget):
         from ato.tui.app import ATOApp
 
         app = self.app
-        layout = getattr(app, "layout_mode", "three-panel") if isinstance(app, ATOApp) else "three-panel"
+        if isinstance(app, ATOApp):
+            layout = getattr(app, "layout_mode", "three-panel")
+        else:
+            layout = "three-panel"
         selector = "#right-top-detail" if layout == "three-panel" else "#tab-story-detail"
         try:
             detail_view = self.query_one(selector, StoryDetailView)
@@ -903,6 +1005,76 @@ class DashboardScreen(Widget):
                 detail_view.clear_activity_only()
         except Exception:
             pass  # view 尚未挂载
+
+    def _schedule_detail_view_refresh(self, *, preserve_expanded_view: bool) -> None:
+        """按需刷新 detail view 数据；轮询刷新保留展开态。"""
+        if not self._in_detail_mode or not self._detail_story_id:
+            return
+        if preserve_expanded_view and self._detail_refresh_in_flight:
+            return
+
+        from ato.tui.app import ATOApp
+
+        app = self.app
+        if not isinstance(app, ATOApp):
+            return
+
+        story_id = self._detail_story_id
+        session_token = self._detail_session_token
+        if preserve_expanded_view:
+            self._detail_refresh_in_flight = True
+
+        async def _load_and_show() -> None:
+            try:
+                detail_data = await app.load_story_detail(story_id)
+            finally:
+                if preserve_expanded_view:
+                    self._detail_refresh_in_flight = False
+
+            if (
+                not self._in_detail_mode
+                or self._detail_story_id != story_id
+                or self._detail_session_token != session_token
+            ):
+                return
+
+            story = self._stories_by_id.get(story_id, {})
+
+            try:
+                if app.layout_mode == "three-panel":
+                    detail_view = self.query_one("#right-top-detail", StoryDetailView)
+                    self._populate_detail_view(
+                        detail_view,
+                        story,
+                        detail_data,
+                        story_id,
+                        preserve_expanded_view=preserve_expanded_view,
+                    )
+                    switcher = self.query_one("#right-top-switcher", ContentSwitcher)
+                    switcher.current = "right-top-detail"
+                    if not preserve_expanded_view:
+                        detail_view.focus()
+                elif app.layout_mode == "tabbed":
+                    detail_view = self.query_one("#tab-story-detail", StoryDetailView)
+                    self._populate_detail_view(
+                        detail_view,
+                        story,
+                        detail_data,
+                        story_id,
+                        preserve_expanded_view=preserve_expanded_view,
+                    )
+                    switcher = self.query_one("#tab-stories-switcher", ContentSwitcher)
+                    switcher.current = "tab-story-detail"
+                    if not preserve_expanded_view:
+                        detail_view.focus()
+                else:
+                    return
+            except Exception:
+                return
+
+            self._refresh_detail_activity()
+
+        self.run_worker(_load_and_show(), exclusive=False)
 
     # ------------------------------------------------------------------
     # 渲染逻辑

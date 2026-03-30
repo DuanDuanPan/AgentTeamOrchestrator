@@ -8,15 +8,16 @@ Merge 严格串行化——同一时刻只有一个 story 在 merge。
 from __future__ import annotations
 
 import asyncio
-import shlex
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 import structlog
 
 from ato.config import ATOSettings
-from ato.models.schemas import TransitionEvent
+from ato.models.schemas import CLIAdapterError, TransitionEvent
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
 
@@ -40,6 +41,150 @@ def get_regression_recovery_story_id(frozen_reason: str | None) -> str | None:
             return story_id or None
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# LLM-Assisted Regression Runner — Schema, Prompt, Helpers
+# ---------------------------------------------------------------------------
+
+_REGRESSION_RESULT_SCHEMA: str = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "regression_status": {
+                "type": "string",
+                "enum": ["pass", "fail"],
+                "description": "Overall regression result",
+            },
+            "summary": {
+                "type": "string",
+                "description": "Human-readable summary of the regression run",
+            },
+            "commands_attempted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Shell commands actually executed during regression",
+            },
+            "skipped_command_reason": {
+                "type": ["string", "null"],
+                "description": "If any baseline command was skipped, explain why",
+            },
+            "discovery_notes": {
+                "type": "string",
+                "description": "Notes about how the test framework was discovered/used",
+            },
+        },
+        "required": [
+            "regression_status",
+            "summary",
+            "commands_attempted",
+            "skipped_command_reason",
+            "discovery_notes",
+        ],
+        "additionalProperties": False,
+    }
+)
+
+_REGRESSION_PROMPT_TEMPLATE = """\
+You are a regression test runner for the repository at {repo_root}.
+
+## CRITICAL CONSTRAINTS
+- Do NOT modify any files, git index, branches, or commits.
+- Do NOT create, delete, or rename any files.
+- You are in read-only observation mode.
+
+## YOUR TASK
+Run the project's regression tests and report results.
+
+### Step 1: Inspect the project
+Check the project's test configuration, directory structure, and test framework setup.
+
+### Step 2: Execute tests
+{baseline_instructions}
+
+### Step 3: Report results
+Produce a structured JSON result matching the output_schema.
+Also provide a brief natural-language summary suitable for human review.
+
+If all tests pass, set regression_status to "pass".
+If any test fails, set regression_status to "fail" and include failure details in summary.
+"""
+
+_BASELINE_WITH_COMMANDS = """\
+The operator has provided these baseline regression commands. You MUST execute them first:
+{commands}
+
+If you determine that a command is clearly inapplicable (e.g., references a nonexistent \
+test directory), you MAY skip it, but you MUST explain the reason in skipped_command_reason.
+After running the baseline commands, you may optionally run additional tests you discover."""
+
+_BASELINE_WITHOUT_COMMANDS = """\
+No baseline regression commands are configured. Discover the project's test framework \
+and test suite autonomously. Look for pytest, unittest, jest, cargo test, go test, or \
+other standard test runners. Execute the full test suite you discover."""
+
+
+def _build_regression_prompt(repo_root: Path, settings: ATOSettings) -> str:
+    """构建 regression runner 的 Codex prompt。
+
+    判定逻辑：
+    - regression_test_commands 显式配置（非 None）→ 用作 baseline
+    - regression_test_commands 未配置但 regression_test_command 非默认 → 用作 baseline
+    - 两者均为默认/未配置 → autonomous discovery
+    """
+    has_explicit_plural = settings.regression_test_commands is not None
+    has_explicit_singular = settings.regression_test_command != "uv run pytest"
+
+    if has_explicit_plural or has_explicit_singular:
+        commands = settings.get_regression_commands()
+        cmd_list = "\n".join(f"  - {cmd}" for cmd in commands)
+        baseline_instructions = _BASELINE_WITH_COMMANDS.format(commands=cmd_list)
+    else:
+        baseline_instructions = _BASELINE_WITHOUT_COMMANDS
+
+    return _REGRESSION_PROMPT_TEMPLATE.format(
+        repo_root=repo_root,
+        baseline_instructions=baseline_instructions,
+    )
+
+
+class _WorkspaceSnapshotError(Exception):
+    """git status 失败，无法采集 workspace 变更快照。"""
+
+
+async def _snapshot_workspace_changes(repo_root: Path) -> set[str]:
+    """采集 repo root 的修改/暂存/untracked 文件集合。
+
+    返回当前已有的变更路径集合，供调用后比较是否新增脏文件。
+    不要求 repo 初始完全干净——只检测 regression 是否引入新变更。
+
+    Raises:
+        _WorkspaceSnapshotError: git status 非零退出时 fail-closed。
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "status",
+        "--porcelain",
+        "-u",
+        cwd=str(repo_root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        stderr_text = stderr.decode(errors="replace").strip()[:200]
+        raise _WorkspaceSnapshotError(f"git status failed (exit={proc.returncode}): {stderr_text}")
+    paths: set[str] = set()
+    for line in stdout.decode(errors="replace").splitlines():
+        stripped = line.rstrip()
+        if not stripped:
+            continue
+        # git status --porcelain: XY <path> or XY <old> -> <new>
+        raw_path = stripped[3:]
+        if " -> " in raw_path:
+            raw_path = raw_path.split(" -> ", 1)[1]
+        paths.add(raw_path)
+    return paths
 
 
 class MergeQueue:
@@ -469,6 +614,41 @@ class MergeQueue:
 
         logger.info("regression_dispatched", story_id=story_id, task_id=task_id)
 
+    def _build_regression_dispatch_options(self) -> dict[str, Any]:
+        """构建 Codex regression 调度选项，复用 phase 配置解析。"""
+        from ato.recovery import RecoveryEngine
+
+        phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, "regression")
+
+        opts: dict[str, Any] = {}
+
+        # cwd: regression 在 main workspace 运行
+        opts["cwd"] = str(self._worktree_mgr.project_root)
+
+        # timeout
+        timeout = phase_cfg.get("timeout_seconds")
+        if timeout:
+            opts["timeout"] = timeout
+
+        # model
+        if model := phase_cfg.get("model"):
+            opts["model"] = model
+
+        # reasoning
+        if reasoning_effort := phase_cfg.get("reasoning_effort"):
+            opts["reasoning_effort"] = reasoning_effort
+        if reasoning_summary_format := phase_cfg.get("reasoning_summary_format"):
+            opts["reasoning_summary_format"] = reasoning_summary_format
+
+        # sandbox: 透传但不当安全保证
+        if sandbox := phase_cfg.get("sandbox"):
+            opts["sandbox"] = sandbox
+
+        # output_schema for structured result
+        opts["output_schema"] = _REGRESSION_RESULT_SCHEMA
+
+        return opts
+
     async def _dispatch_regression_test(self, story_id: str) -> str:
         """调度 regression 测试作为 Structured Job。
 
@@ -501,88 +681,36 @@ class MergeQueue:
         finally:
             await db.close()
 
-        # 启动后台 regression 测试
+        # 启动后台 regression（Codex LLM runner）
         regression_task = asyncio.create_task(
-            self._run_regression_test(story_id, task_id),
+            self._run_regression_via_codex(story_id, task_id),
             name=f"regression-{story_id}",
         )
         self._worker_tasks[f"regression-{story_id}"] = regression_task
 
         return task_id
 
-    async def _run_regression_test(self, story_id: str, task_id: str) -> None:
-        """在 main 分支上按顺序执行 regression 测试命令链。
+    async def _run_regression_via_codex(self, story_id: str, task_id: str) -> None:
+        """通过 Codex CLI 执行 regression 测试并归一化结构化结果。
 
-        多命令共用同一条 regression task 记录；任一命令失败或超时立即中止后续。
+        在共享 main workspace limiter 内部调用 CodexAdapter + SubprocessManager，
+        dispatch_with_retry(task_id=..., is_retry=True) 复用 _dispatch_regression_test
+        预创建的 task 记录。
         """
-        from ato.adapters.base import cleanup_process
+        from ato.adapters.codex_cli import CodexAdapter
+        from ato.core import get_main_path_limiter
         from ato.models.db import get_connection, update_task_status
+        from ato.subprocess_mgr import SubprocessManager
 
-        commands = self._settings.get_regression_commands()
         repo_root = self._worktree_mgr.project_root
+        limiter = get_main_path_limiter()
 
         try:
-            for cmd_index, cmd in enumerate(commands, start=1):
-                argv = shlex.split(cmd)
-                proc = await asyncio.create_subprocess_exec(
-                    *argv,
-                    cwd=str(repo_root),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-
-                # 持续将 pipe 数据累积到外部缓冲区；超时取消 task 时
-                # 缓冲区已有的数据自然可用（不依赖取消后读 pipe）
-                stdout_buf = bytearray()
-                stderr_buf = bytearray()
-
-                async def _drain(
-                    stream: asyncio.StreamReader | None,
-                    buf: bytearray,
-                ) -> None:
-                    if stream is None:
-                        return
-                    while True:
-                        chunk = await stream.read(8192)
-                        if not chunk:
-                            break
-                        buf.extend(chunk)
-
-                stdout_task = asyncio.create_task(_drain(proc.stdout, stdout_buf))
-                stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_buf))
-
-                timed_out = False
+            async with limiter:
+                # 采集 pre-run workspace 变更快照（fail-closed）
                 try:
-                    await asyncio.wait_for(
-                        proc.wait(),
-                        timeout=self._settings.timeout.structured_job,
-                    )
-                    # 进程正常退出，等待 reader 读完剩余数据
-                    await asyncio.gather(
-                        stdout_task, stderr_task, return_exceptions=True,
-                    )
-                except TimeoutError:
-                    timed_out = True
-                    stdout_task.cancel()
-                    stderr_task.cancel()
-                    await cleanup_process(proc)
-                finally:
-                    if not timed_out:
-                        await cleanup_process(proc)
-
-                if timed_out:
-                    header = (
-                        f"Regression command {cmd_index}/{len(commands)}"
-                        f" timed out: {cmd}"
-                    )
-                    combined = header
-                    stderr_text = bytes(stderr_buf).decode(errors="replace").strip()
-                    stdout_text = bytes(stdout_buf).decode(errors="replace").strip()
-                    if stderr_text:
-                        combined += "\n" + stderr_text
-                    if stdout_text:
-                        combined += "\n---\n" + stdout_text
-                    error_msg = combined[:1000]
+                    pre_snapshot = await _snapshot_workspace_changes(repo_root)
+                except _WorkspaceSnapshotError as snap_err:
                     db = await get_connection(self._db_path)
                     try:
                         await update_task_status(
@@ -590,56 +718,140 @@ class MergeQueue:
                             task_id,
                             "failed",
                             exit_code=-1,
-                            error_message=error_msg,
+                            error_message=(f"Pre-run workspace snapshot failed: {snap_err}")[:500],
                             completed_at=datetime.now(tz=UTC),
                         )
                     finally:
                         await db.close()
                     return
 
-                exit_code = proc.returncode or 0
-                if exit_code != 0:
-                    # 失败即中止：构造包含序号和命令文本的错误摘要
-                    stdout_text = bytes(stdout_buf).decode(errors="replace")
-                    stderr_text = bytes(stderr_buf).decode(errors="replace")
-                    combined = f"Command {cmd_index}/{len(commands)} failed: {cmd}\n"
-                    if stderr_text.strip():
-                        combined += stderr_text.strip()
-                    if stdout_text.strip():
-                        if len(combined) > 1:
-                            combined += "\n---\n"
-                        combined += stdout_text.strip()
-                    error_msg = combined[:1000] or "Regression test failed"
+                prompt = _build_regression_prompt(repo_root, self._settings)
+                opts = self._build_regression_dispatch_options()
+
+                adapter = CodexAdapter()
+                mgr = SubprocessManager(
+                    max_concurrent=1,
+                    adapter=adapter,
+                    db_path=self._db_path,
+                )
+
+                try:
+                    result = await mgr.dispatch_with_retry(
+                        story_id=story_id,
+                        phase="regression",
+                        role="qa",
+                        cli_tool="codex",
+                        prompt=prompt,
+                        options=opts,
+                        task_id=task_id,
+                        is_retry=True,
+                    )
+                except CLIAdapterError:
+                    # SubprocessManager 已写终态，只记日志
+                    logger.warning(
+                        "regression_codex_cli_error",
+                        story_id=story_id,
+                        task_id=task_id,
+                        exc_info=True,
+                    )
+                    return
+
+                # --- 归一化 structured result (Task 6) ---
+                # Pydantic strict 校验：字段缺失、类型错误、非法枚举值
+                # 一律 fail-closed
+                from pydantic import ValidationError
+
+                from ato.models.schemas import RegressionResult
+
+                try:
+                    reg_result = RegressionResult.model_validate(result.structured_output)
+                except (ValidationError, TypeError) as ve:
                     db = await get_connection(self._db_path)
                     try:
                         await update_task_status(
                             db,
                             task_id,
                             "completed",
-                            exit_code=exit_code,
-                            error_message=error_msg,
+                            exit_code=1,
+                            error_message=(
+                                f"Regression runner produced invalid structured result: {ve}"
+                            )[:500],
                             completed_at=datetime.now(tz=UTC),
                         )
                     finally:
                         await db.close()
                     return
 
-            # 所有命令均成功
-            db = await get_connection(self._db_path)
-            try:
-                await update_task_status(
-                    db,
-                    task_id,
-                    "completed",
-                    exit_code=0,
-                    error_message=None,
-                    completed_at=datetime.now(tz=UTC),
-                )
-            finally:
-                await db.close()
+                if reg_result.regression_status == "fail":
+                    db = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(
+                            db,
+                            task_id,
+                            "completed",
+                            exit_code=1,
+                            error_message=reg_result.summary[:500],
+                            completed_at=datetime.now(tz=UTC),
+                        )
+                    finally:
+                        await db.close()
+                    return
 
+                # --- workspace 新增脏文件保护 (Task 7) ---
+                try:
+                    post_snapshot = await _snapshot_workspace_changes(repo_root)
+                except _WorkspaceSnapshotError as snap_err:
+                    # git status 失败 → fail-closed
+                    db = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(
+                            db,
+                            task_id,
+                            "completed",
+                            exit_code=1,
+                            error_message=(f"Workspace snapshot failed: {snap_err}")[:500],
+                            completed_at=datetime.now(tz=UTC),
+                        )
+                    finally:
+                        await db.close()
+                    return
+
+                new_dirty = post_snapshot - pre_snapshot
+                if new_dirty:
+                    dirty_list = ", ".join(sorted(new_dirty)[:10])
+                    db = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(
+                            db,
+                            task_id,
+                            "completed",
+                            exit_code=1,
+                            error_message=(
+                                f"Regression runner modified main workspace: {dirty_list}"
+                            )[:500],
+                            completed_at=datetime.now(tz=UTC),
+                        )
+                    finally:
+                        await db.close()
+                    return
+
+                # regression_status == "pass" 且 workspace 干净 → 保持 exit_code=0
+                # SubprocessManager 已写 exit_code=0，无需额外更新
+
+        except CLIAdapterError:
+            # 被 limiter 外层捕获（不应发生，但防御性处理）
+            logger.warning(
+                "regression_codex_cli_error_outer",
+                story_id=story_id,
+                task_id=task_id,
+                exc_info=True,
+            )
         except Exception:
-            logger.exception("regression_test_error", story_id=story_id, task_id=task_id)
+            logger.exception(
+                "regression_codex_unexpected_error",
+                story_id=story_id,
+                task_id=task_id,
+            )
             db = await get_connection(self._db_path)
             try:
                 await update_task_status(
@@ -699,13 +911,18 @@ class MergeQueue:
                     await self._complete_regression_pass(db, story_id)
                     break
                 else:
-                    # 读取 task error_message 作为测试输出摘要（AC3）
+                    # 读取 task error_message 作为测试输出摘要
+                    # 回退：error_message 为空时截取 text_result
                     err_cursor = await db.execute(
-                        "SELECT error_message FROM tasks WHERE task_id = ?",
+                        "SELECT error_message, text_result FROM tasks WHERE task_id = ?",
                         (task_id,),
                     )
                     err_row = await err_cursor.fetchone()
-                    test_output = err_row[0] if err_row and err_row[0] else None
+                    test_output: str | None = None
+                    if err_row:
+                        test_output = err_row[0] if err_row[0] else None
+                        if test_output is None and err_row[1]:
+                            test_output = str(err_row[1])[:500]
 
                     # Regression fail — 冻结 queue + 创建 approval
                     await self._handle_regression_failure(

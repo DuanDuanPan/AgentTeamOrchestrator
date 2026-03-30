@@ -133,6 +133,7 @@ class TransitionQueue:
         self._nudge = nudge
         self._queue: asyncio.Queue[TransitionEvent | None] = asyncio.Queue()
         self._machines: dict[str, StoryLifecycle] = {}
+        self._dev_ready_reconcile_lock = asyncio.Lock()
         self._consumer_task: asyncio.Task[None] | None = None
         self._db: aiosqlite.Connection | None = None
         self._running = False
@@ -140,6 +141,18 @@ class TransitionQueue:
         self._phase_defs: dict[str, PhaseDefinition] = (
             {pd.name: pd for pd in phase_defs} if phase_defs else {}
         )
+
+    async def ensure_dev_ready_progress(self, story_id: str) -> None:
+        """Reconcile a story parked in dev_ready without dispatching an LLM task."""
+        async with self._dev_ready_reconcile_lock:
+            db = await get_connection(self._db_path)
+            try:
+                story = await get_story(db, story_id)
+                if story is None or story.current_phase != "dev_ready":
+                    return
+                await self._on_enter_dev_ready(db, story_id)
+            finally:
+                await db.close()
 
     async def start(self) -> None:
         """启动 consumer 后台任务并打开长连接。
@@ -324,10 +337,16 @@ class TransitionQueue:
 
         batch = await get_active_batch(db)
         if batch is None:
+            await self._submit_start_dev_events([story_id])
             return
 
-        # 已提交则跳过
+        story = await get_story(db, story_id)
+        if story is None or story.current_phase != "dev_ready":
+            return
+
+        # 已提交则只推进当前仍停留在 dev_ready 的 story
         if batch.spec_committed:
+            await self._submit_start_dev_events([story_id])
             return
 
         # 检查 batch 内所有 story 是否都到达 dev_ready
@@ -339,15 +358,21 @@ class TransitionQueue:
         story_ids = [s.story_id for _, s in batch_stories]
 
         try:
-            from ato.core import derive_project_root
+            from ato.core import derive_project_root, get_main_path_limiter
             from ato.worktree_mgr import WorktreeManager
 
-            project_root = derive_project_root(self._db_path)
-            mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
-            success, message = await mgr.batch_spec_commit(batch.batch_id, story_ids)
+            limiter = get_main_path_limiter()
+            await limiter.acquire()
+            try:
+                project_root = derive_project_root(self._db_path)
+                mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+                success, message = await mgr.batch_spec_commit(batch.batch_id, story_ids)
+            finally:
+                limiter.release()
 
             if success:
                 await mark_batch_spec_committed(db, batch.batch_id)
+                await self._submit_start_dev_events(story_ids)
                 logger.info(
                     "batch_spec_commit_success",
                     batch_id=batch.batch_id,
@@ -363,13 +388,15 @@ class TransitionQueue:
 
                 from ato.models.schemas import ApprovalRecord
 
-                payload = json.dumps({
-                    "scope": "spec_batch",
-                    "batch_id": batch.batch_id,
-                    "story_ids": story_ids,
-                    "error_output": message,
-                    "options": ["retry", "manual_fix", "skip"],
-                })
+                payload = json.dumps(
+                    {
+                        "scope": "spec_batch",
+                        "batch_id": batch.batch_id,
+                        "story_ids": story_ids,
+                        "error_output": message,
+                        "options": ["retry", "manual_fix", "skip"],
+                    }
+                )
                 approval = ApprovalRecord(
                     approval_id=str(uuid.uuid4()),
                     story_id=story_id,
@@ -404,13 +431,15 @@ class TransitionQueue:
 
                 from ato.models.schemas import ApprovalRecord
 
-                payload = json.dumps({
-                    "scope": "spec_batch",
-                    "batch_id": batch.batch_id,
-                    "story_ids": story_ids,
-                    "error_output": str(exc),
-                    "options": ["retry", "manual_fix", "skip"],
-                })
+                payload = json.dumps(
+                    {
+                        "scope": "spec_batch",
+                        "batch_id": batch.batch_id,
+                        "story_ids": story_ids,
+                        "error_output": str(exc),
+                        "options": ["retry", "manual_fix", "skip"],
+                    }
+                )
                 approval = ApprovalRecord(
                     approval_id=str(uuid.uuid4()),
                     story_id=story_id,
@@ -428,6 +457,34 @@ class TransitionQueue:
                 )
             except Exception:
                 logger.exception("batch_spec_commit_approval_creation_failed")
+
+    async def _submit_start_dev_events(self, story_ids: list[str]) -> None:
+        """Submit start_dev for stories that are still parked in dev_ready."""
+        from datetime import UTC, datetime
+
+        if not story_ids:
+            return
+
+        db = await get_connection(self._db_path)
+        try:
+            current_stories = [await get_story(db, sid) for sid in story_ids]
+        finally:
+            await db.close()
+
+        pending_ids = [
+            story.story_id
+            for story in current_stories
+            if story is not None and story.current_phase == "dev_ready"
+        ]
+        for pending_story_id in pending_ids:
+            await self.submit(
+                TransitionEvent(
+                    story_id=pending_story_id,
+                    event_name="start_dev",
+                    source="agent",
+                    submitted_at=datetime.now(tz=UTC),
+                )
+            )
 
     async def _on_enter_developing(self, db: aiosqlite.Connection, story_id: str) -> None:
         """Story 首次进入 developing 时的 post-commit hook：创建 worktree。

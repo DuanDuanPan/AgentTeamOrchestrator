@@ -177,8 +177,10 @@ timeout:
 # Merge & Regression 配置
 # ---------------------------------------------------------------------------
 
-# 回归测试命令（merge 到 main 后在仓库根目录执行）
-# 多命令格式：按声明顺序依次执行，任一失败即中止
+# 回归测试基线命令（操作者提供的基线命令列表）
+# Codex LLM regression runner 会优先执行这些命令；
+# 若 Codex 判断某命令不适用，会在结构化结果中说明跳过原因。
+# 未配置时，Codex 会自主发现项目测试体系并执行回归测试。
 regression_test_commands:
   - "uv run pytest tests/unit/"
   - "uv run pytest tests/integration/"

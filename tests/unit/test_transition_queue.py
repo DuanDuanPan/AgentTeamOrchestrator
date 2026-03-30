@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from ato.config import PhaseDefinition
 from ato.models.db import get_connection, get_story, insert_story
 from ato.models.schemas import StateTransitionError, StoryRecord, TransitionEvent
 from ato.nudge import Nudge
@@ -183,7 +184,7 @@ class TestTransitionQueueFIFO:
 
         story = await _read_story(initialized_db_path, "s1")
         assert story is not None
-        assert story.current_phase == "dev_ready"
+        assert story.current_phase == "developing"
 
         await tq.stop()
 
@@ -599,9 +600,8 @@ class TestWorktreeCreationOnDeveloping:
 # ---------------------------------------------------------------------------
 
 
-def _make_designing_phase_defs() -> list["PhaseDefinition"]:
+def _make_designing_phase_defs() -> list[PhaseDefinition]:
     """创建包含 skip_when 的 designing 阶段定义。"""
-    from ato.config import PhaseDefinition
 
     return [
         PhaseDefinition(
@@ -762,9 +762,7 @@ class TestBatchSpecCommitOnDevReady:
 
         await tq.stop()
 
-    async def test_no_commit_when_not_all_dev_ready(
-        self, initialized_db_path: Path
-    ) -> None:
+    async def test_no_commit_when_not_all_dev_ready(self, initialized_db_path: Path) -> None:
         """batch 内部分 story 未到达 dev_ready 时不触发 commit。"""
         from unittest.mock import AsyncMock, patch
 
@@ -805,9 +803,57 @@ class TestBatchSpecCommitOnDevReady:
         mock_commit.assert_not_called()
         await tq.stop()
 
-    async def test_precommit_failure_creates_approval(
+    async def test_batch_spec_commit_waits_for_main_path_limiter(
         self, initialized_db_path: Path
     ) -> None:
+        """spec commit 应等待 validating/main workspace 释放共享 limiter。"""
+        from unittest.mock import AsyncMock, patch
+
+        from ato.core import get_main_path_limiter, reset_main_path_limiter
+        from ato.models.db import insert_batch, insert_batch_story_links
+        from ato.models.schemas import BatchRecord, BatchStoryLink
+
+        now = datetime.now(UTC)
+        batch = BatchRecord(batch_id="b-lock", status="active", created_at=now)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s-lock", "validating")
+            await insert_batch_story_links(
+                db,
+                [BatchStoryLink(batch_id="b-lock", story_id="s-lock", sequence_no=0)],
+            )
+        finally:
+            await db.close()
+
+        mock_commit = AsyncMock(return_value=(True, "abc123"))
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        reset_main_path_limiter()
+        limiter = get_main_path_limiter()
+        await limiter.acquire()
+        try:
+            with (
+                patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+                patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+            ):
+                mock_wm_cls.return_value.batch_spec_commit = mock_commit
+                await tq.submit(_make_event("s-lock", "validate_pass"))
+                await asyncio.sleep(0.05)
+                mock_commit.assert_not_called()
+
+                limiter.release()
+                await asyncio.wait_for(tq._queue.join(), timeout=1.0)
+
+            mock_commit.assert_called_once()
+        finally:
+            if limiter.locked():
+                limiter.release()
+            reset_main_path_limiter()
+            await tq.stop()
+
+    async def test_precommit_failure_creates_approval(self, initialized_db_path: Path) -> None:
         """batch spec commit 失败时创建 precommit_failure(scope=spec_batch) approval。"""
         import json
         from unittest.mock import AsyncMock, patch
@@ -845,9 +891,7 @@ class TestBatchSpecCommitOnDevReady:
         db = await get_connection(initialized_db_path)
         try:
             approvals = await get_pending_approvals(db)
-            spec_approvals = [
-                a for a in approvals if a.approval_type == "precommit_failure"
-            ]
+            spec_approvals = [a for a in approvals if a.approval_type == "precommit_failure"]
             assert len(spec_approvals) == 1
             payload = json.loads(spec_approvals[0].payload or "{}")
             assert payload["scope"] == "spec_batch"
@@ -902,9 +946,7 @@ class TestBatchSpecCommitOnDevReady:
         db = await get_connection(initialized_db_path)
         try:
             approvals = await get_pending_approvals(db)
-            spec_approvals = [
-                a for a in approvals if a.approval_type == "precommit_failure"
-            ]
+            spec_approvals = [a for a in approvals if a.approval_type == "precommit_failure"]
             assert len(spec_approvals) == 1
             payload = json.loads(spec_approvals[0].payload or "{}")
             assert payload["scope"] == "spec_batch"

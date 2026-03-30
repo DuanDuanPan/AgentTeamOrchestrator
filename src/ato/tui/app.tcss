@@ -262,6 +262,18 @@ StoryDetailView {
     padding: 0 1;
 }
 
+#detail-uat-feedback {
+    display: none;
+    height: auto;
+    padding: 0 1;
+    margin: 1 0 0 0;
+}
+
+#detail-uat-reason {
+    display: none;
+    margin: 0 1;
+}
+
 #detail-expanded {
     height: auto;
     padding: 0 1;

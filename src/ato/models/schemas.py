@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
-
-from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -19,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 9
+SCHEMA_VERSION: int = 10
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -199,8 +198,14 @@ class _StrictBase(BaseModel):
 # ---------------------------------------------------------------------------
 
 ProgressEventType = Literal[
-    "init", "text", "tool_use", "tool_result",
-    "turn_end", "result", "error", "other",
+    "init",
+    "text",
+    "tool_use",
+    "tool_result",
+    "turn_end",
+    "result",
+    "error",
+    "other",
 ]
 """ProgressEvent 事件类型。"""
 
@@ -374,6 +379,7 @@ class TaskRecord(_StrictBase):
     cost_usd: float | None = None
     duration_ms: int | None = None
     error_message: str | None = None
+    text_result: str | None = None
     last_activity_type: str | None = None
     last_activity_summary: str | None = None
 
@@ -481,6 +487,21 @@ class BatchStoryLink(_StrictBase):
 # ---------------------------------------------------------------------------
 # Merge Queue 模型 (Story 4.2)
 # ---------------------------------------------------------------------------
+
+
+class RegressionResult(_StrictBase):
+    """Codex regression runner 的结构化输出模型。
+
+    merge_queue 在归一化时通过 model_validate() 校验，
+    缺字段或类型错误一律 fail-closed。
+    """
+
+    regression_status: Literal["pass", "fail"]
+    summary: str
+    commands_attempted: list[str]
+    skipped_command_reason: str | None
+    discovery_notes: str
+
 
 MergeQueueStatus = Literal["waiting", "merging", "regression_pending", "merged", "failed"]
 """Merge queue entry 状态。"""

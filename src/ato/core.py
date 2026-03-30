@@ -645,9 +645,15 @@ class Orchestrator:
         self._pid_path = db_path.parent / "orchestrator.pid"
         self._background_tasks: list[asyncio.Task[None]] = []
         self._inflight_restart_dispatches: set[str] = set()
+        self._inflight_restart_story_phases: set[tuple[str, str]] = set()
         self._inflight_initial_dispatches: set[str] = set()
         self._merge_queue: MergeQueue | None = None
         self._worktree_mgr: WorktreeManager | None = None
+
+    @staticmethod
+    def _restart_dispatch_key(task: TaskRecord) -> tuple[str, str]:
+        """Return the story/phase key used to dedupe restart dispatches."""
+        return (task.story_id, task.phase)
 
     def _build_progress_callback(self, task: TaskRecord) -> ProgressCallback:
         """Build an orchestrator-level progress logger for background agent work."""
@@ -937,9 +943,12 @@ class Orchestrator:
         Interactive phase → SubprocessManager.dispatch_interactive()（开新终端）
         Non-interactive phase → SubprocessManager.dispatch_with_retry()（后台子进程）
         """
+        from ato.models.db import update_task_status
+
         db = await get_connection(self._db_path)
         try:
             pending_tasks = await get_tasks_by_status(db, "pending")
+            running_tasks = await get_tasks_by_status(db, "running")
             if not pending_tasks:
                 return
         finally:
@@ -954,6 +963,44 @@ class Orchestrator:
         if not rescheduled:
             return
 
+        async def _mark_superseded(task: TaskRecord, *, reason: str) -> None:
+            db2 = await get_connection(self._db_path)
+            try:
+                await update_task_status(
+                    db2,
+                    task.task_id,
+                    "failed",
+                    completed_at=datetime.now(tz=UTC),
+                    expected_artifact="restart_superseded",
+                    error_message=reason,
+                )
+            finally:
+                await db2.close()
+            logger.info(
+                "task_dispatch_superseded",
+                task_id=task.task_id,
+                story_id=task.story_id,
+                phase=task.phase,
+                reason=reason,
+            )
+
+        # 同一 story/phase 只允许一个 pending restart 进入实际调度。
+        # 选择 rowid 顺序中最后一条（最新 task）作为 canonical，其余直接封口。
+        latest_by_key: dict[tuple[str, str], TaskRecord] = {}
+        superseded_tasks: list[TaskRecord] = []
+        for task in rescheduled:
+            dispatch_key = self._restart_dispatch_key(task)
+            previous = latest_by_key.get(dispatch_key)
+            if previous is not None:
+                superseded_tasks.append(previous)
+            latest_by_key[dispatch_key] = task
+
+        for task in superseded_tasks:
+            await _mark_superseded(task, reason="superseded_by_duplicate_restart_request")
+
+        running_keys = {self._restart_dispatch_key(task) for task in running_tasks}
+        rescheduled = list(latest_by_key.values())
+
         # 构建 phase 类型集合
         from ato.config import build_phase_definitions
 
@@ -966,6 +1013,7 @@ class Orchestrator:
         }
 
         for task in rescheduled:
+            dispatch_key = self._restart_dispatch_key(task)
             if task.task_id in self._inflight_restart_dispatches:
                 logger.debug(
                     "task_dispatch_already_inflight",
@@ -974,11 +1022,23 @@ class Orchestrator:
                     phase=task.phase,
                 )
                 continue
+            if dispatch_key in self._inflight_restart_story_phases:
+                logger.debug(
+                    "task_dispatch_story_phase_already_inflight",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                )
+                continue
+            if dispatch_key in running_keys:
+                await _mark_superseded(task, reason="superseded_by_running_story_phase")
+                continue
 
             resume = task.expected_artifact == "resume_requested"
             is_interactive = task.phase in interactive_phases
             is_convergent = task.phase in convergent_loop_phases
             self._inflight_restart_dispatches.add(task.task_id)
+            self._inflight_restart_story_phases.add(dispatch_key)
 
             try:
                 if is_interactive:
@@ -1001,14 +1061,17 @@ class Orchestrator:
                     )
             except Exception:
                 self._inflight_restart_dispatches.discard(task.task_id)
+                self._inflight_restart_story_phases.discard(dispatch_key)
                 raise
 
             def _clear_inflight(
                 completed: asyncio.Task[None],
                 *,
                 task_id: str = task.task_id,
+                story_phase: tuple[str, str] = dispatch_key,
             ) -> None:
                 self._inflight_restart_dispatches.discard(task_id)
+                self._inflight_restart_story_phases.discard(story_phase)
                 with contextlib.suppress(ValueError):
                     self._background_tasks.remove(completed)
 
@@ -1122,13 +1185,46 @@ class Orchestrator:
         BMAD parse/fallback/findings 流程，creating/designing 等
         structured_job 也与 restart 路径保持同一实现。
         """
-        from ato.models.db import insert_task
+        from ato.models.db import get_story, insert_task
         from ato.recovery import RecoveryEngine
+
+        db = await get_connection(self._db_path)
+        try:
+            latest_story = await get_story(db, story.story_id)
+        finally:
+            await db.close()
+        if latest_story is not None:
+            story = latest_story
+
+        if await self._has_pending_crash_recovery_approval(story.story_id):
+            logger.info(
+                "initial_dispatch_blocked_by_crash_recovery",
+                story_id=story.story_id,
+                phase=story.current_phase,
+            )
+            return
+
+        if story.current_phase == "dev_ready":
+            await self._reconcile_dev_ready_story(story.story_id)
+            logger.info(
+                "initial_dispatch_dev_ready_reconciled",
+                story_id=story.story_id,
+                phase=story.current_phase,
+            )
+            return
 
         phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, story.current_phase)
         if not phase_cfg:
             logger.error(
                 "initial_dispatch_no_phase_config",
+                story_id=story.story_id,
+                phase=story.current_phase,
+            )
+            return
+
+        if phase_cfg.get("workspace") == "worktree" and story.worktree_path is None:
+            logger.info(
+                "initial_dispatch_deferred_waiting_for_worktree",
                 story_id=story.story_id,
                 phase=story.current_phase,
             )
@@ -1175,6 +1271,40 @@ class Orchestrator:
                 story_id=story.story_id,
                 phase=story.current_phase,
             )
+
+    async def _has_pending_crash_recovery_approval(self, story_id: str) -> bool:
+        """Check whether the story is currently blocked by crash_recovery approval."""
+        from ato.models.db import get_pending_approvals
+
+        db = await get_connection(self._db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+        return any(
+            approval.story_id == story_id and approval.approval_type == "crash_recovery"
+            for approval in approvals
+        )
+
+    async def _reconcile_dev_ready_story(self, story_id: str) -> None:
+        """Advance dev_ready without dispatching an LLM task."""
+        if self._tq is None:
+            logger.warning(
+                "dev_ready_reconcile_without_transition_queue",
+                story_id=story_id,
+            )
+            return
+        if isinstance(self._tq, TransitionQueue):
+            await self._tq.ensure_dev_ready_progress(story_id)
+            return
+        await self._tq.submit(
+            TransitionEvent(
+                story_id=story_id,
+                event_name="start_dev",
+                source="agent",
+                submitted_at=datetime.now(tz=UTC),
+            )
+        )
 
     async def _dispatch_interactive_restart(
         self,
@@ -1241,6 +1371,15 @@ class Orchestrator:
                 story_ctx,
                 project_root=derive_project_root(self._db_path),
             )
+
+            if task.phase == "developing":
+                from ato.recovery import _build_developing_prompt_with_suggestion_findings
+
+                prompt = await _build_developing_prompt_with_suggestion_findings(
+                    prompt,
+                    task.story_id,
+                    self._db_path,
+                )
 
             ato_dir = self._db_path.parent
 
@@ -1349,11 +1488,31 @@ class Orchestrator:
         Pre-worktree phases 通过共享 main-path limiter（max=1）串行化。
         """
         from ato.models.db import get_connection as _gc
-        from ato.models.db import get_story
+        from ato.models.db import get_story, update_task_status
 
         # 从 phase config 获取 workspace，决定 limiter 策略
         from ato.recovery import RecoveryEngine
         from ato.subprocess_mgr import SubprocessManager
+
+        if task.phase == "dev_ready":
+            await self._reconcile_dev_ready_story(task.story_id)
+            db = await _gc(self._db_path)
+            try:
+                await update_task_status(
+                    db,
+                    task.task_id,
+                    "completed",
+                    completed_at=datetime.now(tz=UTC),
+                    expected_artifact="dev_ready_gate_reconciled",
+                )
+            finally:
+                await db.close()
+            logger.info(
+                "dispatch_batch_restart_dev_ready_reconciled",
+                task_id=task.task_id,
+                story_id=task.story_id,
+            )
+            return
 
         phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, task.phase)
         workspace = phase_cfg.get("workspace", "main")
@@ -2042,10 +2201,16 @@ class Orchestrator:
 
                 project_root = derive_project_root(self._db_path)
                 mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
-                success, message = await mgr.batch_spec_commit(batch_id, story_ids)
+                limiter = get_main_path_limiter()
+                await limiter.acquire()
+                try:
+                    success, message = await mgr.batch_spec_commit(batch_id, story_ids)
+                finally:
+                    limiter.release()
                 if success:
                     if db is not None:
                         await mark_batch_spec_committed(db, batch_id)
+                    await self._advance_dev_ready_stories(story_ids)
                     logger.info("spec_batch_retry_success", batch_id=batch_id)
                     return True  # 成功 → 消费 approval
                 # 失败 → 创建新 approval（同事务）
@@ -2098,6 +2263,7 @@ class Orchestrator:
                     await mark_batch_spec_committed(db, batch_id)
             except Exception:
                 logger.exception("spec_batch_skip_mark_failed", batch_id=batch_id)
+            await self._advance_dev_ready_stories(story_ids)
             return True
 
         logger.warning(
@@ -2107,6 +2273,11 @@ class Orchestrator:
             decision=decision,
         )
         return False
+
+    async def _advance_dev_ready_stories(self, story_ids: list[str]) -> None:
+        """Submit non-LLM dev_ready reconciliation for a batch of stories."""
+        for story_id in story_ids:
+            await self._reconcile_dev_ready_story(story_id)
 
     async def _create_spec_batch_approval(
         self,

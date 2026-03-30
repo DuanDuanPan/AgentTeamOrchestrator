@@ -398,7 +398,6 @@ class LLMBatchRecommender:
                 {
                     "json_schema": BATCH_RECOMMEND_JSON_SCHEMA,
                     "cwd": str(self._project_root),
-                    "max_turns": 10,
                 },
                 on_progress=self._on_progress,
             )

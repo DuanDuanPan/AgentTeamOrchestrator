@@ -132,7 +132,7 @@ async def test_detail_view_stores_cost_logs() -> None:
     costs = [_make_cost_log(), _make_cost_log(cost_log_id="c2", cost_usd=0.10)]
     view.update_detail(
         story=_make_story(),
-        cost_logs=costs,
+        cost_logs=costs,  # type: ignore[arg-type]
     )
     assert len(view._cost_logs) == 2
 
@@ -143,9 +143,26 @@ async def test_detail_view_stores_tasks() -> None:
     tasks = [_make_task(), _make_task(task_id="t2", phase="reviewing")]
     view.update_detail(
         story=_make_story(),
-        tasks=tasks,
+        tasks=tasks,  # type: ignore[arg-type]
     )
     assert len(view._tasks) == 2
+
+
+async def test_detail_view_refresh_can_preserve_expanded_view() -> None:
+    """轮询刷新详情数据时保留当前展开区块。"""
+    view = StoryDetailView(id="test-detail")
+    view._expanded_view = "findings"
+
+    view.update_detail(
+        story=_make_story(current_phase="designing"),
+        findings_summary={"blocking_open": 1},
+        tasks=[_make_task(task_id="t3", phase="designing", status="running")],
+        preserve_expanded_view=True,
+    )
+
+    assert view._story_data["current_phase"] == "designing"
+    assert len(view._tasks) == 1
+    assert view._expanded_view == "findings"
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +386,59 @@ def test_log_placeholder() -> None:
     view = StoryDetailView(id="test-detail")
     view.action_show_log_placeholder()
     assert view._expanded_view == "log"
+
+
+def test_contextual_f_keeps_findings_outside_uat() -> None:
+    """非 UAT phase 下 f 仍然展开 findings。"""
+    view = StoryDetailView(id="test-detail")
+    view.update_detail(story=_make_story(current_phase="reviewing"))
+
+    view.action_contextual_fail_or_findings()
+
+    assert view._expanded_view == "findings"
+    assert view._uat_prompt_active is False
+
+
+def test_contextual_f_opens_fail_prompt_in_uat() -> None:
+    """UAT phase 下 f 打开 fail 原因输入。"""
+    view = StoryDetailView(id="test-detail")
+    view.update_detail(story=_make_story(current_phase="uat"))
+
+    view.action_contextual_fail_or_findings()
+
+    assert view._expanded_view is None
+    assert view._uat_prompt_active is True
+    assert view._uat_feedback is not None
+    assert "请输入 UAT 未通过原因" in view._uat_feedback
+
+
+def test_uat_fail_reason_required() -> None:
+    """UAT fail 输入空原因时给出校验提示。"""
+    view = StoryDetailView(id="test-detail")
+    view.update_detail(story=_make_story(current_phase="uat"))
+    view.action_contextual_fail_or_findings()
+
+    event = SimpleNamespace(
+        input=SimpleNamespace(id="detail-uat-reason"),
+        value="   ",
+    )
+    view.on_input_submitted(event)  # type: ignore[arg-type]
+
+    assert view._uat_submitting is False
+    assert view._uat_feedback == "失败原因不能为空"
+
+
+def test_finish_uat_submission_success_closes_prompt() -> None:
+    """异步提交成功后关闭 fail prompt。"""
+    view = StoryDetailView(id="test-detail")
+    view.update_detail(story=_make_story(current_phase="uat"))
+    view.action_contextual_fail_or_findings()
+
+    view.finish_uat_submission(success=True, message="提交成功")
+
+    assert view._uat_prompt_active is False
+    assert view._uat_submitting is False
+    assert view._uat_feedback == "提交成功"
 
 
 # ---------------------------------------------------------------------------

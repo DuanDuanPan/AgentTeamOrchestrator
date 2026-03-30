@@ -389,6 +389,7 @@ class CodexAdapter(BaseAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                limit=16 * 1024 * 1024,  # 16MB — MCP 工具可能返回超大 JSON
             )
             stderr_task = asyncio.create_task(drain_stderr(proc.stderr))  # type: ignore[arg-type]
             try:
@@ -399,20 +400,23 @@ class CodexAdapter(BaseAdapter):
                 # 而非仅 _consume_stream，防止进程关闭 stdout 后僵死
                 async with asyncio.timeout(timeout_seconds):
                     events = await self._consume_stream(
-                        proc.stdout, on_progress,  # type: ignore[arg-type]
+                        proc.stdout,  # type: ignore[arg-type]
+                        on_progress,
                     )
                     stderr = await stderr_task
                     await proc.wait()
             except TimeoutError as exc:
                 if on_progress:
                     with contextlib.suppress(Exception):
-                        await on_progress(ProgressEvent(
-                            event_type="error",
-                            summary=f"超时 ({timeout_seconds}s)",
-                            cli_tool="codex",
-                            timestamp=datetime.now(tz=UTC),
-                            raw={},
-                        ))
+                        await on_progress(
+                            ProgressEvent(
+                                event_type="error",
+                                summary=f"超时 ({timeout_seconds}s)",
+                                cli_tool="codex",
+                                timestamp=datetime.now(tz=UTC),
+                                raw={},
+                            )
+                        )
                 await cleanup_process(proc)
                 raise CLIAdapterError(
                     f"Codex CLI timed out after {timeout_seconds}s",
@@ -441,13 +445,15 @@ class CodexAdapter(BaseAdapter):
                 )
                 if on_progress:
                     with contextlib.suppress(Exception):
-                        await on_progress(ProgressEvent(
-                            event_type="error",
-                            summary=f"退出码 {exit_code}: {category.value}",
-                            cli_tool="codex",
-                            timestamp=datetime.now(tz=UTC),
-                            raw={},
-                        ))
+                        await on_progress(
+                            ProgressEvent(
+                                event_type="error",
+                                summary=f"退出码 {exit_code}: {category.value}",
+                                cli_tool="codex",
+                                timestamp=datetime.now(tz=UTC),
+                                raw={},
+                            )
+                        )
                 raise CLIAdapterError(
                     f"Codex CLI exited with code {exit_code}",
                     category=category,
@@ -460,13 +466,15 @@ class CodexAdapter(BaseAdapter):
             if not events:
                 if on_progress:
                     with contextlib.suppress(Exception):
-                        await on_progress(ProgressEvent(
-                            event_type="error",
-                            summary="无有效 JSONL 事件",
-                            cli_tool="codex",
-                            timestamp=datetime.now(tz=UTC),
-                            raw={},
-                        ))
+                        await on_progress(
+                            ProgressEvent(
+                                event_type="error",
+                                summary="无有效 JSONL 事件",
+                                cli_tool="codex",
+                                timestamp=datetime.now(tz=UTC),
+                                raw={},
+                            )
+                        )
                 raise CLIAdapterError(
                     "Codex CLI stdout contained no valid JSONL events",
                     category=ErrorCategory.PARSE_ERROR,
@@ -480,13 +488,15 @@ class CodexAdapter(BaseAdapter):
             if not has_turn:
                 if on_progress:
                     with contextlib.suppress(Exception):
-                        await on_progress(ProgressEvent(
-                            event_type="error",
-                            summary="缺少 turn.completed 事件",
-                            cli_tool="codex",
-                            timestamp=datetime.now(tz=UTC),
-                            raw={},
-                        ))
+                        await on_progress(
+                            ProgressEvent(
+                                event_type="error",
+                                summary="缺少 turn.completed 事件",
+                                cli_tool="codex",
+                                timestamp=datetime.now(tz=UTC),
+                                raw={},
+                            )
+                        )
                 raise CLIAdapterError(
                     "Codex CLI JSONL missing turn.completed event",
                     category=ErrorCategory.PARSE_ERROR,
@@ -517,13 +527,15 @@ class CodexAdapter(BaseAdapter):
             if not has_agent_msg and not output_file_content:
                 if on_progress:
                     with contextlib.suppress(Exception):
-                        await on_progress(ProgressEvent(
-                            event_type="error",
-                            summary="无文本结果",
-                            cli_tool="codex",
-                            timestamp=datetime.now(tz=UTC),
-                            raw={},
-                        ))
+                        await on_progress(
+                            ProgressEvent(
+                                event_type="error",
+                                summary="无文本结果",
+                                cli_tool="codex",
+                                timestamp=datetime.now(tz=UTC),
+                                raw={},
+                            )
+                        )
                 raise CLIAdapterError(
                     "Codex CLI produced no text result"
                     " (no agent_message in JSONL and no output file content)",

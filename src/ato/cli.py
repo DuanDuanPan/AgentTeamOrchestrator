@@ -1799,6 +1799,145 @@ async def _findings_impl(db_path: Path, story_id: str, output_json: bool) -> Non
     Console().print(table)
 
 
+_ROLLBACK_WORKTREE_CLEANUP_PHASES = {"queued", "creating", "designing", "validating", "dev_ready"}
+
+
+@app.command("rollback-story")
+def rollback_story_cmd(
+    story_id: str = typer.Argument(..., help="Story ID"),
+    phase: str = typer.Option(..., "--phase", help="回退目标 phase"),
+    db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    cleanup_worktree: bool = typer.Option(
+        False,
+        "--cleanup-worktree",
+        help="同时清理该 story 的 git worktree（仅建议回退到 pre-worktree phase 时使用）",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="跳过确认提示"),
+) -> None:
+    """安全回退 story phase，并修复手工 DB 改写留下的非法状态。"""
+    resolved_db = db_path or _DEFAULT_DB_PATH
+    if not resolved_db.exists():
+        typer.echo(
+            _format_cli_error(f"数据库不存在: {resolved_db}", "运行 `ato init` 初始化项目"),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ENV_ERROR)
+
+    try:
+        asyncio.run(
+            _rollback_story_async(
+                resolved_db,
+                story_id,
+                phase,
+                cleanup_worktree=cleanup_worktree,
+                yes=yes,
+            )
+        )
+    except click.exceptions.Exit:
+        raise
+    except click.exceptions.Abort:
+        raise
+    except Exception as exc:
+        typer.echo(_format_cli_error(str(exc), "检查错误信息并重试"), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
+
+
+async def _rollback_story_async(
+    db_path: Path,
+    story_id: str,
+    phase: str,
+    *,
+    cleanup_worktree: bool,
+    yes: bool,
+) -> None:
+    """rollback-story 命令的异步实现。"""
+    from ato.models.db import get_connection, get_story, rollback_story
+    from ato.state_machine import PHASE_TO_STATUS
+
+    if phase not in PHASE_TO_STATUS or phase in {"done", "blocked"}:
+        typer.echo(
+            _format_cli_error(
+                f"非法回退目标 phase: {phase}",
+                "使用 queued/creating/designing/validating/dev_ready/developing/..."
+                " 这类非终态 phase",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
+
+    if cleanup_worktree and phase not in _ROLLBACK_WORKTREE_CLEANUP_PHASES:
+        typer.echo(
+            _format_cli_error(
+                "--cleanup-worktree 仅适用于回退到 pre-worktree phase",
+                f"改用 --phase {'/'.join(sorted(_ROLLBACK_WORKTREE_CLEANUP_PHASES))}，"
+                "或去掉 --cleanup-worktree",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
+
+    db = await get_connection(db_path)
+    try:
+        story = await get_story(db, story_id)
+    finally:
+        await db.close()
+
+    if story is None:
+        typer.echo(
+            _format_cli_error(
+                f"Story 不存在: {story_id}",
+                "运行 `ato batch status` 查看可用 stories",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_ERROR)
+
+    if not yes:
+        cleanup_hint = "，并清理 worktree" if cleanup_worktree else ""
+        confirmed = typer.confirm(
+            f"确认将 story {story_id} 从 {story.current_phase} 回退到 {phase}{cleanup_hint}？",
+            default=False,
+        )
+        if not confirmed:
+            typer.echo("已取消。")
+            raise typer.Exit(code=EXIT_SUCCESS)
+
+    db = await get_connection(db_path)
+    try:
+        summary = await rollback_story(
+            db,
+            story_id,
+            phase,
+            reason="manual rollback via ato rollback-story",
+        )
+    finally:
+        await db.close()
+
+    if cleanup_worktree:
+        from ato.worktree_mgr import WorktreeManager
+
+        project_root = _derive_project_root(db_path)
+        mgr = WorktreeManager(project_root=project_root, db_path=db_path)
+        try:
+            await mgr.cleanup(story_id)
+        except Exception as exc:
+            typer.echo(
+                _format_cli_error(
+                    f"Story 已回退，但 worktree 清理失败: {exc}",
+                    "检查 git/worktree 状态后手动清理，或重试 rollback-story --cleanup-worktree",
+                ),
+                err=True,
+            )
+            raise typer.Exit(code=EXIT_ERROR) from exc
+
+    typer.echo(
+        "已回退 "
+        f"{story_id}: {summary['previous_phase']} -> {summary['target_phase']} "
+        f"(tasks={summary['normalized_tasks']}, findings={summary['normalized_findings']}, "
+        f"approvals={summary['cleared_pending_approvals']})"
+    )
+
+
 @app.command("approve")
 def approve_cmd(
     approval_id: str = typer.Argument(..., help="Approval ID（前缀 ≥4 字符）"),
@@ -1957,126 +2096,26 @@ async def _uat_async(
     db_path: Path,
 ) -> None:
     """uat 命令的异步实现。"""
-    from ato.models.db import (
-        get_connection,
-        get_story,
-        get_tasks_by_story,
-        update_task_status,
-    )
+    from typing import Literal, cast
+
+    from ato.uat import UATSubmissionError
+    from ato.uat import submit_uat_result as submit_uat_result_helper
 
     ato_dir = db_path.parent
-    now = datetime.now(tz=UTC)
-
-    # 1. 验证 story 存在
-    db = await get_connection(db_path)
     try:
-        story = await get_story(db, story_id)
-    finally:
-        await db.close()
-
-    if story is None:
-        typer.echo(
-            _format_cli_error(
-                f"Story 不存在: {story_id}",
-                "运行 `ato batch status` 查看可用 stories",
-            ),
-            err=True,
+        outcome = await submit_uat_result_helper(
+            db_path=db_path,
+            story_id=story_id,
+            result=cast(Literal["pass", "fail"], result),
+            reason=reason,
         )
-        raise typer.Exit(code=EXIT_ERROR)
+    except UATSubmissionError as exc:
+        typer.echo(_format_cli_error(str(exc), exc.hint), err=True)
+        raise typer.Exit(code=EXIT_ERROR) from exc
 
-    # 2. 验证 story 在 uat 阶段
-    if story.current_phase != "uat":
-        typer.echo(
-            _format_cli_error(
-                f"Story '{story_id}' 不在 UAT 阶段（当前: {story.current_phase}）",
-                "等待 story 进入 UAT 阶段后重试",
-            ),
-            err=True,
-        )
-        raise typer.Exit(code=EXIT_ERROR)
-
-    # 3. 构造 UAT 结果 payload
-    uat_payload = {
-        "uat_result": result,
-        "reason": reason,
-        "submitted_at": now.isoformat(),
-    }
-
-    if result == "pass":
-        # pass 路径：标记 task 为 completed，Orchestrator 检测完成后触发 uat_pass
-        db = await get_connection(db_path)
-        try:
-            tasks = await get_tasks_by_story(db, story_id)
-            running_task = None
-            for t in tasks:
-                if t.status == "running" and t.phase == "uat":
-                    running_task = t
-                    break
-
-            if running_task is None:
-                typer.echo(
-                    _format_cli_error(
-                        "未找到运行中的 UAT task",
-                        "确认 Orchestrator 已启动且 story 在 UAT 阶段",
-                    ),
-                    err=True,
-                )
-                raise typer.Exit(code=EXIT_ERROR)
-
-            await update_task_status(
-                db,
-                running_task.task_id,
-                "completed",
-                context_briefing=json.dumps(uat_payload, ensure_ascii=False),
-                completed_at=now,
-            )
-        finally:
-            await db.close()
-
-        pid_path = ato_dir / "orchestrator.pid"
-        _send_nudge_safe(pid_path)
-        typer.echo(f"✅ Story '{story_id}' UAT 通过，进入 merge 阶段。")
-
-    else:
-        # fail 路径：标记 task 为 failed + uat_fail_requested，
-        # 由 Orchestrator 在 _poll_cycle 中检测并通过自己的 TQ 执行转换。
-        # 不在 CLI 进程中创建 TransitionQueue，避免状态机缓存分叉。
-        db = await get_connection(db_path)
-        try:
-            tasks = await get_tasks_by_story(db, story_id)
-            running_task = None
-            for t in tasks:
-                if t.status == "running" and t.phase == "uat":
-                    running_task = t
-                    break
-
-            if running_task is None:
-                typer.echo(
-                    _format_cli_error(
-                        "未找到运行中的 UAT task",
-                        "确认 Orchestrator 已启动且 story 在 UAT 阶段",
-                    ),
-                    err=True,
-                )
-                raise typer.Exit(code=EXIT_ERROR)
-
-            await update_task_status(
-                db,
-                running_task.task_id,
-                "failed",
-                context_briefing=json.dumps(uat_payload, ensure_ascii=False),
-                error_message=f"uat_fail: {reason}",
-                expected_artifact="uat_fail_requested",
-                completed_at=now,
-            )
-        finally:
-            await db.close()
-
-        pid_path = ato_dir / "orchestrator.pid"
-        _send_nudge_safe(pid_path)
-        typer.echo(
-            f"✅ Story '{story_id}' UAT 未通过，退回 fix 阶段重新进入质量门控。原因: {reason}"
-        )
+    pid_path = ato_dir / "orchestrator.pid"
+    _send_nudge_safe(pid_path)
+    typer.echo(outcome.message)
 
 
 # ---------------------------------------------------------------------------
