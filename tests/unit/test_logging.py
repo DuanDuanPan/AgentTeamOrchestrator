@@ -13,6 +13,7 @@ import structlog
 
 from ato.logging import configure_logging
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 
@@ -54,6 +55,61 @@ class TestConfigureLogging:
         assert record["event"] == "test_event"
         assert record["key"] == "value"
         assert record["level"] == "info"
+
+    def test_json_preserves_unicode_without_ascii_escape(self) -> None:
+        """验证 JSON 输出直接保留中文，而非 \\uXXXX 转义。"""
+        buf = io.StringIO()
+        configure_logging()
+
+        root = logging.getLogger()
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler) and h.stream is sys.stderr:
+                h.stream = buf
+                break
+
+        logger = structlog.get_logger()
+        logger.info("agent_progress", progress_summary="执行命令: 生成文档")
+
+        output = buf.getvalue().strip()
+        record = json.loads(output)
+        assert record["progress_summary"] == "执行命令: 生成文档"
+        assert "执行命令: 生成文档" in output
+        assert "\\u6267\\u884c\\u547d\\u4ee4" not in output
+
+    def test_console_mode_renders_human_readable_progress(self) -> None:
+        """验证 console 模式会把 agent_progress 渲染为易读摘要。"""
+        buf = io.StringIO()
+        configure_logging(log_format="console")
+
+        root = logging.getLogger()
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler) and h.stream is sys.stderr:
+                h.stream = buf
+                break
+
+        logger = structlog.get_logger()
+        logger.info(
+            "agent_progress",
+            component="orchestrator",
+            task_id="1d6ac4b2-c358-4d15-b506-24285725f92f",
+            story_id="3-2-editor-workspace-doc-outline",
+            phase="reviewing",
+            role="reviewer",
+            cli_tool="codex",
+            progress_cli_tool="codex",
+            progress_type="tool_use",
+            progress_summary="执行命令: git diff --stat",
+            progress_at="2026-03-30T08:19:34.202624+00:00",
+        )
+
+        output = buf.getvalue().strip()
+        plain_output = ANSI_ESCAPE_RE.sub("", output)
+        assert not plain_output.startswith("{")
+        assert "执行命令: git diff --stat" in plain_output
+        assert "scope=reviewing/reviewer" in plain_output
+        assert "tool=codex:tool_use" in plain_output
+        assert "story=3-2-editor-workspace-doc-outline" in plain_output
+        assert "task=1d6ac4b2" in plain_output
 
     def test_json_contains_iso_timestamp(self, tmp_path: Path) -> None:
         """验证 JSON 输出包含 ISO 格式时间戳。"""
@@ -109,6 +165,20 @@ class TestConfigureLogging:
         record = json.loads(content.strip().split("\n")[-1])
         assert record["event"] == "disk_full"
         assert record["usage"] == 95
+
+    def test_console_stderr_keeps_file_output_json(self, tmp_path: Path) -> None:
+        """验证 console stderr 不影响文件日志 JSON 格式。"""
+        log_dir = str(tmp_path / "console_logs")
+        configure_logging(log_dir=log_dir, log_format="console")
+
+        logger = structlog.get_logger()
+        logger.info("agent_progress", progress_summary="执行命令: 生成文档")
+
+        log_file = tmp_path / "console_logs" / "ato.log"
+        content = log_file.read_text()
+        record = json.loads(content.strip().split("\n")[-1])
+        assert record["event"] == "agent_progress"
+        assert record["progress_summary"] == "执行命令: 生成文档"
 
     def test_debug_mode_enables_debug_level(self, tmp_path: Path) -> None:
         """验证 debug=True 时启用 DEBUG 级别。"""
