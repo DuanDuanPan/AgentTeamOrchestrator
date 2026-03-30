@@ -671,8 +671,8 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
     """返回 active batch 中处于活跃阶段且可被自动调度的 stories。
 
     用于检测需要初始调度的 stories（batch confirm 后首次 dispatch）。
-    存在 pending ``crash_recovery`` approval 的 story 会被排除，避免在等待
-    人工决策期间被初始调度路径再次补发 task。
+    存在 pending blocking approval（``crash_recovery`` 或 ``needs_human_review``）
+    的 story 会被排除，避免在等待人工决策期间被初始调度路径再次补发 task。
     """
     cursor = await db.execute(
         """
@@ -687,11 +687,16 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
             SELECT 1 FROM tasks t
             WHERE t.story_id = s.story_id
               AND t.status IN ('running', 'pending', 'paused')
+              AND COALESCE(t.expected_artifact, '') != 'convergent_loop_fix_placeholder'
           )
           AND NOT EXISTS (
             SELECT 1 FROM approvals a
             WHERE a.story_id = s.story_id
-              AND a.approval_type = 'crash_recovery'
+              AND a.approval_type IN (
+                'crash_recovery', 'needs_human_review',
+                'merge_authorization', 'convergent_loop_escalation',
+                'regression_failure'
+              )
               AND a.status = 'pending'
           )
         """,

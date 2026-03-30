@@ -815,6 +815,27 @@ class RecoveryEngine:
 
         if previous_findings:
             round_num = max(f.round_num for f in previous_findings) + 1
+            max_rounds = loop._config.max_rounds
+
+            # Enforce max_rounds: if exceeded, escalate instead of re-reviewing
+            if round_num > max_rounds:
+                remaining = sum(
+                    1 for f in previous_findings if f.severity == "blocking"
+                )
+                logger.warning(
+                    "convergent_loop_max_rounds_exceeded",
+                    story_id=task.story_id,
+                    round_num=round_num,
+                    max_rounds=max_rounds,
+                    remaining_blocking=remaining,
+                )
+                await loop._create_escalation_approval(
+                    task.story_id,
+                    rounds_completed=round_num - 1,
+                    remaining_blocking=remaining,
+                )
+                return
+
             await loop.run_rereview(
                 task.story_id,
                 round_num,

@@ -26,7 +26,7 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 _CLI_VERSION_TIMEOUT: float = 10.0
-_CLI_AUTH_TIMEOUT: float = 30.0
+_CLI_AUTH_TIMEOUT: float = 60.0
 
 
 # ---------------------------------------------------------------------------

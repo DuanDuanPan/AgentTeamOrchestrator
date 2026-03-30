@@ -555,6 +555,13 @@ def _parse_code_review(markdown: str) -> list[BmadFinding] | None:
                     }
                 )
             )
+
+    # If we detected a **Findings** heading but extracted nothing,
+    # the output format is unrecognized — return None to trigger
+    # semantic fallback rather than falsely reporting a clean review.
+    if not findings and (has_findings_heading or has_open_findings):
+        return None
+
     return findings
 
 
@@ -999,6 +1006,12 @@ def _parse_qa_report(markdown: str) -> list[BmadFinding] | None:
             is_dup = any(tf.category in slug or slug in tf.category for slug in existing_slugs)
             if not is_dup:
                 findings.append(tf)
+
+    # If we detected issue sections but extracted nothing, the output format
+    # is unrecognized — return None to trigger semantic fallback.
+    has_sections = critical_section is not None or rec_section is not None
+    if not findings and has_sections:
+        return None
 
     return findings
 

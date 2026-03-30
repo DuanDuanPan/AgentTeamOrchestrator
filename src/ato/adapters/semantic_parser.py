@@ -1,15 +1,13 @@
 """semantic_parser — Claude CLI semantic fallback parser。
 
 当 deterministic fast-path 无法解析 BMAD skill 输出时，
-调用 Claude CLI (claude -p --json-schema) 提取结构化 findings。
+通过 ClaudeAdapter + --json-schema 提取结构化 findings。
 
 实现 ``bmad_adapter.SemanticParserRunner`` 协议。
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 from typing import Any
 
 import structlog
@@ -126,10 +124,12 @@ _DEFAULT_MODEL = "sonnet"
 
 
 class ClaudeSemanticParser:
-    """Semantic fallback parser using Claude CLI with structured output.
+    """Semantic fallback parser using ClaudeAdapter with structured output.
 
     Implements the ``SemanticParserRunner`` protocol defined in
-    ``bmad_adapter.py``.
+    ``bmad_adapter.py``.  Delegates to ``ClaudeAdapter.execute()`` so that
+    ``--json-schema`` → ``structured_output`` handling is consistent with
+    the rest of the codebase (e.g. ``batch.py`` LLM recommender).
     """
 
     def __init__(
@@ -148,7 +148,7 @@ class ClaudeSemanticParser:
         skill_type: BmadSkillType,
         story_id: str,
     ) -> list[dict[str, Any]]:
-        """Extract findings from markdown using Claude CLI.
+        """Extract findings from markdown using ClaudeAdapter.
 
         Returns:
             List of finding dicts matching BmadFinding schema.
@@ -157,24 +157,13 @@ class ClaudeSemanticParser:
             Exception: on CLI failure or parse error (caught by BmadAdapter
             stage-2 fallback handler).
         """
+        from ato.adapters.claude_cli import ClaudeAdapter
+
         skill_context = _SKILL_CONTEXT.get(skill_type, "Extract all findings.")
         prompt = _EXTRACT_PROMPT_TEMPLATE.format(
             skill_context=skill_context,
             markdown=markdown,
         )
-
-        cmd = [
-            "claude",
-            "--dangerously-skip-permissions",
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            "--model",
-            self._model,
-            "--json-schema",
-            json.dumps(_FINDINGS_SCHEMA),
-        ]
 
         logger.info(
             "semantic_parser_start",
@@ -184,109 +173,51 @@ class ClaudeSemanticParser:
             input_chars=len(markdown),
         )
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        adapter = ClaudeAdapter()
+        result = await adapter.execute(
+            prompt,
+            {
+                "model": self._model,
+                "json_schema": _FINDINGS_SCHEMA,
+                "timeout": self._timeout,
+            },
         )
 
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=self._timeout
-            )
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
-            logger.warning(
-                "semantic_parser_timeout",
-                story_id=story_id,
-                timeout=self._timeout,
-            )
-            raise
-
-        exit_code = proc.returncode or 0
-        stdout_text = stdout_bytes.decode(errors="replace")
-        stderr_text = stderr_bytes.decode(errors="replace")
-
-        if exit_code != 0:
-            logger.warning(
-                "semantic_parser_cli_error",
-                story_id=story_id,
-                exit_code=exit_code,
-                stderr_preview=stderr_text[:300],
-            )
-            raise RuntimeError(f"Claude CLI exited with code {exit_code}: {stderr_text[:200]}")
-
-        # Parse JSON output — Claude --output-format json returns a JSON object
-        # with a "result" field containing the text, or with --json-schema
-        # returns the structured output directly.
-        try:
-            data = json.loads(stdout_text)
-        except json.JSONDecodeError:
-            # Try extracting JSON from stream-json or wrapped format
-            data = _extract_json_from_output(stdout_text)
-
-        # Navigate to findings list
-        findings = _extract_findings_from_response(data)
-
-        logger.info(
-            "semantic_parser_success",
-            story_id=story_id,
-            skill_type=skill_type.value,
-            findings_count=len(findings),
-        )
-
-        return findings
-
-
-def _extract_json_from_output(raw: str) -> dict[str, Any]:
-    """Try to extract JSON from various Claude output formats."""
-    # Try line by line (stream-json format has one JSON per line)
-    for line in raw.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-            if isinstance(parsed, dict):
-                # stream-json: look for result event
-                if parsed.get("type") == "result":
-                    result_text = parsed.get("result", "")
-                    if isinstance(result_text, str):
-                        inner: dict[str, Any] = json.loads(result_text)
-                        return inner
-                    if isinstance(result_text, dict):
-                        return result_text
-                    return {"result": result_text}
-                # Direct JSON object with findings
-                if "findings" in parsed:
-                    return parsed
-        except json.JSONDecodeError:
-            continue
-
-    raise ValueError(f"Cannot extract JSON from Claude output: {raw[:300]}")
-
-
-def _extract_findings_from_response(data: Any) -> list[dict[str, Any]]:
-    """Navigate Claude response structure to get findings list."""
-    if isinstance(data, dict):
-        # Direct: {"findings": [...]}
-        if "findings" in data:
-            findings = data["findings"]
+        # structured_output is populated by ClaudeOutput.from_json()
+        # from the "structured_output" field in Claude CLI's JSON envelope.
+        raw = result.structured_output
+        if raw is not None and isinstance(raw, dict):
+            findings = raw.get("findings")
             if isinstance(findings, list):
+                logger.info(
+                    "semantic_parser_success",
+                    story_id=story_id,
+                    skill_type=skill_type.value,
+                    findings_count=len(findings),
+                )
                 return list(findings)
 
-        # Wrapped: {"result": "{\"findings\": [...]}"}
-        result = data.get("result")
-        if isinstance(result, str):
+        # Fallback: try parsing text_result as JSON (legacy path)
+        if result.text_result:
+            import json
+
             try:
-                inner = json.loads(result)
-                if isinstance(inner, dict) and "findings" in inner:
-                    return list(inner["findings"])
-            except json.JSONDecodeError:
+                data = json.loads(result.text_result)
+                if isinstance(data, dict) and "findings" in data:
+                    findings = data["findings"]
+                    if isinstance(findings, list):
+                        logger.info(
+                            "semantic_parser_success",
+                            story_id=story_id,
+                            skill_type=skill_type.value,
+                            findings_count=len(findings),
+                            source="text_result_fallback",
+                        )
+                        return list(findings)
+            except (json.JSONDecodeError, TypeError):
                 pass
 
-    if isinstance(data, list):
-        return list(data)
-
-    raise ValueError(f"Cannot extract findings from response: {str(data)[:300]}")
+        raise ValueError(
+            f"Claude returned no structured_output with findings. "
+            f"text_result preview: {result.text_result[:200]}"
+        )
