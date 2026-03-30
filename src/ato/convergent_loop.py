@@ -615,6 +615,11 @@ class ConvergentLoop:
                 round_num=round_num,
                 blocking_count=blocking_count,
             )
+            # --- Insert pending fixing task BEFORE submitting review_fail ---
+            # 防止 orchestrator 主循环的 _dispatch_undispatched_stories 在
+            # convergent loop 的 run_fix_dispatch 之前抢先 dispatch fixing，
+            # 导致 fix prompt 丢失 findings JSON。
+            await self._insert_fix_placeholder(story_id)
             await self._transition_queue.submit(
                 TransitionEvent(
                     story_id=story_id,
@@ -873,6 +878,35 @@ class ConvergentLoop:
             suggestion_count=0,
             open_count=len(blocking_findings),
         )
+
+    async def _insert_fix_placeholder(self, story_id: str) -> None:
+        """Insert a pending fixing task to prevent orchestrator main loop race.
+
+        The main loop's ``_dispatch_undispatched_stories`` checks for stories
+        with no running/pending/paused task.  Without this placeholder, the
+        interval between submitting ``review_fail`` and the convergent loop's
+        own ``run_fix_dispatch`` lets the main loop dispatch a generic restart
+        prompt that lacks the findings JSON.
+        """
+        from ato.models.db import get_connection, insert_task
+        from ato.models.schemas import TaskRecord
+
+        db = await get_connection(self._db_path)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=str(uuid.uuid4()),
+                    story_id=story_id,
+                    phase="fixing",
+                    role="developer",
+                    cli_tool="claude",
+                    status="pending",
+                    expected_artifact="convergent_loop_fix_placeholder",
+                ),
+            )
+        finally:
+            await db.close()
 
     def _build_fix_prompt(
         self,
@@ -1156,6 +1190,9 @@ class ConvergentLoop:
                 round_num=round_num,
                 blocking_count=blocking_count,
             )
+            # --- Insert pending fixing task BEFORE submitting review_fail ---
+            # (same race-prevention as in run_first_review)
+            await self._insert_fix_placeholder(story_id)
             await self._transition_queue.submit(
                 TransitionEvent(
                     story_id=story_id,

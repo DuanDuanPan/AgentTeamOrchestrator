@@ -5,11 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from ato.adapters.claude_cli import _normalize_claude_event
 from ato.adapters.codex_cli import _normalize_codex_event
 from ato.models.schemas import ProgressEvent
-
 
 # ---------------------------------------------------------------------------
 # ProgressEvent 模型测试
@@ -30,7 +30,7 @@ class TestProgressEventModel:
         assert event.cli_tool == "claude"
 
     def test_rejects_invalid_event_type(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             ProgressEvent(
                 event_type="invalid_type",  # type: ignore[arg-type]
                 summary="test",
@@ -40,7 +40,7 @@ class TestProgressEventModel:
             )
 
     def test_rejects_invalid_cli_tool(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             ProgressEvent(
                 event_type="init",
                 summary="test",

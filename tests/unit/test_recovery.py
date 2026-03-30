@@ -1725,8 +1725,12 @@ class TestConvergentLoopPromptFormat:
         finally:
             await db.close()
 
-        assert len(tasks) == 1
-        assert tasks[0].task_id == "t1"
+        # Original reviewing task + placeholder fixing task from race-prevention
+        non_placeholder = [
+            t for t in tasks if t.expected_artifact != "convergent_loop_fix_placeholder"
+        ]
+        assert len(non_placeholder) == 1
+        assert non_placeholder[0].task_id == "t1"
         assert {f.round_num for f in findings} == {1, 2}
 
 

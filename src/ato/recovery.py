@@ -17,11 +17,14 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
 from ato.adapters.base import BaseAdapter
+
+if TYPE_CHECKING:
+    from ato.adapters.bmad_adapter import BmadAdapter
 from ato.models.schemas import (
     ProgressCallback,
     RecoveryAction,
@@ -107,15 +110,24 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
         "Also write the full validation report to {validation_report_path}."
     ),
     "qa_testing": (
-        "Perform a test quality review on the worktree at {worktree_path}. "
-        "Story: {story_id}. Evaluate test coverage and quality.\n\n"
-        "Output format: Include **Recommendation**: Approve/Request Changes/Block "
-        "and **Quality Score**: N/100. "
-        "List findings under ## Critical Issues (Must Fix) and "
-        "## Recommendations (Should Fix) sections. "
-        "For each issue include **Severity**: P0-P3, "
-        "**Location**: `file.py:line`, **Criterion**: criterion_name. "
-        "Also include a Quality Criteria Assessment table."
+        "Run the full test suite for the project in the worktree at {worktree_path}. "
+        "Story: {story_id}.\n\n"
+        "## Steps\n"
+        "1. Discover the project's test framework and commands "
+        "(check package.json scripts, pyproject.toml, Makefile, etc.)\n"
+        "2. Execute ALL available test commands: unit tests, type checking, linting\n"
+        "3. Analyze test results: identify failures, errors, and warnings\n"
+        "4. For each failure, trace the root cause and propose a concrete fix\n\n"
+        "## Output format\n"
+        "- **Recommendation**: Approve / Request Changes / Block\n"
+        "- **Quality Score**: N/100\n"
+        "- **Commands Executed**: list each command and its exit code\n"
+        "- List findings under ## Critical Issues (Must Fix) and "
+        "## Recommendations (Should Fix) sections.\n"
+        "- For each issue include **Severity**: P0-P3, "
+        "**Location**: `file:line`, **Criterion**: criterion_name, "
+        "and a concrete fix description.\n"
+        "- Also include a Quality Criteria Assessment table."
     ),
 }
 
@@ -332,6 +344,14 @@ def _create_adapter(cli_tool: Literal["claude", "codex"]) -> BaseAdapter:
     from ato.adapters.codex_cli import CodexAdapter
 
     return CodexAdapter()
+
+
+def _create_bmad_adapter() -> BmadAdapter:
+    """创建带 semantic fallback 的 BmadAdapter 实例。"""
+    from ato.adapters.bmad_adapter import BmadAdapter
+    from ato.adapters.semantic_parser import ClaudeSemanticParser
+
+    return BmadAdapter(semantic_runner=ClaudeSemanticParser())
 
 
 class RecoveryEngine:
@@ -759,7 +779,6 @@ class RecoveryEngine:
         reviewer_options: dict[str, Any] | None = None,
     ) -> None:
         """reviewing phase 恢复要区分 full review 与 scoped re-review。"""
-        from ato.adapters.bmad_adapter import BmadAdapter
         from ato.config import ConvergentLoopConfig
         from ato.convergent_loop import ConvergentLoop
         from ato.models.db import get_connection, get_open_findings
@@ -776,7 +795,7 @@ class RecoveryEngine:
             adapter=adapter,
             db_path=self._db_path,
         )
-        bmad = BmadAdapter()
+        bmad = _create_bmad_adapter()
         loop = ConvergentLoop(
             db_path=self._db_path,
             subprocess_mgr=mgr,
@@ -824,7 +843,7 @@ class RecoveryEngine:
             caller 不应重复 escalate。
         """
         try:
-            from ato.adapters.bmad_adapter import BmadAdapter, record_parse_failure
+            from ato.adapters.bmad_adapter import record_parse_failure
             from ato.models.db import get_connection, insert_findings_batch
             from ato.models.schemas import (
                 BmadSkillType,
@@ -974,7 +993,7 @@ class RecoveryEngine:
                 )
 
                 # BMAD parse
-                bmad = BmadAdapter()
+                bmad = _create_bmad_adapter()
                 parse_result = await bmad.parse(
                     markdown_output=result.text_result,
                     skill_type=skill_type,

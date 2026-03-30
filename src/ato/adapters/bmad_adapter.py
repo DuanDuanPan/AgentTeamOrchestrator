@@ -451,8 +451,9 @@ _SECTION_RE = re.compile(
 )
 
 # Summary line: X intent_gap, Y bad_spec, Z patch, W defer
+# 兼容反引号包裹数字的格式（如 `5` patch）
 _SUMMARY_RE = re.compile(
-    r"(\d+)\s+intent.gap.*?(\d+)\s+bad.spec.*?(\d+)\s+patch.*?(\d+)\s+defer",
+    r"`?(\d+)`?\s+intent.gap.*?`?(\d+)`?\s+bad.spec.*?`?(\d+)`?\s+patch.*?`?(\d+)`?\s+defer",
     re.IGNORECASE,
 )
 
@@ -465,6 +466,32 @@ _CLEAN_REVIEW_RE = re.compile(
 
 _BULLET_RE = re.compile(r"^\s*[-*]\s+", re.MULTILINE)
 
+# Flat findings list: **Findings** heading + numbered items with `P0`/`P1`/`P2` priority
+_FINDINGS_HEADING_RE = re.compile(
+    r"^\*\*Findings\*\*\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Re-review format: **Open Findings** heading + bullet list with `severity` prefix
+_OPEN_FINDINGS_HEADING_RE = re.compile(
+    r"^\*\*Open\s+Findings\*\*\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Severity marker in re-review bullet: `blocking`, `medium`, `suggestion`
+_REREVIEW_SEVERITY_RE = re.compile(r"^-\s+`(\w+)`[：:]", re.MULTILINE)
+
+# Priority marker: `P0`, `P1`, `P2` etc.
+_PRIORITY_RE = re.compile(r"`P(\d+)`")
+
+# Priority → severity mapping
+_PRIORITY_SEVERITY: dict[int, FindingSeverity] = {
+    0: "blocking",
+    1: "blocking",
+    2: "suggestion",
+    3: "suggestion",
+}
+
 
 def _parse_code_review(markdown: str) -> list[BmadFinding] | None:
     """解析 code-review 输出格式。"""
@@ -472,15 +499,30 @@ def _parse_code_review(markdown: str) -> list[BmadFinding] | None:
     has_summary = _SUMMARY_RE.search(markdown) is not None
     has_sections = _SECTION_RE.search(markdown) is not None
     has_clean = _CLEAN_REVIEW_RE.search(markdown) is not None
+    has_findings_heading = _FINDINGS_HEADING_RE.search(markdown) is not None
+    has_open_findings = _OPEN_FINDINGS_HEADING_RE.search(markdown) is not None
 
-    if not (has_summary or has_sections or has_clean):
+    if not (has_summary or has_sections or has_clean or has_findings_heading or has_open_findings):
         return None
 
-    if has_clean and not has_sections:
+    if has_clean and not has_sections and not has_findings_heading and not has_open_findings:
         return []
 
     findings: list[BmadFinding] = []
 
+    # Path A: flat **Findings** list with `P0`/`P1`/`P2` priority markers
+    if has_findings_heading and not has_sections:
+        flat = _parse_flat_findings_list(markdown)
+        if flat is not None:
+            return flat
+
+    # Path C: re-review **Open Findings** + `severity` bullet list
+    if has_open_findings:
+        rereview = _parse_open_findings_list(markdown)
+        if rereview is not None:
+            return rereview
+
+    # Path B: category-section 格式（原有逻辑）
     # 按 category 提取 section：支持 heading 形式 和 bold-label 列表形式
     # 真实模板用 `- **Intent Gaps**: "..."` 后跟子 bullet
     for category, severity, pattern in _CODE_REVIEW_SECTIONS:
@@ -516,6 +558,71 @@ def _parse_code_review(markdown: str) -> list[BmadFinding] | None:
     return findings
 
 
+def _parse_flat_findings_list(markdown: str) -> list[BmadFinding] | None:
+    """解析 **Findings** + 编号列表 + `P0`/`P1`/`P2` 格式。
+
+    Codex 的 code-review 输出有时不按 category section 分组，
+    而是用一个统一的编号列表，每项以 `P0`/`P1`/`P2` 标注优先级。
+    """
+    m = _FINDINGS_HEADING_RE.search(markdown)
+    if m is None:
+        return None
+
+    # 提取 **Findings** 标题之后的内容（到 summary 行、下一个 heading 或文档尾）
+    after_heading = markdown[m.end() :]
+    # 截止到 summary 行（总结：/ X intent_gap）或下一个 bold heading 或 ## heading
+    summary_cut = _SUMMARY_RE.search(after_heading)
+    next_section = re.search(r"^\*\*[A-Z]", after_heading, re.MULTILINE)
+    cut_pos = len(after_heading)
+    if summary_cut:
+        # 回退到 summary 所在行的行首
+        line_start = after_heading.rfind("\n", 0, summary_cut.start())
+        cut_pos = min(cut_pos, line_start if line_start >= 0 else summary_cut.start())
+    if next_section:
+        cut_pos = min(cut_pos, next_section.start())
+    after_heading = after_heading[:cut_pos]
+
+    # 提取编号项
+    blocks = _extract_numbered_blocks(after_heading)
+    if not blocks:
+        return None
+
+    findings: list[BmadFinding] = []
+    for title, body in blocks:
+        full_text = f"{title}\n{body}" if body else title
+
+        # 提取 priority
+        pm = _PRIORITY_RE.search(title)
+        if pm:
+            priority = int(pm.group(1))
+            severity = _PRIORITY_SEVERITY.get(priority, "suggestion")
+            # 从 title 中移除 priority marker 得到干净描述
+            clean_title = _PRIORITY_RE.sub("", title).strip()
+        else:
+            severity = "blocking"
+            clean_title = title
+
+        desc = f"{clean_title}: {body[:200]}" if body else clean_title
+
+        # 提取 file location
+        fp, ln = _extract_location_from_body(full_text)
+
+        findings.append(
+            BmadFinding.model_validate(
+                {
+                    "severity": severity,
+                    "category": "patch",
+                    "description": desc,
+                    "file_path": fp or "N/A",
+                    "line": ln,
+                    "rule_id": "code_review.patch",
+                    "raw_location": (f"{fp}:{ln}" if fp and ln else None),
+                }
+            )
+        )
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Story Validation 解析
 # ---------------------------------------------------------------------------
@@ -535,6 +642,67 @@ _SV_SECTION_RE = re.compile(
     r"summary|key issues|enhancements|remaining risks|final conclusion)",
     re.IGNORECASE,
 )
+
+
+def _parse_open_findings_list(markdown: str) -> list[BmadFinding] | None:
+    """解析 re-review 格式：**Open Findings** + `severity` bullet list。
+
+    Codex re-review 输出格式：
+        **Open Findings**
+        - `blocking`：[`file.ts:64`](...) description
+        - `medium`：...
+        - `suggestion`：...
+    """
+    m = _OPEN_FINDINGS_HEADING_RE.search(markdown)
+    if m is None:
+        return None
+
+    after_heading = markdown[m.end() :]
+    # 截止到下一个 bold heading
+    next_section = re.search(r"^\*\*[A-Z]", after_heading, re.MULTILINE)
+    if next_section:
+        after_heading = after_heading[: next_section.start()]
+
+    # 按 bullet 提取
+    severity_map: dict[str, FindingSeverity] = {
+        "blocking": "blocking",
+        "critical": "blocking",
+        "p0": "blocking",
+        "p1": "blocking",
+        "medium": "blocking",
+        "suggestion": "suggestion",
+        "minor": "suggestion",
+        "p2": "suggestion",
+        "p3": "suggestion",
+    }
+
+    findings: list[BmadFinding] = []
+    for bm in _REREVIEW_SEVERITY_RE.finditer(after_heading):
+        raw_severity = bm.group(1).lower()
+        severity = severity_map.get(raw_severity, "blocking")
+
+        # 提取该 bullet 的完整内容（到下一个 bullet 或段落结束）
+        start = bm.end()
+        next_bullet = _REREVIEW_SEVERITY_RE.search(after_heading[start:])
+        end = start + next_bullet.start() if next_bullet else len(after_heading)
+        body = after_heading[start:end].strip()
+
+        fp, ln = _extract_location_from_body(body)
+
+        findings.append(
+            BmadFinding.model_validate(
+                {
+                    "severity": severity,
+                    "category": "patch",
+                    "description": body[:500],
+                    "file_path": fp or "N/A",
+                    "line": ln,
+                    "rule_id": "code_review.patch",
+                    "raw_location": (f"{fp}:{ln}" if fp and ln else None),
+                }
+            )
+        )
+    return findings if findings else None
 
 
 def _parse_story_validation(markdown: str) -> list[BmadFinding] | None:
@@ -1178,6 +1346,11 @@ def _extract_location_from_body(body: str) -> tuple[str | None, int | None]:
     m = loc_re.search(body)
     if m:
         return m.group(1), int(m.group(2))
+    # 匹配 Markdown link 格式 [file.tsx:49]( url )
+    link_re = re.compile(r"\[([^\]]+?):(\d+)\]\(")
+    m2 = link_re.search(body)
+    if m2:
+        return m2.group(1), int(m2.group(2))
     # 匹配单独的文件路径
     fp = _extract_file_ref(body)
     return fp, None
