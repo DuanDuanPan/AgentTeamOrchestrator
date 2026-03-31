@@ -28,6 +28,7 @@ from ato.models.schemas import (
     AdapterResult,
     ApprovalRecord,
     CLIAdapterError,
+    ConvergentLoopResult,
     ErrorCategory,
     FindingRecord,
     ProgressEvent,
@@ -1938,6 +1939,91 @@ class TestConvergentLoopPromptFormat:
 
         adapters = mock_mgr_cls.call_args.kwargs["adapters"]
         assert set(adapters) == {"claude", "codex"}
+
+
+class TestFixRecoveryContinuation:
+    async def test_continue_after_fix_success_runs_next_rereview(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """fixing restart 成功后应按 fix round 继续下一轮 rereview。"""
+        from ato.config import ATOSettings
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fix-continue", worktree_path="/tmp/wt"))
+        finally:
+            await db.close()
+
+        settings = ATOSettings(
+            roles={
+                "fixer": {"cli": "claude"},  # type: ignore[dict-item, unused-ignore]
+                "reviewer": {"cli": "codex"},  # type: ignore[dict-item, unused-ignore]
+            },
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "reviewing",
+                    "role": "reviewer",
+                    "type": "convergent_loop",
+                    "next_on_success": "qa_testing",
+                },
+            ],
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=settings,
+        )
+        task = _make_task(
+            "t-fix-continue",
+            "s-fix-continue",
+            status="completed",
+            pid=None,
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            context_briefing=json.dumps(
+                {
+                    "fix_kind": "fix_dispatch",
+                    "round_num": 2,
+                    "stage": "standard",
+                }
+            ),
+        )
+
+        mock_loop = MagicMock()
+        mock_loop.run_rereview = AsyncMock(
+            return_value=ConvergentLoopResult(
+                story_id="s-fix-continue",
+                round_num=3,
+                converged=False,
+                findings_total=1,
+                blocking_count=1,
+                suggestion_count=0,
+                open_count=1,
+            )
+        )
+        mock_loop._is_abnormal_result.return_value = False
+        mock_loop._config = MagicMock(max_rounds=5, max_rounds_escalated=2)
+
+        with patch.object(engine, "_build_convergent_loop", return_value=mock_loop):
+            await engine.continue_after_fix_success(task, worktree_path="/tmp/wt")
+
+        mock_loop.run_rereview.assert_awaited_once_with(
+            "s-fix-continue",
+            3,
+            worktree_path="/tmp/wt",
+            stage="standard",
+        )
 
 
 class TestRecoveryRoundSummaryReconstruction:

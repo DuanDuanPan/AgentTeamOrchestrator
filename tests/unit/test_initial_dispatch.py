@@ -94,6 +94,9 @@ async def _insert_task_for_story(
     story_id: str,
     status: str = "running",
     phase: str = "creating",
+    *,
+    expected_artifact: str | None = None,
+    context_briefing: str | None = None,
 ) -> None:
     db = await get_connection(db_path)
     try:
@@ -106,6 +109,8 @@ async def _insert_task_for_story(
             cli_tool="claude",
             status=status,  # type: ignore[arg-type]
             pid=12345,
+            expected_artifact=expected_artifact,
+            context_briefing=context_briefing,
             started_at=now,
         )
         await insert_task(db, task)
@@ -164,6 +169,36 @@ class TestGetUndispatchedStories:
             await db.close()
 
         assert len(stories) == 0
+
+    @pytest.mark.asyncio
+    async def test_story_with_fix_placeholder_not_detected(self, tmp_path: Path) -> None:
+        """convergent_loop 的 pending fix placeholder 也应阻止初始分发。"""
+        import json
+
+        db_path = await _setup_db(tmp_path)
+        await _insert_story(db_path, "s-1", "fixing", "in_progress")
+        await _insert_task_for_story(
+            db_path,
+            "s-1",
+            status="pending",
+            phase="fixing",
+            expected_artifact="convergent_loop_fix_placeholder",
+            context_briefing=json.dumps(
+                {
+                    "fix_kind": "fix_dispatch",
+                    "round_num": 1,
+                    "stage": "standard",
+                }
+            ),
+        )
+
+        db = await get_connection(db_path)
+        try:
+            stories = await get_undispatched_stories(db)
+        finally:
+            await db.close()
+
+        assert stories == []
 
     @pytest.mark.asyncio
     async def test_queued_story_not_detected(self, tmp_path: Path) -> None:

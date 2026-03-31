@@ -963,7 +963,8 @@ class Orchestrator:
         """扫描由 approval restart/resume 产生的 pending task 并真正调度执行。
 
         仅处理 expected_artifact 为 'restart_requested' 或 'resume_requested' 的 task
-        （由 _reschedule_interactive_task() 设置），避免误触碰初始阶段创建的 pending task。
+        （由 _reschedule_interactive_task() 设置），以及 convergent loop 为下一轮 fix
+        预留的 placeholder task，避免误触碰其他初始阶段创建的 pending task。
 
         Interactive phase → SubprocessManager.dispatch_interactive()（开新终端）
         Non-interactive phase → SubprocessManager.dispatch_with_retry()（后台子进程）
@@ -983,7 +984,12 @@ class Orchestrator:
         rescheduled = [
             t
             for t in pending_tasks
-            if t.expected_artifact in ("restart_requested", "resume_requested")
+            if t.expected_artifact
+            in (
+                "restart_requested",
+                "resume_requested",
+                "convergent_loop_fix_placeholder",
+            )
         ]
         if not rescheduled:
             return
@@ -1805,57 +1811,83 @@ class Orchestrator:
 
             # 成功后提交 transition event
             if result.status == "success" and self._tq is not None:
-                from ato.recovery import _PHASE_SUCCESS_EVENT
+                from ato.recovery import _PHASE_SUCCESS_EVENT, RecoveryEngine
 
-                event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
-                if event_name is not None:
-                    # Design gate: designing phase 需要验证 UX 产出物
-                    if event_name == "design_done":
-                        project_root = derive_project_root(self._db_path)
-                        # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
-                        from ato.design_artifacts import write_prototype_manifest
-
-                        try:
-                            write_prototype_manifest(task.story_id, project_root)
-                        except Exception:
-                            logger.exception(
-                                "manifest_generation_failed",
-                                story_id=task.story_id,
-                            )
-                        gate_result = await check_design_gate(
-                            story_id=task.story_id,
-                            task_id=task.task_id,
-                            project_root=project_root,
-                        )
-                        if not gate_result.passed:
-                            from ato.approval_helpers import create_approval as _ca
-                            from ato.nudge import send_user_notification as _sun
-
-                            payload = build_design_gate_payload(task.task_id, gate_result)
-                            db_gate = await get_connection(self._db_path)
-                            try:
-                                await _ca(
-                                    db_gate,
-                                    story_id=task.story_id,
-                                    approval_type="needs_human_review",
-                                    payload_dict=payload,
-                                )
-                            finally:
-                                await db_gate.close()
-                            self._nudge.notify()
-                            _sun(
-                                "normal",
-                                f"Design gate 失败: story {task.story_id} — {gate_result.reason}",
-                            )
-                            return
+                fix_round, _fix_stage = RecoveryEngine._parse_fix_resume_context(task)
+                if task.phase == "fixing" and fix_round is not None:
                     await self._tq.submit(
                         TransitionEvent(
                             story_id=task.story_id,
-                            event_name=event_name,
+                            event_name="fix_done",
                             source="agent",
                             submitted_at=datetime.now(tz=UTC),
                         )
                     )
+                    engine = RecoveryEngine(
+                        db_path=self._db_path,
+                        subprocess_mgr=None,
+                        transition_queue=self._tq,
+                        nudge=self._nudge,
+                        settings=self._settings,
+                    )
+                    await engine.continue_after_fix_success(
+                        task,
+                        worktree_path=worktree_path,
+                    )
+                else:
+                    event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
+                    if event_name is not None:
+                        # Design gate: designing phase 需要验证 UX 产出物
+                        if event_name == "design_done":
+                            project_root = derive_project_root(self._db_path)
+                            # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
+                            from ato.design_artifacts import write_prototype_manifest
+
+                            try:
+                                write_prototype_manifest(task.story_id, project_root)
+                            except Exception:
+                                logger.exception(
+                                    "manifest_generation_failed",
+                                    story_id=task.story_id,
+                                )
+                            gate_result = await check_design_gate(
+                                story_id=task.story_id,
+                                task_id=task.task_id,
+                                project_root=project_root,
+                            )
+                            if not gate_result.passed:
+                                from ato.approval_helpers import create_approval as _ca
+                                from ato.nudge import send_user_notification as _sun
+
+                                payload = build_design_gate_payload(task.task_id, gate_result)
+                                db_gate = await get_connection(self._db_path)
+                                try:
+                                    await _ca(
+                                        db_gate,
+                                        story_id=task.story_id,
+                                        approval_type="needs_human_review",
+                                        payload_dict=payload,
+                                    )
+                                finally:
+                                    await db_gate.close()
+                                self._nudge.notify()
+                                failure_msg = (
+                                    f"Design gate 失败: story {task.story_id} "
+                                    f"— {gate_result.reason}"
+                                )
+                                _sun(
+                                    "normal",
+                                    failure_msg,
+                                )
+                                return
+                        await self._tq.submit(
+                            TransitionEvent(
+                                story_id=task.story_id,
+                                event_name=event_name,
+                                source="agent",
+                                submitted_at=datetime.now(tz=UTC),
+                            )
+                        )
 
             logger.info(
                 "dispatch_batch_restart_done",

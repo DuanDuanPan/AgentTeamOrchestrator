@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from ato.models.db import (
     get_pending_approvals,
     insert_findings_batch,
     insert_story,
+    insert_task,
 )
 from ato.models.schemas import (
     AdapterResult,
@@ -31,6 +33,7 @@ from ato.models.schemas import (
     ParseVerdict,
     ProgressEvent,
     StoryRecord,
+    TaskRecord,
     TransitionEvent,
     compute_dedup_hash,
 )
@@ -1136,6 +1139,68 @@ class TestFixDispatchWithBlockingFindings:
         # Verify result
         assert result.converged is False
         assert result.blocking_count == 1
+
+    @pytest.mark.asyncio
+    async def test_reuses_pending_fix_placeholder_task(
+        self,
+        initialized_db_path: Any,
+    ) -> None:
+        """run_fix_dispatch 应复用同轮次的 pending fix placeholder task。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding_record(
+                        story_id=story.story_id,
+                        description="null pointer",
+                        file_path="src/a.py",
+                        rule_id="NP01",
+                    )
+                ],
+            )
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-fix-placeholder",
+                    story_id=story.story_id,
+                    phase="fixing",
+                    role="developer",
+                    cli_tool="claude",
+                    status="pending",
+                    expected_artifact="convergent_loop_fix_placeholder",
+                    context_briefing=json.dumps(
+                        {
+                            "fix_kind": "fix_dispatch",
+                            "round_num": 1,
+                            "stage": "standard",
+                        }
+                    ),
+                    started_at=_NOW,
+                ),
+            )
+        finally:
+            await db.close()
+
+        loop, mock_sub, _bmad, _tq = _make_loop(initialized_db_path)
+
+        with patch.object(loop, "_get_worktree_head", side_effect=["aaa111", "bbb222"]):
+            await loop.run_fix_dispatch(
+                story_id=story.story_id,
+                round_num=1,
+                worktree_path="/tmp/wt",
+            )
+
+        call_kwargs = mock_sub.dispatch_with_retry.call_args[1]
+        assert call_kwargs["task_id"] == "t-fix-placeholder"
+        assert call_kwargs["is_retry"] is True
+        assert json.loads(call_kwargs["context_briefing"]) == {
+            "fix_kind": "fix_dispatch",
+            "round_num": 1,
+            "stage": "standard",
+        }
 
 
 class TestFixDispatchPromptContainsFindingDetails:

@@ -687,7 +687,6 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
             SELECT 1 FROM tasks t
             WHERE t.story_id = s.story_id
               AND t.status IN ('running', 'pending', 'paused')
-              AND COALESCE(t.expected_artifact, '') != 'convergent_loop_fix_placeholder'
           )
           AND NOT EXISTS (
             SELECT 1 FROM approvals a

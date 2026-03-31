@@ -900,30 +900,47 @@ class RecoveryEngine:
             return review_kind, None
         return review_kind, round_num
 
-    async def _dispatch_reviewing_convergent_loop(
+    @staticmethod
+    def _parse_fix_resume_context(task: TaskRecord) -> tuple[int | None, str | None]:
+        """Extract fix round/stage metadata from task.context_briefing."""
+        if not task.context_briefing:
+            return None, None
+        try:
+            ctx = json.loads(task.context_briefing)
+        except (json.JSONDecodeError, TypeError):
+            return None, None
+
+        if ctx.get("fix_kind") != "fix_dispatch":
+            return None, None
+        round_num = ctx.get("round_num")
+        stage = ctx.get("stage")
+        if not isinstance(round_num, int) or round_num < 1:
+            return None, None
+        if stage not in ("standard", "escalated"):
+            return round_num, None
+        return round_num, stage
+
+    def _resolve_reviewing_dispatch_options(self) -> tuple[int, dict[str, Any] | None]:
+        """Resolve reviewer dispatch options from reviewing phase config."""
+        phase_cfg = self._resolve_phase_config("reviewing")
+        reviewer_opts: dict[str, Any] = {}
+        if phase_cfg.get("model"):
+            reviewer_opts["model"] = phase_cfg["model"]
+        if phase_cfg.get("sandbox"):
+            reviewer_opts["sandbox"] = phase_cfg["sandbox"]
+        return phase_cfg.get("max_concurrent", 4), reviewer_opts or None
+
+    def _build_convergent_loop(
         self,
-        task: TaskRecord,
         *,
-        worktree_path: str,
+        story_id: str,
         max_concurrent: int,
         reviewer_options: dict[str, Any] | None = None,
-    ) -> None:
-        """reviewing phase 恢复：stage-aware，区分 full review / scoped re-review / escalated。"""
+    ) -> Any:
+        """Create a ConvergentLoop configured from current settings."""
         from ato.config import ConvergentLoopConfig, DispatchProfile, resolve_loop_dispatch_profiles
         from ato.convergent_loop import ConvergentLoop
-        from ato.models.db import get_connection, get_findings_by_story, get_open_findings
 
-        db = await get_connection(self._db_path)
-        try:
-            previous_findings = await get_open_findings(db, task.story_id)
-            all_findings = await get_findings_by_story(db, task.story_id)
-        finally:
-            await db.close()
-
-        # Detect stage from task metadata
-        stage = self._detect_task_stage(task)
-
-        # Resolve dispatch profiles from settings (or use defaults)
         standard_review: DispatchProfile | None = None
         standard_fix: DispatchProfile | None = None
         escalated_review: DispatchProfile | None = None
@@ -935,7 +952,7 @@ class RecoveryEngine:
                 standard_review, standard_fix = sr, sf
                 escalated_review, escalated_fix = er, ef
             except Exception:
-                logger.debug("recovery_dispatch_profiles_fallback", story_id=task.story_id)
+                logger.debug("recovery_dispatch_profiles_fallback", story_id=story_id)
 
         mgr = SubprocessManager(
             max_concurrent=max_concurrent,
@@ -946,7 +963,7 @@ class RecoveryEngine:
             db_path=self._db_path,
         )
         bmad = _create_bmad_adapter()
-        loop = ConvergentLoop(
+        return ConvergentLoop(
             db_path=self._db_path,
             subprocess_mgr=mgr,
             bmad_adapter=bmad,
@@ -965,6 +982,196 @@ class RecoveryEngine:
             standard_fix_profile=standard_fix,
             escalated_review_profile=escalated_review,
             escalated_fix_profile=escalated_fix,
+        )
+
+    async def _retire_fix_placeholder(
+        self,
+        story_id: str,
+        *,
+        round_num: int,
+        stage: str,
+        reason: str,
+    ) -> None:
+        """Retire a pending fix placeholder once another control path takes over."""
+        from ato.models.db import get_connection, get_tasks_by_story, update_task_status
+
+        db = await get_connection(self._db_path)
+        try:
+            tasks = await get_tasks_by_story(db, story_id)
+            for placeholder in reversed(tasks):
+                if placeholder.phase != "fixing" or placeholder.status != "pending":
+                    continue
+                if placeholder.expected_artifact != "convergent_loop_fix_placeholder":
+                    continue
+                try:
+                    ctx = json.loads(placeholder.context_briefing or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if (
+                    ctx.get("fix_kind") != "fix_dispatch"
+                    or ctx.get("round_num") != round_num
+                    or ctx.get("stage") != stage
+                ):
+                    continue
+                await update_task_status(
+                    db,
+                    placeholder.task_id,
+                    "failed",
+                    completed_at=datetime.now(tz=UTC),
+                    expected_artifact="convergent_loop_fix_placeholder_retired",
+                    error_message=reason,
+                )
+                return
+        finally:
+            await db.close()
+
+    async def continue_after_fix_success(
+        self,
+        task: TaskRecord,
+        *,
+        worktree_path: str | None,
+    ) -> None:
+        """Resume convergent-loop control flow after a fixing task completes."""
+        from ato.models.db import get_connection, get_findings_by_story
+
+        fix_round, stage = self._parse_fix_resume_context(task)
+        if fix_round is None or stage is None:
+            return
+
+        resolved_worktree = worktree_path or await self._get_story_worktree(task.story_id)
+        if resolved_worktree is None:
+            logger.warning(
+                "recovery_fix_followup_missing_worktree",
+                task_id=task.task_id,
+                story_id=task.story_id,
+            )
+            return
+
+        max_concurrent, reviewer_options = self._resolve_reviewing_dispatch_options()
+        loop = self._build_convergent_loop(
+            story_id=task.story_id,
+            max_concurrent=max_concurrent,
+            reviewer_options=reviewer_options,
+        )
+
+        rereview_round = fix_round + 1
+        result = await loop.run_rereview(
+            task.story_id,
+            rereview_round,
+            worktree_path=resolved_worktree,
+            stage=stage,
+        )
+        if result.converged or loop._is_abnormal_result(result):
+            return
+
+        if stage == "standard":
+            if result.round_num < loop._config.max_rounds:
+                return
+
+            await self._retire_fix_placeholder(
+                task.story_id,
+                round_num=result.round_num,
+                stage=stage,
+                reason="superseded_by_escalated_phase",
+            )
+
+            db = await get_connection(self._db_path)
+            try:
+                all_findings = await get_findings_by_story(db, task.story_id)
+            finally:
+                await db.close()
+
+            latest_standard_rounds = self._select_latest_round_numbers(
+                all_findings,
+                loop._config.max_rounds,
+            )
+            standard_summaries = self._reconstruct_round_summaries(
+                all_findings,
+                round_numbers=latest_standard_rounds,
+            )
+            await loop._run_escalated_phase(
+                task.story_id,
+                resolved_worktree,
+                standard_round_summaries=standard_summaries,
+                global_round_offset=result.round_num,
+            )
+            return
+
+        total_rounds = loop._config.max_rounds + loop._config.max_rounds_escalated
+        if result.round_num < total_rounds:
+            return
+
+        await self._retire_fix_placeholder(
+            task.story_id,
+            round_num=result.round_num,
+            stage=stage,
+            reason="superseded_by_escalation_approval",
+        )
+
+        db = await get_connection(self._db_path)
+        try:
+            all_findings = await get_findings_by_story(db, task.story_id)
+        finally:
+            await db.close()
+
+        latest_total_rounds = sorted({int(f.round_num) for f in all_findings})[-total_rounds:]
+        standard_count = min(loop._config.max_rounds, len(latest_total_rounds))
+        standard_round_numbers = set(latest_total_rounds[:standard_count])
+        escalated_round_numbers = set(latest_total_rounds[standard_count:])
+        standard_summaries = self._reconstruct_round_summaries(
+            all_findings,
+            round_numbers=standard_round_numbers,
+        )
+        escalated_summaries = self._reconstruct_round_summaries(
+            all_findings,
+            round_numbers=escalated_round_numbers,
+        )
+        for summary in escalated_summaries:
+            summary["stage"] = "escalated"
+        all_summaries = standard_summaries + escalated_summaries
+        remaining_blocking = await loop._count_open_blocking_findings(task.story_id)
+        await loop._create_escalation_approval(
+            task.story_id,
+            total_rounds,
+            remaining_blocking,
+            round_summaries=all_summaries,
+            stage="escalated",
+            standard_round_summaries=standard_summaries,
+            escalated_round_summaries=escalated_summaries,
+        )
+        loop._log_termination_summary(
+            story_id=task.story_id,
+            total_rounds=total_rounds,
+            max_rounds=total_rounds,
+            converged=False,
+            degradation_stage="escalated",
+        )
+
+    async def _dispatch_reviewing_convergent_loop(
+        self,
+        task: TaskRecord,
+        *,
+        worktree_path: str,
+        max_concurrent: int,
+        reviewer_options: dict[str, Any] | None = None,
+    ) -> None:
+        """reviewing phase 恢复：stage-aware，区分 full review / scoped re-review / escalated。"""
+        from ato.models.db import get_connection, get_findings_by_story, get_open_findings
+
+        db = await get_connection(self._db_path)
+        try:
+            previous_findings = await get_open_findings(db, task.story_id)
+            all_findings = await get_findings_by_story(db, task.story_id)
+        finally:
+            await db.close()
+
+        # Detect stage from task metadata
+        stage = self._detect_task_stage(task)
+
+        loop = self._build_convergent_loop(
+            story_id=task.story_id,
+            max_concurrent=max_concurrent,
+            reviewer_options=reviewer_options,
         )
 
         # --- Parse explicit restart_target from context_briefing ---

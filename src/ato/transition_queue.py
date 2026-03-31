@@ -134,6 +134,7 @@ class TransitionQueue:
         self._queue: asyncio.Queue[TransitionEvent | None] = asyncio.Queue()
         self._machines: dict[str, StoryLifecycle] = {}
         self._dev_ready_reconcile_lock = asyncio.Lock()
+        self._start_dev_submitted: set[str] = set()
         self._consumer_task: asyncio.Task[None] | None = None
         self._db: aiosqlite.Connection | None = None
         self._running = False
@@ -492,9 +493,12 @@ class TransitionQueue:
         pending_ids = [
             story.story_id
             for story in current_stories
-            if story is not None and story.current_phase == "dev_ready"
+            if story is not None
+            and story.current_phase == "dev_ready"
+            and story.story_id not in self._start_dev_submitted
         ]
         for pending_story_id in pending_ids:
+            self._start_dev_submitted.add(pending_story_id)
             await self.submit(
                 TransitionEvent(
                     story_id=pending_story_id,

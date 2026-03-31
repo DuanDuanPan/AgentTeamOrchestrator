@@ -156,6 +156,86 @@ class ConvergentLoop:
             }
         )
 
+    @staticmethod
+    def _build_fix_context(
+        *,
+        round_num: int,
+        stage: LoopStage,
+    ) -> str:
+        """Persist fix round metadata for restart/recovery continuation."""
+        return json.dumps(
+            {
+                "fix_kind": "fix_dispatch",
+                "round_num": round_num,
+                "stage": stage,
+            }
+        )
+
+    async def _get_pending_fix_placeholder_task_id(
+        self,
+        story_id: str,
+        *,
+        round_num: int,
+        stage: LoopStage,
+    ) -> str | None:
+        """Return the matching pending fix placeholder, if one exists."""
+        from ato.models.db import get_connection, get_tasks_by_story
+
+        db = await get_connection(self._db_path)
+        try:
+            tasks = await get_tasks_by_story(db, story_id)
+        finally:
+            await db.close()
+
+        for task in reversed(tasks):
+            if task.phase != "fixing" or task.status != "pending":
+                continue
+            if task.expected_artifact != "convergent_loop_fix_placeholder":
+                continue
+            try:
+                ctx = json.loads(task.context_briefing or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if (
+                ctx.get("fix_kind") == "fix_dispatch"
+                and ctx.get("round_num") == round_num
+                and ctx.get("stage") == stage
+            ):
+                return task.task_id
+        return None
+
+    async def _complete_pending_fix_placeholder(
+        self,
+        story_id: str,
+        *,
+        round_num: int,
+        stage: LoopStage,
+        expected_artifact: str,
+    ) -> None:
+        """Consume a pending fix placeholder when no agent dispatch is needed."""
+        from ato.models.db import get_connection, update_task_status
+
+        placeholder_task_id = await self._get_pending_fix_placeholder_task_id(
+            story_id,
+            round_num=round_num,
+            stage=stage,
+        )
+        if placeholder_task_id is None:
+            return
+
+        db = await get_connection(self._db_path)
+        try:
+            await update_task_status(
+                db,
+                placeholder_task_id,
+                "completed",
+                completed_at=datetime.now(tz=UTC),
+                expected_artifact=expected_artifact,
+                error_message=None,
+            )
+        finally:
+            await db.close()
+
     # ------------------------------------------------------------------
     # Story 3.2d — Convergent Loop Orchestration
     # ------------------------------------------------------------------
@@ -820,7 +900,10 @@ class ConvergentLoop:
             # 防止 orchestrator 主循环的 _dispatch_undispatched_stories 在
             # convergent loop 的 run_fix_dispatch 之前抢先 dispatch fixing，
             # 导致 fix prompt 丢失 findings JSON。
-            await self._insert_fix_placeholder(story_id)
+            await self._insert_fix_placeholder(
+                story_id,
+                round_num=round_num,
+            )
             await self._transition_queue.submit(
                 TransitionEvent(
                     story_id=story_id,
@@ -967,10 +1050,22 @@ class ConvergentLoop:
             await db.close()
 
         blocking_findings = [f for f in all_open if f.severity == "blocking"]
+        fix_context = self._build_fix_context(round_num=round_num, stage=stage)
+        placeholder_task_id = await self._get_pending_fix_placeholder_task_id(
+            story_id,
+            round_num=round_num,
+            stage=stage,
+        )
 
         # --- No blocking findings → early return with fix_done ---
         # Worktree 解析推迟到确实需要 dispatch 时，避免元数据缺失时卡死快路径
         if not blocking_findings:
+            await self._complete_pending_fix_placeholder(
+                story_id,
+                round_num=round_num,
+                stage=stage,
+                expected_artifact="convergent_loop_fix_skipped_no_blocking",
+            )
             await self._transition_queue.submit(
                 TransitionEvent(
                     story_id=story_id,
@@ -1018,8 +1113,11 @@ class ConvergentLoop:
             cli_tool=fix_profile.cli_tool,
             prompt=fix_prompt,
             options=fix_opts,
+            context_briefing=fix_context,
+            task_id=placeholder_task_id,
+            is_retry=placeholder_task_id is not None,
             on_progress=self._build_progress_callback(
-                task_id=None,
+                task_id=placeholder_task_id,
                 story_id=story_id,
                 phase="fixing",
                 role=fix_profile.role,
@@ -1087,8 +1185,12 @@ class ConvergentLoop:
         )
 
     async def _insert_fix_placeholder(
-        self, story_id: str, *, stage: LoopStage = "standard"
-    ) -> None:
+        self,
+        story_id: str,
+        *,
+        round_num: int,
+        stage: LoopStage = "standard",
+    ) -> str:
         """Insert a pending fixing task to prevent orchestrator main loop race.
 
         The main loop's ``_dispatch_undispatched_stories`` checks for stories
@@ -1101,22 +1203,28 @@ class ConvergentLoop:
         from ato.models.schemas import TaskRecord
 
         fix_profile = self._get_fix_profile(stage)
+        task_id = str(uuid.uuid4())
         db = await get_connection(self._db_path)
         try:
             await insert_task(
                 db,
                 TaskRecord(
-                    task_id=str(uuid.uuid4()),
+                    task_id=task_id,
                     story_id=story_id,
                     phase="fixing",
                     role=fix_profile.role,
                     cli_tool=fix_profile.cli_tool,
                     status="pending",
                     expected_artifact="convergent_loop_fix_placeholder",
+                    context_briefing=self._build_fix_context(
+                        round_num=round_num,
+                        stage=stage,
+                    ),
                 ),
             )
         finally:
             await db.close()
+        return task_id
 
     def _build_fix_prompt(
         self,
@@ -1413,7 +1521,11 @@ class ConvergentLoop:
             )
             # --- Insert pending fixing task BEFORE submitting review_fail ---
             # (same race-prevention as in run_first_review)
-            await self._insert_fix_placeholder(story_id, stage=stage)
+            await self._insert_fix_placeholder(
+                story_id,
+                round_num=round_num,
+                stage=stage,
+            )
             await self._transition_queue.submit(
                 TransitionEvent(
                     story_id=story_id,

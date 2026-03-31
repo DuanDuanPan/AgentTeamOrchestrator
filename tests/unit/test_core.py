@@ -772,6 +772,80 @@ class TestProcessApprovalDecisions:
             dispatched_task = mock_convergent.call_args[0][0]
             assert dispatched_task.task_id == "t1"
 
+    async def test_pending_fix_placeholder_uses_batch_restart(
+        self, initialized_db_path: Path
+    ) -> None:
+        """pending fix placeholder 应由 restart 调度器接手，而不是落回初始分发。"""
+        from ato.config import PhaseDefinition
+        from ato.models.db import get_connection, update_task_status
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t-fix-placeholder",
+            story_id="test-story-1",
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await update_task_status(
+                db,
+                "t-fix-placeholder",
+                "pending",
+                expected_artifact="convergent_loop_fix_placeholder",
+                context_briefing=json.dumps(
+                    {
+                        "fix_kind": "fix_dispatch",
+                        "round_num": 1,
+                        "stage": "standard",
+                    }
+                ),
+            )
+            await db.execute(
+                "UPDATE tasks SET phase = 'fixing', role = 'developer' "
+                "WHERE task_id = 't-fix-placeholder'"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+
+        mock_phase_defs = [
+            PhaseDefinition(
+                name="fixing",
+                role="developer",
+                cli_tool="claude",
+                model="opus",
+                sandbox=None,
+                phase_type="structured_job",
+                next_on_success="reviewing",
+                next_on_failure=None,
+                timeout_seconds=1800,
+            ),
+        ]
+        with (
+            patch("ato.config.build_phase_definitions", return_value=mock_phase_defs),
+            patch.object(
+                orchestrator,
+                "_dispatch_batch_restart",
+                new_callable=AsyncMock,
+            ) as mock_batch,
+            patch.object(
+                orchestrator,
+                "_dispatch_convergent_restart",
+                new_callable=AsyncMock,
+            ) as mock_convergent,
+        ):
+            await orchestrator._dispatch_pending_tasks()
+            await asyncio.sleep(0.05)
+
+        mock_batch.assert_called_once()
+        mock_convergent.assert_not_called()
+        dispatched_task = mock_batch.call_args[0][0]
+        assert dispatched_task.task_id == "t-fix-placeholder"
+
     async def test_pending_restart_task_not_dispatched_twice_while_in_flight(
         self, initialized_db_path: Path
     ) -> None:
@@ -3567,7 +3641,10 @@ class TestBatchRestartWorkspaceBranches:
         from ato.models.schemas import AdapterResult, TaskRecord
 
         settings = ATOSettings(
-            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            roles={
+                "fixer": {"cli": "claude"},  # type: ignore[dict-item, unused-ignore]
+                "reviewer": {"cli": "codex"},  # type: ignore[dict-item, unused-ignore]
+            },
             phases=[
                 {  # type: ignore[list-item, unused-ignore]
                     "name": "fixing",
@@ -3619,7 +3696,10 @@ class TestBatchRestartWorkspaceBranches:
         from ato.models.schemas import AdapterResult, TaskRecord
 
         settings = ATOSettings(
-            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            roles={
+                "fixer": {"cli": "claude"},  # type: ignore[dict-item, unused-ignore]
+                "reviewer": {"cli": "codex"},  # type: ignore[dict-item, unused-ignore]
+            },
             phases=[
                 {  # type: ignore[list-item, unused-ignore]
                     "name": "fixing",
@@ -3672,3 +3752,104 @@ class TestBatchRestartWorkspaceBranches:
         mock_adapter.execute.assert_called_once()
         options = mock_adapter.execute.call_args[0][1]
         assert options["cwd"] == "/tmp/wt-fix"
+
+    async def test_batch_restart_fixing_context_continues_convergent_loop(
+        self, initialized_db_path: Path
+    ) -> None:
+        """fixing restart 成功后应提交 fix_done，并继续触发 convergent-loop 后续 rereview。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={
+                "fixer": {"cli": "claude"},  # type: ignore[dict-item, unused-ignore]
+                "reviewer": {"cli": "codex"},  # type: ignore[dict-item, unused-ignore]
+            },
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "reviewing",
+                    "role": "reviewer",
+                    "type": "convergent_loop",
+                    "next_on_success": "qa_testing",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="pending",
+            task_id="t-fix-followup",
+            story_id="s-fix-followup",
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'fixing', role = 'fixer', "
+                "cli_tool = 'claude', expected_artifact = 'convergent_loop_fix_placeholder', "
+                "context_briefing = ? "
+                "WHERE task_id = 't-fix-followup'",
+                (
+                    json.dumps(
+                        {
+                            "fix_kind": "fix_dispatch",
+                            "round_num": 2,
+                            "stage": "escalated",
+                        }
+                    ),
+                ),
+            )
+            await update_story_worktree_path(db, "s-fix-followup", "/tmp/wt-followup")
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.execute = AsyncMock(
+            return_value=AdapterResult(
+                status="success", exit_code=0, duration_ms=10, text_result="ok"
+            )
+        )
+
+        task = TaskRecord(
+            task_id="t-fix-followup",
+            story_id="s-fix-followup",
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            status="pending",
+            context_briefing=json.dumps(
+                {
+                    "fix_kind": "fix_dispatch",
+                    "round_num": 2,
+                    "stage": "escalated",
+                }
+            ),
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with (
+            patch("ato.recovery._create_adapter", return_value=mock_adapter),
+            patch(
+                "ato.recovery.RecoveryEngine.continue_after_fix_success",
+                new=AsyncMock(),
+            ) as mock_continue,
+        ):
+            await orchestrator._dispatch_batch_restart(task)
+
+        orchestrator._tq.submit.assert_called_once()
+        event = orchestrator._tq.submit.call_args[0][0]
+        assert event.event_name == "fix_done"
+        mock_continue.assert_awaited_once()
+        assert mock_continue.await_args is not None
+        assert mock_continue.await_args.kwargs["worktree_path"] == "/tmp/wt-followup"
