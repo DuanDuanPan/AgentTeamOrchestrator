@@ -3127,6 +3127,98 @@ class TestDevelopingPromptUxContext:
 
 
 # ---------------------------------------------------------------------------
+# UAT interactive prompt 专用模板
+# ---------------------------------------------------------------------------
+
+
+class TestUatInteractivePrompt:
+    """UAT 阶段 interactive prompt 包含启动指引和 story spec 路径。"""
+
+    def test_uat_prompt_contains_story_file(self) -> None:
+        """UAT prompt 应包含 story 规格文件路径。"""
+        from ato.core import _build_interactive_prompt
+        from ato.models.schemas import TaskRecord
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="story-uat-1",
+            phase="uat",
+            role="qa",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree")
+        assert "_bmad-output/implementation-artifacts/story-uat-1.md" in prompt
+
+    def test_uat_prompt_contains_startup_guidance(self) -> None:
+        """UAT prompt 应包含应用启动指引。"""
+        from ato.core import _build_interactive_prompt
+        from ato.models.schemas import TaskRecord
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="story-uat-1",
+            phase="uat",
+            role="qa",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree")
+        assert "启动应用" in prompt
+        assert "package.json" in prompt
+        assert "pyproject.toml" in prompt
+        assert "docker-compose.yml" in prompt
+
+    def test_uat_prompt_contains_result_command(self) -> None:
+        """UAT prompt 应提示用户如何提交 UAT 结果。"""
+        from ato.core import _build_interactive_prompt
+        from ato.models.schemas import TaskRecord
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="story-uat-1",
+            phase="uat",
+            role="qa",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree")
+        assert "ato uat story-uat-1 --result pass/fail" in prompt
+
+    def test_uat_prompt_not_generic_fallback(self) -> None:
+        """UAT 阶段不应使用通用 fallback prompt。"""
+        from ato.core import _build_interactive_prompt
+        from ato.models.schemas import TaskRecord
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="story-uat-1",
+            phase="uat",
+            role="qa",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree")
+        assert "Interactive session restart" not in prompt
+
+    def test_uat_prompt_appends_previous_context(self) -> None:
+        """UAT prompt 应附加之前的上下文信息。"""
+        from ato.core import _build_interactive_prompt
+        from ato.models.schemas import TaskRecord
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="story-uat-1",
+            phase="uat",
+            role="qa",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree", story_ctx="\n\nPrevious: 首次 UAT")
+        assert "Previous: 首次 UAT" in prompt
+
+
+# ---------------------------------------------------------------------------
 # Story 9.1e: _dispatch_batch_restart creating 路径使用 findings helper
 # ---------------------------------------------------------------------------
 

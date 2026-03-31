@@ -432,12 +432,33 @@ def remove_pid_file(pid_path: Path) -> None:
 
 # Interactive phase → prompt 模板映射
 # developing: 通过自然语言触发 bmad-dev-story skill
-# uat: 通用 interactive session prompt
 _INTERACTIVE_PHASE_PROMPTS: dict[str, str] = {
     "developing": (
         "Use the bmad-dev-story skill to implement story {story_id} "
         "in the worktree at {worktree_path}. "
         "Follow the story tasks strictly."
+    ),
+    "uat": (
+        "为 story {story_id} 准备用户验收测试（UAT）环境。\n\n"
+        "## Step 1: 理解验收标准\n"
+        "阅读 story 规格文件 {story_file}，理解功能需求和 Acceptance Criteria。\n\n"
+        "## Step 2: 探索项目启动方式\n"
+        "检查项目根目录的配置文件来判断技术栈和启动命令：\n"
+        "- package.json, pyproject.toml, pom.xml, build.gradle,\n"
+        "  docker-compose.yml, Makefile, Cargo.toml, go.mod 等\n"
+        "- README 中的启动说明\n"
+        "- 已有的启动脚本（scripts/, bin/ 等）\n\n"
+        "## Step 3: 启动应用\n"
+        "1. 检查应用是否已在运行（检测端口占用、相关进程等）\n"
+        "2. 如果未运行，在后台启动（用 & 即可，不要用 nohup）\n"
+        "3. 等待应用就绪（健康检查、端口监听等）\n\n"
+        "## Step 4: 报告\n"
+        "向用户报告：\n"
+        "- 应用访问地址\n"
+        "- 验收标准清单（从 story spec 提取）\n"
+        "- 提示用户：测试完成后运行 ato uat {story_id} --result pass/fail\n"
+        "- 提示用户：关闭本终端窗口即可停止所有服务\n\n"
+        "你的工作到此结束，用户将自行进行 UAT 测试。"
     ),
 }
 
@@ -456,9 +477,13 @@ def _build_interactive_prompt(
     """
     template = _INTERACTIVE_PHASE_PROMPTS.get(task.phase)
     if template is not None:
+        from ato.design_artifacts import ARTIFACTS_REL
+
+        story_file = f"{ARTIFACTS_REL}/{task.story_id}.md"
         prompt = template.format(
             story_id=task.story_id,
             worktree_path=worktree_path,
+            story_file=story_file,
         )
     else:
         prompt = (
