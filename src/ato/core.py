@@ -1112,6 +1112,69 @@ class Orchestrator:
                 dispatch=dispatch_type,
             )
 
+    async def _append_design_gate_failure_context(self, prompt: str, story_id: str) -> str:
+        """查询最近的 design gate 失败 approval，将失败原因追加到 prompt。"""
+        import json as _json
+
+        from ato.models.db import get_connection as _gc
+
+        db = await _gc(self._db_path)
+        try:
+            cursor = await db.execute(
+                """
+                SELECT payload FROM approvals
+                WHERE story_id = ? AND approval_type = 'needs_human_review'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (story_id,),
+            )
+            row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        if row is None or not row[0]:
+            return prompt
+
+        try:
+            payload = _json.loads(row[0])
+            failure_codes = payload.get("failure_codes", [])
+            reason = payload.get("reason", "")
+        except (ValueError, TypeError):
+            return prompt
+
+        if not failure_codes:
+            return prompt
+
+        hint = (
+            "\n\n## ⚠️ 上次 Design Gate 失败（本次为 retry）\n\n"
+            f"失败原因: {reason}\n"
+            f"缺失工件: {', '.join(failure_codes)}\n\n"
+            "**请务必完成以下步骤：**\n"
+        )
+        code_to_step = {
+            "SNAPSHOT_MISSING": (
+                "- 步骤 5: 强制落盘 — batch_get 抓取节点树 → 保存 prototype.snapshot.json"
+            ),
+            "SAVE_REPORT_MISSING": (
+                "- 步骤 5f/6: 生成落盘报告 prototype.save-report.json（含验证结果）"
+            ),
+            "EXPORTS_PNG_MISSING": "- 步骤 7: export_nodes 导出至少 1 张 PNG 到 exports/ 目录",
+            "MANIFEST_PATHS_MISSING": (
+                "- 生成 prototype.manifest.yaml（含 reference_exports 路径列表）"
+            ),
+            "PEN_INTEGRITY_FAIL": "- 修复 prototype.pen 文件完整性（JSON 解析失败）",
+        }
+        for code in failure_codes:
+            step = code_to_step.get(code, f"- 修复: {code}")
+            hint += f"{step}\n"
+
+        logger.info(
+            "design_gate_retry_context_injected",
+            story_id=story_id,
+            failure_codes=failure_codes,
+        )
+        return prompt + hint
+
     async def _build_fixing_prompt_from_db(self, story_id: str, worktree_path: str) -> str | None:
         """Query open blocking findings from DB and build a fix prompt.
 
@@ -1282,7 +1345,7 @@ class Orchestrator:
 
         if story.current_phase == "dev_ready":
             await self._reconcile_dev_ready_story(story.story_id)
-            logger.info(
+            logger.debug(
                 "initial_dispatch_dev_ready_reconciled",
                 story_id=story.story_id,
                 phase=story.current_phase,
@@ -1692,6 +1755,10 @@ class Orchestrator:
             # 模板分支也保留 context_briefing（restart 上下文不丢失）
             if prompt_template is not None and task.context_briefing:
                 prompt = f"{prompt}\n\nPrevious context: {task.context_briefing}"
+
+            # designing phase retry: 追加上次 design gate 失败原因
+            if task.phase == "designing":
+                prompt = await self._append_design_gate_failure_context(prompt, task.story_id)
 
             # Story 9.1e: creating phase 追加 validation findings
             if task.phase == "creating":
@@ -2227,7 +2294,35 @@ class Orchestrator:
             )
             return False
 
-        if atype in ("needs_human_review", "convergent_loop_escalation"):
+        if atype == "convergent_loop_escalation":
+            if decision == "restart_phase2":
+                return await self._handle_convergent_loop_restart(
+                    approval, restart_target="escalated_fix"
+                )
+            if decision == "restart_loop":
+                return await self._handle_convergent_loop_restart(
+                    approval, restart_target="standard_review"
+                )
+            if decision == "escalate":
+                if self._tq is not None:
+                    await self._tq.submit(
+                        TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                    )
+                return True
+            logger.warning(
+                "approval_unrecognized_decision",
+                approval_id=approval.approval_id,
+                approval_type=atype,
+                decision=decision,
+            )
+            return False
+
+        if atype == "needs_human_review":
             if decision == "retry":
                 return await self._reschedule_interactive_task(approval, mode="restart")
             if decision == "skip":
@@ -2498,6 +2593,87 @@ class Orchestrator:
             f"approval_action_{mode}",
             approval_id=approval.approval_id,
             story_id=approval.story_id,
+            task_id=task_id,
+        )
+        return True
+
+    async def _handle_convergent_loop_restart(
+        self,
+        approval: ApprovalRecord,
+        *,
+        restart_target: str,
+    ) -> bool:
+        """创建 synthetic pending restart task 供 convergent loop 恢复。
+
+        restart_target:
+        - "escalated_fix": restart Phase 2 from escalated fix
+        - "standard_review": restart from Phase 1 round 1 full review
+
+        Creates a pending task with stage/restart_target metadata so that
+        recovery.py and core._dispatch_pending_tasks can route to the
+        correct convergent loop entry point.
+        """
+        import json
+        import uuid
+
+        from ato.config import DispatchProfile, resolve_loop_dispatch_profiles
+        from ato.models.db import insert_task
+        from ato.models.schemas import TaskRecord
+
+        story_id = approval.story_id
+
+        # Both restart targets route through reviewing phase so the
+        # dispatcher hits _dispatch_reviewing_convergent_loop which reads
+        # restart_target from context_briefing to determine actual behavior.
+        stage = "escalated" if restart_target == "escalated_fix" else "standard"
+
+        task_id = str(uuid.uuid4())
+        context = json.dumps(
+            {
+                "restart_target": restart_target,
+                "stage": stage,
+                "from_approval": approval.approval_id,
+            }
+        )
+        restart_profile = DispatchProfile(role="reviewer", cli_tool="codex")
+        if restart_target == "escalated_fix":
+            restart_profile = DispatchProfile(role="fixer_escalation", cli_tool="codex")
+        try:
+            if restart_target == "escalated_fix":
+                _, restart_profile = resolve_loop_dispatch_profiles(self._settings, "escalated")
+            else:
+                restart_profile, _ = resolve_loop_dispatch_profiles(self._settings, "standard")
+        except Exception:
+            logger.debug(
+                "convergent_restart_profile_fallback",
+                approval_id=approval.approval_id,
+                restart_target=restart_target,
+            )
+
+        db = await get_connection(self._db_path)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id=story_id,
+                    phase="reviewing",
+                    role=restart_profile.role,
+                    cli_tool=restart_profile.cli_tool,
+                    status="pending",
+                    context_briefing=context,
+                    expected_artifact="restart_requested",
+                ),
+            )
+        finally:
+            await db.close()
+
+        logger.info(
+            "convergent_restart_dispatched",
+            approval_id=approval.approval_id,
+            story_id=story_id,
+            restart_target=restart_target,
+            stage=stage,
             task_id=task_id,
         )
         return True

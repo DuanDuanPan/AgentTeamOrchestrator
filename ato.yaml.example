@@ -50,6 +50,11 @@ roles:
     cli: claude
   qa:
     cli: codex
+  reviewer_escalated:
+    cli: claude
+  fixer_escalation:
+    cli: codex
+    sandbox: workspace-write
 
 # ---------------------------------------------------------------------------
 # 阶段序列
@@ -144,7 +149,8 @@ max_concurrent_agents: 4
 # ---------------------------------------------------------------------------
 
 convergent_loop:
-  max_rounds: 3                     # 最大迭代轮次（>= 1）
+  max_rounds: 3                     # Phase 1 最大迭代轮次（>= 1）
+  max_rounds_escalated: 3           # Phase 2 梯度降级最大轮次（>= 1）
   convergence_threshold: 0.5        # 收敛阈值（0.0 ~ 1.0）
 
 # ---------------------------------------------------------------------------

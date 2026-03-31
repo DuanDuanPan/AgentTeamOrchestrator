@@ -117,9 +117,9 @@ def test_needs_human_review_options_align_schema() -> None:
 
 
 def test_convergent_loop_escalation_options_align_schema() -> None:
-    """`convergent_loop_escalation` 对齐 `retry/skip/escalate`。"""
+    """convergent_loop_escalation 的默认选项为 restart_phase2/restart_loop/escalate。"""
     defaults = APPROVAL_DEFAULT_VALID_OPTIONS["convergent_loop_escalation"]
-    assert defaults == ["retry", "skip", "escalate"]
+    assert defaults == ["restart_phase2", "restart_loop", "escalate"]
 
     for i, expected in enumerate(defaults):
         decision, _ = resolve_multi_decision("convergent_loop_escalation", i, None)

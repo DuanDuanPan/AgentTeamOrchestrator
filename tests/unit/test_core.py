@@ -2129,6 +2129,91 @@ class TestRebaseConflictDecisions:
 
 
 # ---------------------------------------------------------------------------
+# Convergent loop restart synthetic task metadata
+# ---------------------------------------------------------------------------
+
+
+class TestConvergentLoopRestartMetadata:
+    async def test_escalated_restart_uses_resolved_fix_profile_metadata(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """restart_phase2 synthetic task 应写入真实的 escalated fix 元数据。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, get_tasks_by_story, insert_story
+        from ato.models.schemas import ApprovalRecord, StoryRecord
+
+        now = datetime.now(tz=UTC)
+        settings = ATOSettings(
+            roles={
+                "reviewer": {"cli": "codex"},  # type: ignore[dict-item]
+                "developer": {"cli": "claude"},  # type: ignore[dict-item]
+                "reviewer_escalated": {"cli": "claude"},  # type: ignore[dict-item]
+                "fixer_escalation": {"cli": "claude"},  # type: ignore[dict-item]
+            },
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "reviewing",
+                    "role": "reviewer",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-cl-restart",
+                    title="Restart Story",
+                    status="in_progress",
+                    current_phase="reviewing",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        approval = ApprovalRecord(
+            approval_id="appr-cl-restart",
+            story_id="s-cl-restart",
+            approval_type="convergent_loop_escalation",
+            status="approved",
+            decision="restart_phase2",
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_convergent_loop_restart(
+            approval,
+            restart_target="escalated_fix",
+        )
+
+        assert result is True
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db, "s-cl-restart")
+        finally:
+            await db.close()
+
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.phase == "reviewing"
+        assert task.role == "fixer_escalation"
+        assert task.cli_tool == "claude"
+        assert task.expected_artifact == "restart_requested"
+        assert task.context_briefing is not None
+        context = json.loads(task.context_briefing)
+        assert context["restart_target"] == "escalated_fix"
+        assert context["stage"] == "escalated"
+
+
+# ---------------------------------------------------------------------------
 # Story 8.1: _dispatch_batch_restart 透传 phase-derived model/sandbox
 # ---------------------------------------------------------------------------
 

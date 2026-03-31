@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,17 +61,20 @@ class ATOApp(App[None]):
         db_path: Path,
         orchestrator_pid: int | None = None,
         convergent_loop_max_rounds: int = 3,
+        convergent_loop_max_rounds_escalated: int = 3,
     ) -> None:
         super().__init__()
         self._db_path = db_path
         self._orchestrator_pid = orchestrator_pid
         self._convergent_loop_max_rounds = convergent_loop_max_rounds
+        self._convergent_loop_max_rounds_escalated = convergent_loop_max_rounds_escalated
         self._last_refresh_time: float = time.monotonic()
         # Story 列表数据快照（_load_data 填充）
         self._stories: list[dict[str, object]] = []
         self._story_costs: dict[str, float] = {}
         self._story_started_at: dict[str, str] = {}
         self._story_cl_rounds: dict[str, int] = {}
+        self._story_cl_stages: dict[str, str] = {}
         # Pending approval 完整记录（Story 6.3a）
         self._pending_approval_records: list[object] = []
         # Story 级 findings 摘要（Story 6.3a AC2）
@@ -265,10 +269,47 @@ class ATOApp(App[None]):
             )
             self._story_cl_rounds = {str(row[0]): int(row[1]) for row in await cursor.fetchall()}
 
+            # 8b. CL stage detection (active task metadata first; pending approval payload fallback)
+            cursor = await db.execute(
+                "SELECT story_id, role, context_briefing FROM tasks "
+                "WHERE status IN ('running', 'pending')"
+            )
+            escalated_stories: set[str] = set()
+            for row in await cursor.fetchall():
+                sid = str(row[0])
+                role = str(row[1])
+                ctx = row[2]
+                if role in ("reviewer_escalated", "fixer_escalation"):
+                    escalated_stories.add(sid)
+                elif ctx:
+                    try:
+                        ctx_data = json.loads(ctx)
+                        if ctx_data.get("stage") == "escalated":
+                            escalated_stories.add(sid)
+                    except (ValueError, TypeError):
+                        pass
+
             # 9. Pending approval 完整记录（Story 6.3a）
             from ato.models.db import get_pending_approvals, get_story_findings_summary
 
             self._pending_approval_records = await get_pending_approvals(db)  # type: ignore[assignment]
+            for approval in self._pending_approval_records:
+                if getattr(approval, "approval_type", "") != "convergent_loop_escalation":
+                    continue
+                payload = getattr(approval, "payload", None)
+                if not payload:
+                    continue
+                try:
+                    payload_data = json.loads(payload)
+                except (ValueError, TypeError):
+                    continue
+                if payload_data.get("stage") == "escalated":
+                    escalated_stories.add(str(getattr(approval, "story_id", "")))
+
+            self._story_cl_stages = {
+                sid: ("escalated" if sid in escalated_stories else "standard")
+                for sid in self._story_cl_rounds
+            }
 
             # 10. Story 级 findings 摘要（Story 6.3a AC2 — QA 结果）
             self._story_findings_summary = await get_story_findings_summary(db)
@@ -391,7 +432,10 @@ class ATOApp(App[None]):
                 story_costs=self._story_costs,
                 story_started_at=self._story_started_at,
                 story_cl_rounds=self._story_cl_rounds,
-                convergent_loop_max_rounds=self._convergent_loop_max_rounds,
+                story_cl_stages=self._story_cl_stages,
+                convergent_loop_max_rounds=(
+                    self._convergent_loop_max_rounds + self._convergent_loop_max_rounds_escalated
+                ),
                 pending_approval_records=self._pending_approval_records,
                 story_findings_summary=self._story_findings_summary,
                 story_call_counts=self._story_call_counts,

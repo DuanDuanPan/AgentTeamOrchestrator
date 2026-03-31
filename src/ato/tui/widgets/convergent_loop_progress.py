@@ -6,12 +6,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from rich.text import Text
 from textual.widget import Widget
 
 from ato.tui.theme import RICH_COLORS
+
+LoopStageDisplay = Literal["standard", "escalated"]
 
 
 class ConvergentLoopProgress(Widget):
@@ -28,6 +30,7 @@ class ConvergentLoopProgress(Widget):
         self._current_round: int = 0
         self._max_rounds: int = 3
         self._findings_summary: dict[str, int] = {}
+        self._stage: LoopStageDisplay = "standard"
 
     def update_progress(
         self,
@@ -35,11 +38,13 @@ class ConvergentLoopProgress(Widget):
         current_round: int,
         max_rounds: int,
         findings_summary: dict[str, int],
+        stage: LoopStageDisplay = "standard",
     ) -> None:
         """更新进度数据并刷新渲染。"""
         self._current_round = current_round
         self._max_rounds = max_rounds
         self._findings_summary = findings_summary
+        self._stage = stage
         self.refresh()
 
     def render(self) -> Text:
@@ -48,7 +53,9 @@ class ConvergentLoopProgress(Widget):
             return Text("")
 
         text = Text()
-        text.append("CL: ", style=f"bold {RICH_COLORS['$accent']}")
+        # Stage-aware prefix: CL: for standard, CL↑: for escalated
+        prefix = "CL↑: " if self._stage == "escalated" else "CL: "
+        text.append(prefix, style=f"bold {RICH_COLORS['$accent']}")
 
         # 轮次可视化
         for r in range(1, self._max_rounds + 1):

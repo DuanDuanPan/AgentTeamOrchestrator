@@ -1083,11 +1083,13 @@ def tui_cmd(
     # 显式 --config 失败 → 报错退出（与 start 一致）
     # 自动发现失败 → 降级使用默认值（TUI 只需 max_rounds，仍可启动）
     cl_max_rounds = 3  # 默认值
+    cl_max_rounds_escalated = 3  # 默认值
     if config_path is not None:
         # 用户显式指定：失败即退出
         try:
             settings = load_config(config_path)
             cl_max_rounds = settings.convergent_loop.max_rounds
+            cl_max_rounds_escalated = settings.convergent_loop.max_rounds_escalated
         except Exception as exc:
             typer.echo(
                 _format_cli_error(f"配置加载失败: {exc}", "检查 ato.yaml 配置文件"),
@@ -1101,6 +1103,7 @@ def tui_cmd(
             try:
                 settings = load_config(resolved_config)
                 cl_max_rounds = settings.convergent_loop.max_rounds
+                cl_max_rounds_escalated = settings.convergent_loop.max_rounds_escalated
             except Exception:
                 logger.warning("tui_config_load_failed", exc_info=True)
 
@@ -1110,6 +1113,7 @@ def tui_cmd(
         db_path=resolved_db,
         orchestrator_pid=orchestrator_pid,
         convergent_loop_max_rounds=cl_max_rounds,
+        convergent_loop_max_rounds_escalated=cl_max_rounds_escalated,
     ).run()
 
 

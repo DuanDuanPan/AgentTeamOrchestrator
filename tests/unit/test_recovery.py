@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -90,16 +91,20 @@ def _make_task(
     pid: int | None = 12345,
     phase: str = "reviewing",
     expected_artifact: str | None = None,
+    context_briefing: str | None = None,
+    role: str = "reviewer",
+    cli_tool: str = "codex",
 ) -> TaskRecord:
     return TaskRecord(
         task_id=task_id,
         story_id=story_id,
         phase=phase,
-        role="reviewer",
-        cli_tool="codex",
+        role=role,
+        cli_tool=cli_tool,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
         pid=pid,
         expected_artifact=expected_artifact,
+        context_briefing=context_briefing,
         started_at=_NOW,
     )
 
@@ -1732,6 +1737,328 @@ class TestConvergentLoopPromptFormat:
         assert len(non_placeholder) == 1
         assert non_placeholder[0].task_id == "t1"
         assert {f.round_num for f in findings} == {1, 2}
+
+    async def test_reviewing_retry_prefers_task_context_for_rereview_round(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """Crash resume 优先使用 task metadata，不从旧 open findings 反推 round。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-resume-rr", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-resume-rr",
+                    "s-resume-rr",
+                    status="pending",
+                    pid=None,
+                    phase="reviewing",
+                    context_briefing=json.dumps(
+                        {
+                            "review_kind": "rereview",
+                            "round_num": 2,
+                            "stage": "standard",
+                        }
+                    ),
+                ),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    _make_open_finding(
+                        finding_id="f-stale",
+                        story_id="s-resume-rr",
+                        description="stale issue",
+                        file_path="src/stale.py",
+                        rule_id="R-STALE",
+                        round_num=7,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing"},
+        )
+        task = _make_task(
+            "t-resume-rr",
+            "s-resume-rr",
+            status="pending",
+            pid=None,
+            phase="reviewing",
+            context_briefing=json.dumps(
+                {
+                    "review_kind": "rereview",
+                    "round_num": 2,
+                    "stage": "standard",
+                }
+            ),
+        )
+
+        with (
+            patch("ato.convergent_loop.ConvergentLoop.run_rereview", new=AsyncMock()) as mock_rr,
+            patch("ato.convergent_loop.ConvergentLoop.run_first_review", new=AsyncMock()),
+        ):
+            await engine._dispatch_reviewing_convergent_loop(
+                task,
+                worktree_path="/tmp/wt",
+                max_concurrent=1,
+            )
+
+        mock_rr.assert_awaited_once()
+        assert mock_rr.await_args is not None
+        assert mock_rr.await_args.args[1] == 2
+
+    async def test_reviewing_retry_prefers_task_context_for_first_review_round(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """Crash resume 的 full review 应恢复原 round_num_offset，而不是跳到旧 findings 后面。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-resume-fr", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-resume-fr",
+                    "s-resume-fr",
+                    status="pending",
+                    pid=None,
+                    phase="reviewing",
+                    context_briefing=json.dumps(
+                        {
+                            "review_kind": "first_review",
+                            "round_num": 4,
+                            "stage": "standard",
+                        }
+                    ),
+                ),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    _make_open_finding(
+                        finding_id="f-stale",
+                        story_id="s-resume-fr",
+                        description="stale issue",
+                        file_path="src/stale.py",
+                        rule_id="R-STALE",
+                        round_num=9,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing"},
+        )
+        task = _make_task(
+            "t-resume-fr",
+            "s-resume-fr",
+            status="pending",
+            pid=None,
+            phase="reviewing",
+            context_briefing=json.dumps(
+                {
+                    "review_kind": "first_review",
+                    "round_num": 4,
+                    "stage": "standard",
+                }
+            ),
+        )
+
+        with (
+            patch(
+                "ato.convergent_loop.ConvergentLoop.run_first_review",
+                new=AsyncMock(),
+            ) as mock_fr,
+            patch("ato.convergent_loop.ConvergentLoop.run_rereview", new=AsyncMock()),
+        ):
+            await engine._dispatch_reviewing_convergent_loop(
+                task,
+                worktree_path="/tmp/wt",
+                max_concurrent=1,
+            )
+
+        mock_fr.assert_awaited_once()
+        assert mock_fr.await_args is not None
+        assert mock_fr.await_args.kwargs["round_num_offset"] == 3
+
+    async def test_reviewing_recovery_builds_cli_routed_subprocess_manager(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """reviewing recovery 应创建同时支持 claude/codex 的 manager。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-route", worktree_path="/tmp/wt"))
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing"},
+        )
+        task = _make_task(
+            "t-route",
+            "s-route",
+            status="pending",
+            pid=None,
+            phase="reviewing",
+        )
+
+        with (
+            patch(
+                "ato.recovery._create_adapter",
+                side_effect=[AsyncMock(), AsyncMock()],
+            ),
+            patch("ato.recovery.SubprocessManager") as mock_mgr_cls,
+            patch(
+                "ato.convergent_loop.ConvergentLoop.run_first_review",
+                new=AsyncMock(),
+            ),
+        ):
+            mock_mgr_cls.return_value = MagicMock()
+            await engine._dispatch_reviewing_convergent_loop(
+                task,
+                worktree_path="/tmp/wt",
+                max_concurrent=1,
+            )
+
+        adapters = mock_mgr_cls.call_args.kwargs["adapters"]
+        assert set(adapters) == {"claude", "codex"}
+
+
+class TestRecoveryRoundSummaryReconstruction:
+    def test_reconstruct_round_summaries_uses_first_seen_state(self) -> None:
+        """重建摘要不应把后续 closed 状态投影回首轮。"""
+        summaries = RecoveryEngine._reconstruct_round_summaries(
+            [
+                _make_open_finding(
+                    finding_id="f1",
+                    story_id="s-summary",
+                    description="fixed later",
+                    status="closed",
+                    round_num=1,
+                )
+            ]
+        )
+
+        assert summaries == [
+            {
+                "round": 1,
+                "stage": "standard",
+                "findings_total": 1,
+                "open_count": 1,
+                "closed_count": 0,
+                "new_count": 1,
+                "blocking_count": 1,
+                "suggestion_count": 0,
+            }
+        ]
+
+    def test_select_latest_round_numbers_returns_last_distinct_rounds(self) -> None:
+        """restart_phase2 需要重建最近一组标准轮次，而不是最早一组。"""
+        latest = RecoveryEngine._select_latest_round_numbers(
+            [
+                _make_open_finding(
+                    finding_id=f"f{round_num}",
+                    story_id="s-summary",
+                    round_num=round_num,
+                )
+                for round_num in (1, 2, 3, 4, 5, 6)
+            ],
+            3,
+        )
+
+        assert latest == {4, 5, 6}
+
+    async def test_restart_phase2_uses_latest_standard_round_summaries(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """restart_loop 后再 restart_phase2，应展示最新一轮 standard summaries。"""
+        context = json.dumps(
+            {
+                "restart_target": "escalated_fix",
+                "stage": "escalated",
+            }
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-phase2", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-phase2",
+                    "s-phase2",
+                    status="pending",
+                    pid=None,
+                    phase="reviewing",
+                    context_briefing=context,
+                    role="fixer_escalation",
+                    cli_tool="codex",
+                ),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    _make_open_finding(
+                        finding_id=f"f-{round_num}",
+                        story_id="s-phase2",
+                        description=f"issue {round_num}",
+                        file_path=f"src/r{round_num}.py",
+                        rule_id=f"R{round_num:03d}",
+                        round_num=round_num,
+                    )
+                    for round_num in range(1, 7)
+                ],
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing"},
+        )
+        task = _make_task(
+            "t-phase2",
+            "s-phase2",
+            status="pending",
+            pid=None,
+            phase="reviewing",
+            context_briefing=context,
+            role="fixer_escalation",
+            cli_tool="codex",
+        )
+
+        with patch(
+            "ato.convergent_loop.ConvergentLoop._run_escalated_phase",
+            new=AsyncMock(),
+        ) as mock_escalated:
+            await engine._dispatch_reviewing_convergent_loop(
+                task,
+                worktree_path="/tmp/wt",
+                max_concurrent=1,
+            )
+
+        assert mock_escalated.await_args is not None
+        summaries = mock_escalated.await_args.kwargs["standard_round_summaries"]
+        assert [entry["round"] for entry in summaries] == [4, 5, 6]
+        assert mock_escalated.await_args.kwargs["global_round_offset"] == 6
 
 
 # ---------------------------------------------------------------------------

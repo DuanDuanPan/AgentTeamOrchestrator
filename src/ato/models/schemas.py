@@ -68,7 +68,7 @@ APPROVAL_RECOMMENDED_ACTIONS: dict[str, str] = {
     "budget_exceeded": "increase_budget",
     "regression_failure": "fix_forward",
     "timeout": "continue_waiting",
-    "convergent_loop_escalation": "escalate",
+    "convergent_loop_escalation": "restart_phase2",
     "batch_confirmation": "confirm",
     "precommit_failure": "retry",
     "rebase_conflict": "manual_resolve",
@@ -84,7 +84,7 @@ APPROVAL_DEFAULT_VALID_OPTIONS: dict[str, list[str]] = {
     "budget_exceeded": ["increase_budget", "reject"],
     "regression_failure": ["revert", "fix_forward", "pause"],
     "timeout": ["continue_waiting", "abandon"],
-    "convergent_loop_escalation": ["retry", "skip", "escalate"],
+    "convergent_loop_escalation": ["restart_phase2", "restart_loop", "escalate"],
     "batch_confirmation": ["confirm", "reject"],
     "precommit_failure": ["retry", "manual_fix", "skip"],
     "rebase_conflict": ["manual_resolve", "skip", "abandon"],
@@ -312,6 +312,9 @@ class ValidationResult(_StrictBase):
 # Convergent Loop 结果模型 (Story 3.2a)
 # ---------------------------------------------------------------------------
 
+LoopStage = Literal["standard", "escalated"]
+"""降级阶段：standard 标准 Phase 1 / escalated 梯度降级 Phase 2。"""
+
 
 class ConvergentLoopResult(_StrictBase):
     """单轮 Convergent Loop 结果。"""
@@ -325,6 +328,7 @@ class ConvergentLoopResult(_StrictBase):
     open_count: int
     closed_count: int = 0
     new_count: int = 0
+    stage: LoopStage = "standard"
 
 
 # ---------------------------------------------------------------------------

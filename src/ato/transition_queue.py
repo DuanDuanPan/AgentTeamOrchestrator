@@ -353,6 +353,24 @@ class TransitionQueue:
         batch_stories = await get_batch_stories(db, batch.batch_id)
         all_dev_ready = all(s.current_phase == "dev_ready" for _, s in batch_stories)
         if not all_dev_ready:
+            # 触发仍在 queued 的 story 进入 creating，避免死锁
+            from datetime import UTC, datetime
+
+            queued_ids = [s.story_id for _, s in batch_stories if s.current_phase == "queued"]
+            for qid in queued_ids:
+                await self.submit(
+                    TransitionEvent(
+                        story_id=qid,
+                        event_name="start_create",
+                        source="agent",
+                        submitted_at=datetime.now(tz=UTC),
+                    )
+                )
+                logger.info(
+                    "dev_ready_activate_queued_story",
+                    story_id=qid,
+                    triggered_by=story_id,
+                )
             return
 
         story_ids = [s.story_id for _, s in batch_stories]

@@ -81,12 +81,24 @@ _PHASE_BMAD_SKILL: dict[str, str] = {
 _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
     "reviewing": (
         "Review all code in the worktree at {worktree_path}. "
-        "Story: {story_id}. Perform a full code review.\n\n"
-        "Output format: Start with a summary line showing counts for "
-        "intent_gap, bad_spec, patch, defer categories. "
-        "Then list findings under ## Intent Gaps, ## Bad Spec, "
-        "## Patch, ## Defer section headings. "
-        "If no issues found, state: Clean review - no findings."
+        "Story: {story_id}.\n\n"
+        "运行 /bmad-code-review skill 执行多层对抗式代码评审。\n\n"
+        "传入以下参数：\n"
+        "- Skill: bmad-code-review\n"
+        "- automation: non-interactive\n"
+        "- review mode: branch diff\n"
+        "- base branch: main\n"
+        "- spec file: _bmad-output/implementation-artifacts/{story_id}.md\n"
+        "- worktree: {worktree_path}\n\n"
+        "## 输出格式要求\n\n"
+        "评审完成后，将结果转换为以下标准格式输出：\n"
+        "- Start with a summary line showing counts for "
+        "intent_gap, bad_spec, patch, defer categories.\n"
+        "- Then list findings under ## Intent Gaps, ## Bad Spec, "
+        "## Patch, ## Defer section headings.\n"
+        "- For each finding include **Severity**: P0-P3, "
+        "**Location**: `file:line`, and a description.\n"
+        "- If no issues found, state: Clean review - no findings."
     ),
     "validating": (
         "Validate the story artifacts at {worktree_path}. "
@@ -177,7 +189,7 @@ _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
         "Story 规格文件: {story_file}\n\n"
         "## 工作流程\n\n"
         "1. **读取 story 规格** — 理解功能需求和 Acceptance Criteria\n"
-        "2. **运行 /bmad-create-ux-design** — 生成 UX 设计规格（交互模式、信息架构、页面流）\n"
+        "2. **运行 /frontend-design** — 生成 UX 设计规格（交互模式、信息架构、页面流）\n"
         "   - 将 UX 规格保存为 {ux_spec}\n"
         "3. **准备 .pen 模板** — 从仓库模板 `{template_pen}` 复制到 "
         "`{prototype_pen}`\n"
@@ -207,7 +219,7 @@ _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
         '7. **导出 PNG** — 调用 export_nodes(outputDir="{exports_dir}", '
         'nodeIds=[...], format="png") 导出设计截图\n'
         "   - 导出后更新 {save_report_json} 的 exported_png_count 字段\n"
-        "8. **可选: 使用 /frontend-design** — 如果 story 需要可交互的代码级 UI 原型\n\n"
+        "\n"
         "## 产出物要求\n\n"
         "所有文件保存到 {ux_dir}/ 目录下，核心工件：\n"
         "- ux-spec.md（UX 设计规格文档）\n"
@@ -803,6 +815,91 @@ class RecoveryEngine:
             )
             return None
 
+    @staticmethod
+    def _reconstruct_round_summaries(
+        findings: list[Any],
+        *,
+        max_round: int | None = None,
+        round_numbers: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Best-effort reconstruction of round summaries from DB findings.
+
+        After a crash, in-memory round summaries are lost. The persisted schema
+        only records a finding's first-seen round plus its latest status, so we
+        must avoid projecting current status back onto the original round.
+        """
+        by_round: dict[int, list[Any]] = {}
+        for f in findings:
+            by_round.setdefault(f.round_num, []).append(f)
+
+        summaries: list[dict[str, Any]] = []
+        for rnum in sorted(by_round):
+            if round_numbers is not None and rnum not in round_numbers:
+                continue
+            if max_round is not None and rnum > max_round:
+                break
+            round_findings = by_round[rnum]
+            blocking = sum(1 for f in round_findings if f.severity == "blocking")
+            suggestion = sum(1 for f in round_findings if f.severity == "suggestion")
+            summaries.append(
+                {
+                    "round": rnum,
+                    "stage": "standard",
+                    "findings_total": len(round_findings),
+                    "open_count": len(round_findings),
+                    "closed_count": 0,
+                    "new_count": len(round_findings),
+                    "blocking_count": blocking,
+                    "suggestion_count": suggestion,
+                }
+            )
+        return summaries
+
+    @staticmethod
+    def _select_latest_round_numbers(findings: list[Any], limit: int) -> set[int]:
+        """Return the latest ``limit`` distinct round numbers from persisted findings."""
+        if limit <= 0:
+            return set()
+        round_numbers = sorted({int(f.round_num) for f in findings})
+        return set(round_numbers[-limit:])
+
+    def _detect_task_stage(self, task: TaskRecord) -> str:
+        """Detect the degradation stage from task metadata.
+
+        Reads context_briefing JSON for 'stage' field, falls back to
+        inferring from role name.
+        """
+        if task.context_briefing:
+            try:
+                ctx = json.loads(task.context_briefing)
+                stage = ctx.get("stage")
+                if isinstance(stage, str) and stage in ("standard", "escalated"):
+                    return stage
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # Infer from role name
+        if task.role in ("reviewer_escalated", "fixer_escalation"):
+            return "escalated"
+        return "standard"
+
+    @staticmethod
+    def _parse_review_resume_context(task: TaskRecord) -> tuple[str | None, int | None]:
+        """Extract review-kind/round metadata from task.context_briefing."""
+        if not task.context_briefing:
+            return None, None
+        try:
+            ctx = json.loads(task.context_briefing)
+        except (json.JSONDecodeError, TypeError):
+            return None, None
+
+        review_kind = ctx.get("review_kind")
+        if review_kind not in ("first_review", "rereview"):
+            return None, None
+        round_num = ctx.get("round_num")
+        if not isinstance(round_num, int) or round_num < 1:
+            return review_kind, None
+        return review_kind, round_num
+
     async def _dispatch_reviewing_convergent_loop(
         self,
         task: TaskRecord,
@@ -811,21 +908,41 @@ class RecoveryEngine:
         max_concurrent: int,
         reviewer_options: dict[str, Any] | None = None,
     ) -> None:
-        """reviewing phase 恢复要区分 full review 与 scoped re-review。"""
-        from ato.config import ConvergentLoopConfig
+        """reviewing phase 恢复：stage-aware，区分 full review / scoped re-review / escalated。"""
+        from ato.config import ConvergentLoopConfig, DispatchProfile, resolve_loop_dispatch_profiles
         from ato.convergent_loop import ConvergentLoop
-        from ato.models.db import get_connection, get_open_findings
+        from ato.models.db import get_connection, get_findings_by_story, get_open_findings
 
         db = await get_connection(self._db_path)
         try:
             previous_findings = await get_open_findings(db, task.story_id)
+            all_findings = await get_findings_by_story(db, task.story_id)
         finally:
             await db.close()
 
-        adapter = _create_adapter("codex")
+        # Detect stage from task metadata
+        stage = self._detect_task_stage(task)
+
+        # Resolve dispatch profiles from settings (or use defaults)
+        standard_review: DispatchProfile | None = None
+        standard_fix: DispatchProfile | None = None
+        escalated_review: DispatchProfile | None = None
+        escalated_fix: DispatchProfile | None = None
+        if self._settings is not None:
+            try:
+                sr, sf = resolve_loop_dispatch_profiles(self._settings, "standard")
+                er, ef = resolve_loop_dispatch_profiles(self._settings, "escalated")
+                standard_review, standard_fix = sr, sf
+                escalated_review, escalated_fix = er, ef
+            except Exception:
+                logger.debug("recovery_dispatch_profiles_fallback", story_id=task.story_id)
+
         mgr = SubprocessManager(
             max_concurrent=max_concurrent,
-            adapter=adapter,
+            adapters={
+                "claude": _create_adapter("claude"),
+                "codex": _create_adapter("codex"),
+            },
             db_path=self._db_path,
         )
         bmad = _create_bmad_adapter()
@@ -844,28 +961,135 @@ class RecoveryEngine:
             ),
             nudge=self._nudge,
             reviewer_options=reviewer_options,
+            standard_review_profile=standard_review,
+            standard_fix_profile=standard_fix,
+            escalated_review_profile=escalated_review,
+            escalated_fix_profile=escalated_fix,
         )
 
-        if previous_findings:
-            round_num = max(f.round_num for f in previous_findings) + 1
+        # --- Parse explicit restart_target from context_briefing ---
+        restart_target: str | None = None
+        if task.context_briefing:
+            try:
+                ctx = json.loads(task.context_briefing)
+                restart_target = ctx.get("restart_target")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # --- restart_target="standard_review": offset-aware fresh run_loop ---
+        if restart_target == "standard_review":
+            # F1: Mark synthetic restart task as completed before entering restart flow
+            from ato.models.db import get_findings_by_story, update_task_status
+
+            db = await get_connection(self._db_path)
+            try:
+                await update_task_status(
+                    db,
+                    task.task_id,
+                    "completed",
+                    completed_at=datetime.now(tz=UTC),
+                    expected_artifact=f"convergent_restart_{restart_target}_consumed",
+                )
+                # F2: Compute round_num_offset from ALL findings (not just open)
+                all_findings = await get_findings_by_story(db, task.story_id)
+            finally:
+                await db.close()
+            offset = max((f.round_num for f in all_findings), default=0)
+            logger.info(
+                "convergent_restart_loop_offset",
+                story_id=task.story_id,
+                round_num_offset=offset,
+                previous_findings_count=len(previous_findings),
+            )
+            # Full restart from Phase 1 with monotonic round_num offset
+            await loop.run_loop(task.story_id, worktree_path, round_num_offset=offset)
+            return
+
+        # --- restart_target="escalated_fix": re-enter Phase 2 from fix ---
+        if restart_target == "escalated_fix":
+            # F1: Mark synthetic restart task as completed before entering restart flow
+            from ato.models.db import get_findings_by_story, update_task_status
+
+            db = await get_connection(self._db_path)
+            try:
+                await update_task_status(
+                    db,
+                    task.task_id,
+                    "completed",
+                    completed_at=datetime.now(tz=UTC),
+                    expected_artifact=f"convergent_restart_{restart_target}_consumed",
+                )
+                # F3+F4: Use ALL findings (not just open) for offset and summaries
+                all_findings = await get_findings_by_story(db, task.story_id)
+            finally:
+                await db.close()
+            global_offset = max((f.round_num for f in all_findings), default=0)
+            # Reconstruct summaries from the latest standard-phase rounds,
+            # not stale pre-restart rounds.
+            latest_standard_rounds = self._select_latest_round_numbers(
+                all_findings,
+                loop._config.max_rounds,
+            )
+            standard_summaries = self._reconstruct_round_summaries(
+                all_findings,
+                round_numbers=latest_standard_rounds,
+            )
+            await loop._run_escalated_phase(
+                task.story_id,
+                worktree_path,
+                standard_round_summaries=standard_summaries,
+                global_round_offset=global_offset,
+            )
+            return
+
+        review_kind, resume_round = self._parse_review_resume_context(task)
+        if review_kind == "first_review" and resume_round is not None:
+            await loop.run_first_review(
+                task.story_id,
+                worktree_path,
+                task_id=task.task_id,
+                is_retry=True,
+                round_num_offset=resume_round - 1,
+            )
+            return
+        if review_kind == "rereview" and resume_round is not None:
+            await loop.run_rereview(
+                task.story_id,
+                resume_round,
+                worktree_path=worktree_path,
+                task_id=task.task_id,
+                is_retry=True,
+                stage="escalated" if stage == "escalated" else "standard",
+            )
+            return
+
+        # --- No explicit restart_target: infer from findings state ---
+        if stage == "escalated" and all_findings:
+            round_num = max(f.round_num for f in all_findings) + 1
+            await loop.run_rereview(
+                task.story_id,
+                round_num,
+                worktree_path=worktree_path,
+                task_id=task.task_id,
+                is_retry=True,
+                stage="escalated",
+            )
+            return
+
+        if all_findings:
+            round_num = max(f.round_num for f in all_findings) + 1
             max_rounds = loop._config.max_rounds
 
-            # Enforce max_rounds: if exceeded, escalate instead of re-reviewing
+            # Enforce max_rounds: if exceeded, enter escalated phase instead
             if round_num > max_rounds:
-                remaining = sum(
-                    1 for f in previous_findings if f.severity == "blocking"
+                standard_summaries_list = self._reconstruct_round_summaries(
+                    all_findings, max_round=max_rounds
                 )
-                logger.warning(
-                    "convergent_loop_max_rounds_exceeded",
-                    story_id=task.story_id,
-                    round_num=round_num,
-                    max_rounds=max_rounds,
-                    remaining_blocking=remaining,
-                )
-                await loop._create_escalation_approval(
+                await loop._run_escalated_phase(
                     task.story_id,
-                    rounds_completed=round_num - 1,
-                    remaining_blocking=remaining,
+                    worktree_path,
+                    standard_round_summaries=standard_summaries_list,
+                    global_round_offset=round_num - 1,
                 )
                 return
 

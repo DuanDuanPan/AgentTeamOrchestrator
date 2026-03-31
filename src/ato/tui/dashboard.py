@@ -93,6 +93,7 @@ class DashboardScreen(Widget):
         self._story_costs: dict[str, float] = {}
         self._story_started_at: dict[str, str] = {}
         self._story_cl_rounds: dict[str, int] = {}
+        self._story_cl_stages: dict[str, str] = {}
         self._convergent_loop_max_rounds = 3
         # Approval 数据（Story 6.3a）
         self._approval_records: list[object] = []
@@ -630,6 +631,7 @@ class DashboardScreen(Widget):
             tasks=detail_data.get("tasks", []),  # type: ignore[arg-type]
             cl_round=self._story_cl_rounds.get(story_id, 0),
             cl_max_rounds=self._convergent_loop_max_rounds,
+            cl_stage=self._story_cl_stages.get(story_id, "standard"),
             cost_usd=self._story_costs.get(story_id, 0.0),
             preserve_expanded_view=preserve_expanded_view,
         )
@@ -927,6 +929,7 @@ class DashboardScreen(Widget):
         story_costs: dict[str, float] | None = None,
         story_started_at: dict[str, str] | None = None,
         story_cl_rounds: dict[str, int] | None = None,
+        story_cl_stages: dict[str, str] | None = None,
         convergent_loop_max_rounds: int | None = None,
         pending_approval_records: list[object] | None = None,
         story_findings_summary: dict[str, dict[str, int]] | None = None,
@@ -951,6 +954,8 @@ class DashboardScreen(Widget):
             self._story_started_at = story_started_at
         if story_cl_rounds is not None:
             self._story_cl_rounds = story_cl_rounds
+        if story_cl_stages is not None:
+            self._story_cl_stages = story_cl_stages
         if convergent_loop_max_rounds is not None:
             self._convergent_loop_max_rounds = convergent_loop_max_rounds
         if pending_approval_records is not None:

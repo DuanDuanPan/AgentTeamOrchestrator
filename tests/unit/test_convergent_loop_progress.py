@@ -99,3 +99,20 @@ def test_update_progress_method() -> None:
     assert w._current_round == 2
     assert w._max_rounds == 5
     assert w._findings_summary == {"blocking_open": 1}
+
+
+def test_escalated_stage_prefix() -> None:
+    """stage='escalated' → prefix 'CL↑:'."""
+    w = ConvergentLoopProgress()
+    w.update_progress(current_round=1, max_rounds=3, findings_summary={}, stage="escalated")
+    text = str(w.render())
+    assert "CL↑:" in text
+
+
+def test_standard_stage_prefix_unchanged() -> None:
+    """stage='standard' (default) → prefix 'CL:'."""
+    w = ConvergentLoopProgress()
+    w.update_progress(current_round=1, max_rounds=3, findings_summary={})
+    text = str(w.render())
+    assert "CL:" in text
+    assert "CL↑:" not in text

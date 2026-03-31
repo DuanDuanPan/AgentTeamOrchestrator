@@ -120,6 +120,7 @@ cost:
         assert config.convergent_loop.convergence_threshold == 0.8
         assert config.timeout.structured_job == 3600
         assert config.timeout.interactive_session == 14400
+        assert config.cost is not None
         assert config.cost.budget_per_story == 10.0
         assert config.cost.blocking_threshold == 20
 
@@ -764,6 +765,7 @@ cost:
         config = load_config(p)
         assert config.convergent_loop.max_rounds == 1
         assert config.convergent_loop.convergence_threshold == 0
+        assert config.cost is not None
         assert config.cost.blocking_threshold == 0
         assert config.polling_interval == 0.5
 
@@ -1026,11 +1028,14 @@ class TestConfigTemplate:
         assert phase_names == expected
 
     def test_example_roles_no_model_no_sandbox_by_default(self) -> None:
-        """模板中角色默认不再包含 model 和 sandbox。"""
+        """模板中角色默认不再包含 model 和 sandbox（fixer_escalation 除外）。"""
+        # fixer_escalation 需要 sandbox=workspace-write（梯度降级 Phase 2 设计要求）
+        sandbox_allowed = {"fixer_escalation"}
         config = load_config(Path("ato.yaml.example"))
         for name, role in config.roles.items():
             assert role.model is None, f"角色 {name} 不应默认指定 model"
-            assert role.sandbox is None, f"角色 {name} 不应默认指定 sandbox"
+            if name not in sandbox_allowed:
+                assert role.sandbox is None, f"角色 {name} 不应默认指定 sandbox"
 
     def test_example_contains_comments(self) -> None:
         """模板文件包含说明注释。"""
@@ -1504,7 +1509,9 @@ class TestEvaluateSkipCondition:
 
     def test_eval_not_used(self, story_no_ui: StoryRecord) -> None:
         """危险表达式不被执行，安全降级为 False。"""
-        assert evaluate_skip_condition("__import__('os').system('echo pwned')", story_no_ui) is False
+        assert (
+            evaluate_skip_condition("__import__('os').system('echo pwned')", story_no_ui) is False
+        )
 
     def test_empty_expression_returns_false(self, story_no_ui: StoryRecord) -> None:
         assert evaluate_skip_condition("", story_no_ui) is False

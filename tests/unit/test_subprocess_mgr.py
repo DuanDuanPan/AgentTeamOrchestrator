@@ -183,6 +183,43 @@ class TestPIDRegistration:
 
 
 # ---------------------------------------------------------------------------
+# CLI routing
+# ---------------------------------------------------------------------------
+
+
+class TestAdapterRouting:
+    async def test_dispatch_routes_to_adapter_matching_cli_tool(self, db_ready: Path) -> None:
+        """adapters 映射存在时，应按 cli_tool 选择对应 adapter。"""
+        claude_adapter = FakeAdapter(result=_make_adapter_result(text_result="claude-ok"))
+        codex_adapter = FakeAdapter(result=_make_adapter_result(text_result="codex-ok"))
+        mgr = SubprocessManager(
+            max_concurrent=4,
+            adapters={"claude": claude_adapter, "codex": codex_adapter},  # type: ignore[dict-item]
+            db_path=db_ready,
+        )
+
+        codex_result = await mgr.dispatch(
+            story_id="story-test",
+            phase="reviewing",
+            role="reviewer",
+            cli_tool="codex",
+            prompt="review",
+        )
+        claude_result = await mgr.dispatch(
+            story_id="story-test",
+            phase="fixing",
+            role="developer",
+            cli_tool="claude",
+            prompt="fix",
+        )
+
+        assert codex_result.text_result == "codex-ok"
+        assert claude_result.text_result == "claude-ok"
+        assert codex_adapter.call_count == 1
+        assert claude_adapter.call_count == 1
+
+
+# ---------------------------------------------------------------------------
 # 重试
 # ---------------------------------------------------------------------------
 

@@ -126,7 +126,7 @@ def test_options_numbered_correctly() -> None:
 
 def test_format_context_rebase_conflict_uses_conflict_files_and_stderr() -> None:
     """rebase 冲突上下文使用真实 payload 字段。"""
-    payload = {
+    payload: dict[str, object] = {
         "conflict_files": ["src/main.py", "tests/test_main.py"],
         "stderr": "CONFLICT (content): Merge conflict in src/main.py",
     }
@@ -156,7 +156,7 @@ def test_format_context_convergent_loop_uses_round_payload() -> None:
 
 def test_format_context_needs_human_review_includes_task_id() -> None:
     """needs_human_review 包含 task_id（若存在）。"""
-    payload = {
+    payload: dict[str, object] = {
         "skill_type": "code_review",
         "parser_mode": "deterministic",
         "task_id": "task-42",
@@ -168,7 +168,7 @@ def test_format_context_needs_human_review_includes_task_id() -> None:
 
 def test_format_context_needs_human_review_design_gate_payload() -> None:
     """needs_human_review 收到 design gate payload 时展示 failure_codes/missing_files/reason。"""
-    payload = {
+    payload: dict[str, object] = {
         "task_id": "t-99",
         "artifact_dir": "/tmp/proj/s1-ux",
         "failure_codes": ["PEN_MISSING", "EXPORTS_PNG_MISSING"],
@@ -193,7 +193,7 @@ def test_format_context_needs_human_review_design_gate_payload() -> None:
 
 def test_format_context_rebase_conflict_includes_worktree_path_when_present() -> None:
     """rebase_conflict 若有 story.worktree_path，则展示到影响范围。"""
-    payload = {
+    payload: dict[str, object] = {
         "conflict_files": ["src/main.py"],
         "worktree_path": "/tmp/wt/story-1",
     }
@@ -343,3 +343,26 @@ def test_no_risk_class_for_low_risk() -> None:
     )
     assert not panel.has_class("exception-approval-high")
     assert not panel.has_class("exception-approval-medium")
+
+
+# ---------------------------------------------------------------------------
+# 梯度降级 escalated stage 文案
+# ---------------------------------------------------------------------------
+
+
+def test_convergent_loop_escalated_context() -> None:
+    """escalated stage 的 convergent_loop_escalation 显示梯度降级文案。"""
+    what, impact = get_exception_context(
+        "convergent_loop_escalation",
+        {
+            "stage": "escalated",
+            "rounds_completed": 6,
+            "open_blocking_count": 2,
+            "standard_round_summaries": [{"round": 1}, {"round": 2}, {"round": 3}],
+            "escalated_round_summaries": [{"round": 4}, {"round": 5}, {"round": 6}],
+        },
+    )
+    assert "梯度降级" in what
+    assert "stage: escalated" in impact
+    assert "standard_rounds: 3" in impact
+    assert "escalated_rounds: 3" in impact

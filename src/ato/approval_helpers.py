@@ -172,6 +172,8 @@ _OPTION_LABELS: dict[str, str] = {
     "skip": "跳过",
     "manual_resolve": "人工解决冲突",
     "escalate": "升级处理",
+    "restart_phase2": "从 Phase 2（梯度降级）重新开始",
+    "restart_loop": "从 Phase 1 全量重跑",
 }
 
 
@@ -272,7 +274,13 @@ def get_exception_context(approval_type: str, payload: dict[str, object]) -> tup
                 if "task_id" in payload:
                     parts.append(f"task_id: {payload['task_id']}")
         case "convergent_loop_escalation":
-            what = "Convergent Loop 达到上限仍未收敛。"
+            stage = payload.get("stage", "standard")
+            if stage == "escalated":
+                what = "Convergent Loop 梯度降级（Phase 2）仍未收敛。"
+            else:
+                what = "Convergent Loop 达到上限仍未收敛。"
+            if "stage" in payload:
+                parts.append(f"stage: {payload['stage']}")
             if "rounds_completed" in payload:
                 parts.append(f"rounds_completed: {payload['rounds_completed']}")
             if "open_blocking_count" in payload:
@@ -283,6 +291,12 @@ def get_exception_context(approval_type: str, payload: dict[str, object]) -> tup
                 findings = payload["unresolved_findings"]
                 count = len(findings) if isinstance(findings, list) else findings
                 parts.append(f"unresolved_findings: {count}")
+            if "standard_round_summaries" in payload:
+                srs = payload["standard_round_summaries"]
+                parts.append(f"standard_rounds: {len(srs) if isinstance(srs, list) else srs}")
+            if "escalated_round_summaries" in payload:
+                ers = payload["escalated_round_summaries"]
+                parts.append(f"escalated_rounds: {len(ers) if isinstance(ers, list) else ers}")
         case "regression_failure":
             what = "Regression 在 main 上失败，merge queue 已冻结。"
             if payload.get("reason"):

@@ -75,6 +75,7 @@ class StoryDetailView(Widget):
         self._tasks: list[object] = []
         self._cl_round: int = 0
         self._cl_max_rounds: int = 3
+        self._cl_stage: str = "standard"
         self._cost_usd: float = 0.0
         # Sub-view state: "findings" | "costs" | "history" | "log" | None
         self._expanded_view: str | None = None
@@ -103,6 +104,7 @@ class StoryDetailView(Widget):
         tasks: list[object] | None = None,
         cl_round: int = 0,
         cl_max_rounds: int = 3,
+        cl_stage: str = "standard",
         cost_usd: float = 0.0,
         preserve_expanded_view: bool = False,
     ) -> None:
@@ -111,6 +113,7 @@ class StoryDetailView(Widget):
         self._findings_summary = findings_summary or {}
         self._cl_round = cl_round
         self._cl_max_rounds = cl_max_rounds
+        self._cl_stage = cl_stage
         self._cost_usd = cost_usd
         if findings_detail is not None:
             self._findings_detail = findings_detail
@@ -300,10 +303,12 @@ class StoryDetailView(Widget):
         """更新 ConvergentLoopProgress 组件（仅对有 CL 数据的 story 显示）。"""
         with contextlib.suppress(Exception):
             cl_widget = self.query_one("#detail-cl-progress", ConvergentLoopProgress)
+            stage = self._cl_stage if self._cl_stage in ("standard", "escalated") else "standard"
             cl_widget.update_progress(
                 current_round=self._cl_round,
                 max_rounds=self._cl_max_rounds,
                 findings_summary=self._findings_summary,
+                stage=stage,  # type: ignore[arg-type]
             )
 
     def _render_uat_submission(self) -> None:

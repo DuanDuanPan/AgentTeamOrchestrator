@@ -153,11 +153,15 @@ class SubprocessManager:
         self,
         *,
         max_concurrent: int,
-        adapter: BaseAdapter,
+        adapter: BaseAdapter | None = None,
+        adapters: dict[CLITool, BaseAdapter] | None = None,
         db_path: Path,
     ) -> None:
+        if adapter is None and not adapters:
+            raise ValueError("SubprocessManager requires adapter or adapters")
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._adapter = adapter
+        self._adapters = dict(adapters) if adapters is not None else None
         self._db_path = db_path
         self._running: dict[int, RunningTask] = {}
 
@@ -165,6 +169,16 @@ class SubprocessManager:
     def running(self) -> dict[int, RunningTask]:
         """当前运行中的 subprocess 信息（PID → RunningTask）。"""
         return self._running
+
+    def _resolve_adapter(self, cli_tool: CLITool) -> BaseAdapter:
+        """Return the adapter that should execute the given cli_tool."""
+        if self._adapters is not None:
+            try:
+                return self._adapters[cli_tool]
+            except KeyError as exc:
+                raise ValueError(f"No adapter configured for cli_tool={cli_tool}") from exc
+        assert self._adapter is not None
+        return self._adapter
 
     async def dispatch(
         self,
@@ -175,6 +189,7 @@ class SubprocessManager:
         cli_tool: CLITool,
         prompt: str,
         options: dict[str, Any] | None = None,
+        context_briefing: str | None = None,
         task_id: str | None = None,
         is_retry: bool = False,
         on_progress: ProgressCallback | None = None,
@@ -283,6 +298,7 @@ class SubprocessManager:
                     role=role,
                     cli_tool=cli_tool,
                     status="running",
+                    context_briefing=context_briefing,
                     started_at=now,
                 )
                 db = await get_connection(self._db_path)
@@ -293,22 +309,27 @@ class SubprocessManager:
             else:
                 # Fix #1: 重试场景——复用 task_id，重置为 running
                 # 清空上一次失败留下的终态字段，保持 tasks 表为干净的当前态
+                update_fields: dict[str, Any] = {
+                    "started_at": now,
+                    "pid": None,
+                    "exit_code": None,
+                    "error_message": None,
+                    "completed_at": None,
+                    "duration_ms": None,
+                    "cost_usd": None,
+                    "last_activity_type": None,
+                    "last_activity_summary": None,
+                    "text_result": None,
+                }
+                if context_briefing is not None:
+                    update_fields["context_briefing"] = context_briefing
                 db = await get_connection(self._db_path)
                 try:
                     await update_task_status(
                         db,
                         task_id,
                         "running",
-                        started_at=now,
-                        pid=None,
-                        exit_code=None,
-                        error_message=None,
-                        completed_at=None,
-                        duration_ms=None,
-                        cost_usd=None,
-                        last_activity_type=None,
-                        last_activity_summary=None,
-                        text_result=None,
+                        **update_fields,
                     )
                 finally:
                     await db.close()
@@ -316,7 +337,7 @@ class SubprocessManager:
             logger.info("dispatch_started", story_id=story_id, phase=phase)
 
             try:
-                result = await self._adapter.execute(
+                result = await self._resolve_adapter(cli_tool).execute(
                     prompt,
                     options,
                     on_process_start=_on_process_start,
@@ -435,6 +456,7 @@ class SubprocessManager:
         cli_tool: CLITool,
         prompt: str,
         options: dict[str, Any] | None = None,
+        context_briefing: str | None = None,
         max_retries: int = 1,
         task_id: str | None = None,
         is_retry: bool = False,
@@ -458,6 +480,7 @@ class SubprocessManager:
                     cli_tool=cli_tool,
                     prompt=prompt,
                     options=options,
+                    context_briefing=context_briefing,
                     task_id=task_id,
                     is_retry=is_retry or attempt > 0,
                     on_progress=on_progress,

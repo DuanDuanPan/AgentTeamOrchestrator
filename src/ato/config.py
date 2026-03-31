@@ -19,7 +19,7 @@ from pydantic_settings import (
     YamlConfigSettingsSource,
 )
 
-from ato.models.schemas import ConfigError, StoryRecord
+from ato.models.schemas import ConfigError, LoopStage, StoryRecord
 
 logger = structlog.get_logger()
 
@@ -28,6 +28,7 @@ __all__ = [
     "CLIDefaultsConfig",
     "ConvergentLoopConfig",
     "CostConfig",
+    "DispatchProfile",
     "PhaseConfig",
     "PhaseDefinition",
     "RoleConfig",
@@ -35,6 +36,8 @@ __all__ = [
     "build_phase_definitions",
     "evaluate_skip_condition",
     "load_config",
+    "resolve_loop_dispatch_profiles",
+    "resolve_role_dispatch_config",
 ]
 
 # ---------------------------------------------------------------------------
@@ -87,6 +90,7 @@ class ConvergentLoopConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_rounds: int = 3
+    max_rounds_escalated: int = 3
     convergence_threshold: float = 0.5
 
 
@@ -191,6 +195,86 @@ class PhaseDefinition:
     effort: str | None = None
     reasoning_effort: str | None = None
     reasoning_summary_format: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Dispatch Profile（角色级调度配置 DTO）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DispatchProfile:
+    """角色级调度配置，合并 RoleConfig + CLIDefaultsConfig 后的运行时 DTO。"""
+
+    role: str
+    cli_tool: Literal["claude", "codex"]
+    model: str | None = None
+    sandbox: Literal["read-only", "workspace-write"] | None = None
+    effort: str | None = None
+    reasoning_effort: str | None = None
+    reasoning_summary_format: str | None = None
+
+
+def resolve_role_dispatch_config(
+    settings: ATOSettings,
+    role_name: str,
+) -> DispatchProfile:
+    """从 ATOSettings 解析指定角色的完整 dispatch profile。
+
+    合并优先级：角色级 > cli_defaults 级。
+
+    Args:
+        settings: 已验证的 ATOSettings。
+        role_name: 角色名（必须在 settings.roles 中定义）。
+
+    Returns:
+        合并后的 DispatchProfile。
+
+    Raises:
+        ConfigError: role_name 未在 settings.roles 中定义。
+    """
+    role_cfg = settings.roles.get(role_name)
+    if role_cfg is None:
+        raise ConfigError(f"配置错误：角色 '{role_name}' 未定义")
+    cli_default = settings.cli_defaults.get(role_cfg.cli, CLIDefaultsConfig())
+    return DispatchProfile(
+        role=role_name,
+        cli_tool=role_cfg.cli,
+        model=role_cfg.model or cli_default.model,
+        sandbox=role_cfg.sandbox or cli_default.sandbox,
+        effort=role_cfg.effort or cli_default.effort,
+        reasoning_effort=role_cfg.reasoning_effort or cli_default.reasoning_effort,
+        reasoning_summary_format=(
+            role_cfg.reasoning_summary_format or cli_default.reasoning_summary_format
+        ),
+    )
+
+
+def resolve_loop_dispatch_profiles(
+    settings: ATOSettings,
+    stage: LoopStage = "standard",
+) -> tuple[DispatchProfile, DispatchProfile]:
+    """返回 (review_profile, fix_profile) 对，按 stage 选择角色。
+
+    standard: reviewer + developer（默认 Phase 1）
+    escalated: reviewer_escalated + fixer_escalation（Phase 2 角色互换）
+
+    Args:
+        settings: 已验证的 ATOSettings。
+        stage: 当前降级阶段。
+
+    Returns:
+        (review_profile, fix_profile) 元组。
+    """
+    if stage == "escalated":
+        return (
+            resolve_role_dispatch_config(settings, "reviewer_escalated"),
+            resolve_role_dispatch_config(settings, "fixer_escalation"),
+        )
+    return (
+        resolve_role_dispatch_config(settings, "reviewer"),
+        resolve_role_dispatch_config(settings, "developer"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +405,8 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
     """验证数值边界。"""
     if config.convergent_loop.max_rounds < 1:
         raise ConfigError("配置错误：convergent_loop.max_rounds 必须 >= 1")
+    if config.convergent_loop.max_rounds_escalated < 1:
+        raise ConfigError("配置错误：convergent_loop.max_rounds_escalated 必须 >= 1")
     if not (0 <= config.convergent_loop.convergence_threshold <= 1):
         raise ConfigError("配置错误：convergent_loop.convergence_threshold 必须在 [0, 1] 范围内")
     if config.max_concurrent_agents < 1:
@@ -377,11 +463,7 @@ def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
         cli_default = config.cli_defaults.get(role_config.cli, CLIDefaultsConfig())
 
         # model 解析：model_map[phase.name] > 角色级 > cli_defaults 级
-        model = (
-            config.model_map.get(phase.name)
-            or role_config.model
-            or cli_default.model
-        )
+        model = config.model_map.get(phase.name) or role_config.model or cli_default.model
         sandbox = role_config.sandbox or cli_default.sandbox
         effort = role_config.effort or cli_default.effort
         reasoning_effort = role_config.reasoning_effort or cli_default.reasoning_effort
@@ -484,7 +566,7 @@ def _resolve_attr(token: str, story: StoryRecord) -> object:
     """解析 ``story.<attr>`` token 到实际值。"""
     if not token.startswith("story."):
         raise _SkipExprError(f"Invalid token: {token!r} (expected 'story.<attr>')")
-    attr = token[len("story."):]
+    attr = token[len("story.") :]
     if attr not in _SKIP_ALLOWED_ATTRS:
         raise _SkipExprError(
             f"Attribute 'story.{attr}' not allowed (whitelist: {sorted(_SKIP_ALLOWED_ATTRS)})"

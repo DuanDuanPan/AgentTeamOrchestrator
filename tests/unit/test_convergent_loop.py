@@ -14,6 +14,7 @@ from ato.convergent_loop import ConvergentLoop, MatchResult, logger
 from ato.models.db import (
     get_connection,
     get_findings_by_story,
+    get_open_findings,
     get_pending_approvals,
     insert_findings_batch,
     insert_story,
@@ -288,6 +289,130 @@ class TestFirstReviewOnlySuggestions:
         assert result.findings_total == 2
 
         # review_pass because suggestions don't block convergence
+        event: TransitionEvent = mock_tq.submit.call_args[0][0]
+        assert event.event_name == "review_pass"
+
+
+class TestFirstReviewRestartReconciliation:
+    """restart_loop 的 full review 应先对账旧 unresolved findings。"""
+
+    @pytest.mark.asyncio
+    async def test_restart_full_review_keeps_repeated_blocking_open(
+        self, initialized_db_path: Any
+    ) -> None:
+        story = _make_story(story_id="story-restart-recheck")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding_record_for_rereview(
+                        story_id=story.story_id,
+                        finding_id="f-old-open",
+                        severity="blocking",
+                        description="old blocker",
+                        file_path="src/restart.py",
+                        rule_id="R-OLD",
+                        status="open",
+                        round_num=1,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        parse_result = _make_parse_result(
+            verdict="changes_requested",
+            findings=[
+                _make_finding(
+                    severity="blocking",
+                    description="old blocker",
+                    file_path="src/restart.py",
+                    rule_id="R-OLD",
+                )
+            ],
+        )
+        loop, _sub, _bmad, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
+
+        result = await loop.run_first_review(
+            story.story_id,
+            "/tmp/wt",
+            round_num_offset=1,
+        )
+
+        assert result.round_num == 2
+        assert result.converged is False
+        assert result.open_count == 1
+        assert result.closed_count == 0
+        assert result.new_count == 0
+
+        db = await get_connection(initialized_db_path)
+        try:
+            findings = await get_findings_by_story(db, story.story_id)
+            open_findings = await get_open_findings(db, story.story_id)
+        finally:
+            await db.close()
+
+        assert len(findings) == 1
+        assert findings[0].status == "still_open"
+        assert len(open_findings) == 1
+
+        event: TransitionEvent = mock_tq.submit.call_args[0][0]
+        assert event.event_name == "review_fail"
+
+    @pytest.mark.asyncio
+    async def test_restart_full_review_closes_missing_old_findings(
+        self, initialized_db_path: Any
+    ) -> None:
+        story = _make_story(story_id="story-restart-close")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding_record_for_rereview(
+                        story_id=story.story_id,
+                        finding_id="f-old-open",
+                        severity="blocking",
+                        description="stale blocker",
+                        file_path="src/restart.py",
+                        rule_id="R-STALE",
+                        status="still_open",
+                        round_num=1,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        loop, _sub, _bmad, mock_tq = _make_loop(initialized_db_path, parse_result=parse_result)
+
+        result = await loop.run_first_review(
+            story.story_id,
+            "/tmp/wt",
+            round_num_offset=1,
+        )
+
+        assert result.round_num == 2
+        assert result.converged is True
+        assert result.open_count == 0
+        assert result.closed_count == 1
+        assert result.new_count == 0
+
+        db = await get_connection(initialized_db_path)
+        try:
+            findings = await get_findings_by_story(db, story.story_id)
+            open_findings = await get_open_findings(db, story.story_id)
+        finally:
+            await db.close()
+
+        assert len(findings) == 1
+        assert findings[0].status == "closed"
+        assert open_findings == []
+
         event: TransitionEvent = mock_tq.submit.call_args[0][0]
         assert event.event_name == "review_pass"
 
@@ -2872,7 +2997,10 @@ class TestRunLoopConvergesFirstRound:
 
         assert result.converged is True
         loop.run_first_review.assert_called_once_with(
-            story.story_id, "/tmp/wt", artifact_payload=None
+            story.story_id,
+            "/tmp/wt",
+            artifact_payload=None,
+            round_num_offset=0,
         )
         loop.run_fix_dispatch.assert_not_called()
         loop.run_rereview.assert_not_called()
@@ -2949,7 +3077,7 @@ class TestRunLoopMultipleRounds:
 
 
 class TestRunLoopMaxRoundsEscalation:
-    """达到 max_rounds → 强制终止 + escalation approval 创建。"""
+    """达到 max_rounds (Phase 1 + Phase 2) → 强制终止 + escalation approval 创建。"""
 
     @pytest.mark.asyncio
     async def test_max_rounds_escalation(self, initialized_db_path: Any) -> None:
@@ -2965,11 +3093,16 @@ class TestRunLoopMaxRoundsEscalation:
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
         loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
-        # All rereview rounds not converged (default max_rounds=3)
+        # All rereview rounds not converged (Phase 1: 3 rounds + Phase 2: 3 rounds)
         loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
+                # Phase 1
                 _make_not_converged_result(story.story_id, round_num=2),
                 _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2 (escalated)
+                _make_not_converged_result(story.story_id, round_num=4),
+                _make_not_converged_result(story.story_id, round_num=5),
+                _make_not_converged_result(story.story_id, round_num=6),
             ]
         )
         # Mock DB query for accurate remaining blocking count
@@ -2993,7 +3126,7 @@ class TestRunLoopMaxRoundsEscalation:
         import json
 
         payload = json.loads(escalations[0].payload or "{}")
-        assert payload["rounds_completed"] == 3
+        assert payload["rounds_completed"] == 6  # 3 standard + 3 escalated
         assert payload["open_blocking_count"] == 2
 
     @pytest.mark.asyncio
@@ -3022,10 +3155,11 @@ class TestRunLoopMaxRoundsEscalation:
 
 
 class TestRunLoopMaxRoundsOneEdge:
-    """max_rounds=1 → 首轮 review 后若不收敛直接 escalation。"""
+    """max_rounds=1 → 首轮 review 后若不收敛进入 Phase 2 (escalated)。"""
 
     @pytest.mark.asyncio
     async def test_max_rounds_one_escalation(self, initialized_db_path: Any) -> None:
+        """max_rounds=1, Phase 2 也用尽 → escalation approval 创建。"""
         story = _make_story()
         db = await get_connection(initialized_db_path)
         try:
@@ -3035,20 +3169,29 @@ class TestRunLoopMaxRoundsOneEdge:
 
         # Override config to max_rounds=1
         loop, _, _, _ = _make_loop(initialized_db_path)
-        loop._config = ConvergentLoopConfig(max_rounds=1)
+        loop._config = ConvergentLoopConfig(max_rounds=1, max_rounds_escalated=3)
         loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
             return_value=_make_not_converged_result(story.story_id, round_num=1)
         )
-        loop.run_fix_dispatch = AsyncMock()  # type: ignore[method-assign]
-        loop.run_rereview = AsyncMock()  # type: ignore[method-assign]
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        # Phase 2: 3 escalated rounds all fail
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+                _make_not_converged_result(story.story_id, round_num=4),
+            ]
+        )
         loop._get_remaining_blocking_count = AsyncMock(return_value=2)  # type: ignore[method-assign]
 
         result = await loop.run_loop(story.story_id, "/tmp/wt")
 
         assert result.converged is False
-        # No fix or rereview should be called
-        loop.run_fix_dispatch.assert_not_called()
-        loop.run_rereview.assert_not_called()
+        # Phase 2 entered: fix + rereview called (escalated rounds)
+        assert loop.run_fix_dispatch.call_count >= 1
+        assert loop.run_rereview.call_count >= 1
 
         # Verify escalation created
         db = await get_connection(initialized_db_path)
@@ -3063,7 +3206,7 @@ class TestRunLoopMaxRoundsOneEdge:
         import json
 
         payload = json.loads(escalations[0].payload or "{}")
-        assert payload["rounds_completed"] == 1
+        assert payload["rounds_completed"] == 4  # 1 standard + 3 escalated
 
     @pytest.mark.asyncio
     async def test_max_rounds_one_converged(self, initialized_db_path: Any) -> None:
@@ -3141,6 +3284,7 @@ class TestRunLoopStructlogOutput:
 
     @pytest.mark.asyncio
     async def test_max_rounds_log(self, initialized_db_path: Any) -> None:
+        """Phase 1 + Phase 2 均用尽后输出 max_rounds_reached 日志。"""
         captured: list[dict[str, Any]] = []
         original_info = logger.info
         original_warning = logger.warning
@@ -3167,8 +3311,13 @@ class TestRunLoopStructlogOutput:
         loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
         loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
+                # Phase 1
                 _make_not_converged_result(story.story_id, round_num=2),
                 _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2 (escalated)
+                _make_not_converged_result(story.story_id, round_num=4),
+                _make_not_converged_result(story.story_id, round_num=5),
+                _make_not_converged_result(story.story_id, round_num=6),
             ]
         )
         loop._get_remaining_blocking_count = AsyncMock(return_value=7)  # type: ignore[method-assign]
@@ -3185,8 +3334,8 @@ class TestRunLoopStructlogOutput:
             e for e in captured if e["event"] == "convergent_loop_max_rounds_reached"
         ]
         assert len(max_round_events) == 1
-        assert max_round_events[0]["total_rounds"] == 3
-        assert max_round_events[0]["max_rounds"] == 3
+        assert max_round_events[0]["total_rounds"] == 6  # 3 standard + 3 escalated
+        assert max_round_events[0]["max_rounds"] == 6  # total max = 3 + 3
         # remaining_blocking 来自 DB 查询（mock 返回 7），而非 result.blocking_count
         assert max_round_events[0]["remaining_blocking"] == 7
         assert max_round_events[0]["level"] == "warning"
@@ -3408,8 +3557,13 @@ class TestRemainingBlockingFromDB:
         loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
         loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
+                # Phase 1
                 _make_not_converged_result(story.story_id, round_num=2, blocking_count=1),
                 _make_not_converged_result(story.story_id, round_num=3, blocking_count=1),
+                # Phase 2 (escalated)
+                _make_not_converged_result(story.story_id, round_num=4, blocking_count=1),
+                _make_not_converged_result(story.story_id, round_num=5, blocking_count=1),
+                _make_not_converged_result(story.story_id, round_num=6, blocking_count=1),
             ]
         )
         # DB 实际有 3 个 open blocking（dedup 后）
@@ -3673,7 +3827,7 @@ class TestConvergenceRateStructlog:
 
 
 class TestEscalationPayloadRoundSummaries:
-    """Task 7.1: escalation approval payload 含 round_summaries。"""
+    """Task 7.1: escalation approval payload 含 round_summaries (Phase 1 + Phase 2)。"""
 
     @pytest.mark.asyncio
     async def test_payload_has_round_summaries(self, initialized_db_path: Any) -> None:
@@ -3691,8 +3845,13 @@ class TestEscalationPayloadRoundSummaries:
         loop.run_fix_dispatch = AsyncMock(return_value=_make_not_converged_result(story.story_id))  # type: ignore[method-assign]
         loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
+                # Phase 1
                 _make_not_converged_result(story.story_id, round_num=2),
                 _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2 (escalated)
+                _make_not_converged_result(story.story_id, round_num=4),
+                _make_not_converged_result(story.story_id, round_num=5),
+                _make_not_converged_result(story.story_id, round_num=6),
             ]
         )
         loop._get_remaining_blocking_count = AsyncMock(return_value=1)  # type: ignore[method-assign]
@@ -3712,7 +3871,7 @@ class TestEscalationPayloadRoundSummaries:
 
         payload = json.loads(escalations[0].payload or "{}")
         assert "round_summaries" in payload
-        assert len(payload["round_summaries"]) == 3  # 3 rounds
+        assert len(payload["round_summaries"]) == 6  # 3 standard + 3 escalated
         assert payload["round_summaries"][0]["round"] == 1
         assert payload["round_summaries"][1]["round"] == 2
         assert payload["round_summaries"][2]["round"] == 3
@@ -3760,7 +3919,7 @@ class TestEscalationPayloadUnresolvedFindings:
         assert len(payload["unresolved_findings"]) == 1
         assert payload["unresolved_findings"][0]["finding_id"] == "f-unresolved"
         assert payload["unresolved_findings"][0]["severity"] == "blocking"
-        assert payload["options"] == ["retry", "skip", "escalate"]
+        assert payload["options"] == ["restart_phase2", "restart_loop", "escalate"]
         assert "final_convergence_rate" in payload
 
 
@@ -4340,3 +4499,342 @@ class TestResolveWorktreePathWorkspace:
         # reviewing 不允许回退（workspace: worktree 语义）
         with pytest.raises(ValueError):
             await loop._resolve_worktree_path("s-val", None)
+
+
+# ---------------------------------------------------------------------------
+# Gradient Degradation (Phase 2) 测试
+# ---------------------------------------------------------------------------
+
+
+class TestGradientDegradation:
+    """梯度降级 (Phase 2) 相关测试：standard 用尽后进入 escalated phase。"""
+
+    @pytest.mark.asyncio
+    async def test_phase1_not_converged_enters_phase2_from_fix(
+        self, initialized_db_path: Any
+    ) -> None:
+        """Standard phase (3 rounds) all fail → run_loop enters _run_escalated_phase →
+        first action is fix (role=fixer_escalation, cli_tool=codex), not full review。
+        """
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        # Phase 1: 3 rounds all fail
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                # Phase 1 rereview rounds
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2 rereview (converged to stop loop)
+                ConvergentLoopResult(
+                    story_id=story.story_id,
+                    round_num=4,
+                    converged=True,
+                    findings_total=0,
+                    blocking_count=0,
+                    suggestion_count=0,
+                    open_count=0,
+                    stage="escalated",
+                ),
+            ]
+        )
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is True
+        # Phase 2 entered: fix_dispatch called 3 times total
+        # (2 in standard + at least 1 in escalated)
+        assert loop.run_fix_dispatch.call_count >= 3
+        # The escalated fix call should have stage="escalated"
+        escalated_fix_calls = [
+            c for c in loop.run_fix_dispatch.call_args_list if c.kwargs.get("stage") == "escalated"
+        ]
+        assert len(escalated_fix_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_phase2_entry_does_not_run_full_review(self, initialized_db_path: Any) -> None:
+        """After entering escalated phase, run_first_review is NOT called again。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2: converge on first escalated rereview
+                ConvergentLoopResult(
+                    story_id=story.story_id,
+                    round_num=4,
+                    converged=True,
+                    findings_total=0,
+                    blocking_count=0,
+                    suggestion_count=0,
+                    open_count=0,
+                    stage="escalated",
+                ),
+            ]
+        )
+
+        await loop.run_loop(story.story_id, "/tmp/wt")
+
+        # run_first_review should be called exactly once (in Phase 1 only)
+        loop.run_first_review.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_phase2_converged_returns_success(self, initialized_db_path: Any) -> None:
+        """Escalated rereview returns converged=True → run_loop returns with stage='escalated'。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2 converges
+                ConvergentLoopResult(
+                    story_id=story.story_id,
+                    round_num=4,
+                    converged=True,
+                    findings_total=0,
+                    blocking_count=0,
+                    suggestion_count=0,
+                    open_count=0,
+                    stage="escalated",
+                ),
+            ]
+        )
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is True
+        assert result.stage == "escalated"
+
+    @pytest.mark.asyncio
+    async def test_phase2_not_converged_creates_escalation(self, initialized_db_path: Any) -> None:
+        """Both phases exhaust all rounds → creates escalation approval with
+        stage='escalated' and restart_target。
+        """
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                # Phase 1 rereview
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2 rereview (3 escalated rounds, all fail)
+                _make_not_converged_result(story.story_id, round_num=4),
+                _make_not_converged_result(story.story_id, round_num=5),
+                _make_not_converged_result(story.story_id, round_num=6),
+            ]
+        )
+        loop._get_remaining_blocking_count = AsyncMock(return_value=2)  # type: ignore[method-assign]
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is False
+
+        # Verify escalation approval
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        escalations = [a for a in approvals if a.approval_type == "convergent_loop_escalation"]
+        assert len(escalations) == 1
+
+        import json
+
+        payload = json.loads(escalations[0].payload or "{}")
+        assert payload["stage"] == "escalated"
+        assert "restart_target" in payload
+        assert payload["rounds_completed"] == 6  # 3 standard + 3 escalated
+
+    @pytest.mark.asyncio
+    async def test_findings_timeline_remains_continuous(self, initialized_db_path: Any) -> None:
+        """Phase 2 rereview updates same findings (still_open/closed),
+        round_num continues incrementing globally。
+        """
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2: converge on round 4
+                ConvergentLoopResult(
+                    story_id=story.story_id,
+                    round_num=4,
+                    converged=True,
+                    findings_total=0,
+                    blocking_count=0,
+                    suggestion_count=0,
+                    open_count=0,
+                    stage="escalated",
+                ),
+            ]
+        )
+
+        await loop.run_loop(story.story_id, "/tmp/wt")
+
+        # Verify round numbers passed to rereview are continuous: 2, 3, 4
+        rereview_calls = loop.run_rereview.call_args_list
+        round_nums = [
+            c.args[1] if len(c.args) > 1 else c.kwargs.get("round_num") for c in rereview_calls
+        ]
+        # Phase 1: round 2, 3; Phase 2: round 4
+        assert round_nums == [2, 3, 4]
+
+        # Fix dispatch round nums: 1, 2 (standard) + 3 (escalated fix follows round 3)
+        fix_calls = loop.run_fix_dispatch.call_args_list
+        fix_round_nums = [
+            c.args[1] if len(c.args) > 1 else c.kwargs.get("round_num") for c in fix_calls
+        ]
+        assert fix_round_nums == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_one_still_enters_escalated_fix(
+        self, initialized_db_path: Any
+    ) -> None:
+        """max_rounds=1, first review fails → enters escalated phase (not direct escalation)。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop._config = ConvergentLoopConfig(max_rounds=1, max_rounds_escalated=3)
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        # Phase 2: converge on first escalated rereview
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            return_value=ConvergentLoopResult(
+                story_id=story.story_id,
+                round_num=2,
+                converged=True,
+                findings_total=0,
+                blocking_count=0,
+                suggestion_count=0,
+                open_count=0,
+                stage="escalated",
+            )
+        )
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is True
+        assert result.stage == "escalated"
+        # Escalated fix was called (not skipped)
+        assert loop.run_fix_dispatch.call_count >= 1
+        escalated_fix_calls = [
+            c for c in loop.run_fix_dispatch.call_args_list if c.kwargs.get("stage") == "escalated"
+        ]
+        assert len(escalated_fix_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_phase2_abnormal_result_aborts(self, initialized_db_path: Any) -> None:
+        """Escalated rereview returns findings_total=0, converged=False → loop aborts early。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+        loop.run_first_review = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id, round_num=1)
+        )
+        loop.run_fix_dispatch = AsyncMock(  # type: ignore[method-assign]
+            return_value=_make_not_converged_result(story.story_id)
+        )
+        loop.run_rereview = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _make_not_converged_result(story.story_id, round_num=2),
+                _make_not_converged_result(story.story_id, round_num=3),
+                # Phase 2: abnormal result (parse failure indicator)
+                ConvergentLoopResult(
+                    story_id=story.story_id,
+                    round_num=4,
+                    converged=False,
+                    findings_total=0,
+                    blocking_count=0,
+                    suggestion_count=0,
+                    open_count=0,
+                    stage="escalated",
+                ),
+            ]
+        )
+
+        result = await loop.run_loop(story.story_id, "/tmp/wt")
+
+        assert result.converged is False
+        assert result.findings_total == 0
+        # Only 1 escalated rereview (aborted after abnormal result)
+        escalated_rereview_calls = [
+            c for c in loop.run_rereview.call_args_list if c.kwargs.get("stage") == "escalated"
+        ]
+        assert len(escalated_rereview_calls) == 1
