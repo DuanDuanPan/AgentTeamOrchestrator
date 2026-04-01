@@ -693,20 +693,20 @@ class MergeQueue:
     async def _run_regression_via_codex(self, story_id: str, task_id: str) -> None:
         """通过 Codex CLI 执行 regression 测试并归一化结构化结果。
 
-        在共享 main workspace limiter 内部调用 CodexAdapter + SubprocessManager，
+        在 MainPathGate 独占模式内部调用 CodexAdapter + SubprocessManager，
         dispatch_with_retry(task_id=..., is_retry=True) 复用 _dispatch_regression_test
         预创建的 task 记录。
         """
         from ato.adapters.codex_cli import CodexAdapter
-        from ato.core import get_main_path_limiter
+        from ato.core import get_main_path_gate
         from ato.models.db import get_connection, update_task_status
         from ato.subprocess_mgr import SubprocessManager
 
         repo_root = self._worktree_mgr.project_root
-        limiter = get_main_path_limiter()
+        gate = get_main_path_gate()
 
         try:
-            async with limiter:
+            async with gate.exclusive():
                 # 采集 pre-run workspace 变更快照（fail-closed）
                 try:
                     pre_snapshot = await _snapshot_workspace_changes(repo_root)
@@ -839,7 +839,7 @@ class MergeQueue:
                 # SubprocessManager 已写 exit_code=0，无需额外更新
 
         except CLIAdapterError:
-            # 被 limiter 外层捕获（不应发生，但防御性处理）
+            # 被 gate 外层捕获（不应发生，但防御性处理）
             logger.warning(
                 "regression_codex_cli_error_outer",
                 story_id=story_id,

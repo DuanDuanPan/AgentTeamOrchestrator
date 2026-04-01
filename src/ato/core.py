@@ -7,6 +7,7 @@ import contextlib
 import os
 import signal
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,27 +42,134 @@ from ato.worktree_mgr import WorktreeManager
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 # ---------------------------------------------------------------------------
-# Main-path (workspace: main) structured_job 串行控制
+# Main-path (workspace: main) 共享-独占门控
 # ---------------------------------------------------------------------------
 
-# Shared single-instance limiter for workspace: main structured_jobs.
-# Callers check phase_cfg["workspace"] == "main" to decide whether to acquire.
-# Created lazily by get_main_path_limiter() inside the running event loop.
-_main_path_limiter: asyncio.Semaphore | None = None
+
+class MainPathGate:
+    """共享-独占门控，替代原 Semaphore(1) 串行控制。
+
+    共享模式：供 ``parallel_safe: true`` 的 planning 阶段使用，
+    允许最多 ``max_shared`` 个跨 story 并发持有者。
+
+    独占模式：供 batch spec commit / merge / regression 使用，
+    等待所有共享持有者释放后独占，并在等待期间阻止新的共享获取（写优先）。
+
+    公平性说明：采用写优先策略——独占等待者存在时，新共享请求被阻塞。
+    理论上，如果独占请求持续涌入，planning 可能被延迟。
+    系统中独占操作（batch spec commit / merge / regression）稀疏且有界，
+    接受此 trade-off。若线上观察到问题，可升级为 FIFO 公平门控。
+    """
+
+    def __init__(self, max_shared: int = 1) -> None:
+        if max_shared < 1:
+            raise ValueError("max_shared must be >= 1")
+        self._max_shared = max_shared
+        self._shared_holders = 0
+        self._shared_waiters = 0
+        self._exclusive_held = False
+        self._exclusive_waiters = 0
+        self._cond = asyncio.Condition()
+
+    def configure(self, max_shared: int) -> None:
+        """就地更新 max_shared（仅允许在 gate 空闲时调用）。
+
+        同步方法——不持有 Condition 锁读取状态计数器。
+        这在 asyncio 协作式调度下是安全的，前提是调用发生在
+        启动序列中、尚无其他协程持有或等待 gate 时。
+        Orchestrator._startup() 保证在 TQ / MergeQueue / recovery
+        启动前调用此方法。
+        """
+        if max_shared < 1:
+            raise ValueError("max_shared must be >= 1")
+        if (
+            self._shared_holders > 0
+            or self._exclusive_held
+            or self._shared_waiters > 0
+            or self._exclusive_waiters > 0
+        ):
+            raise RuntimeError("cannot reconfigure a busy MainPathGate")
+        self._max_shared = max_shared
+
+    async def acquire_shared(self) -> None:
+        """获取共享持有权。被独占持有者或独占等待者阻塞。"""
+        async with self._cond:
+            self._shared_waiters += 1
+            try:
+                while (
+                    self._exclusive_held
+                    or self._exclusive_waiters > 0
+                    or self._shared_holders >= self._max_shared
+                ):
+                    await self._cond.wait()
+                self._shared_holders += 1
+            finally:
+                self._shared_waiters -= 1
+
+    async def release_shared(self) -> None:
+        """释放共享持有权。"""
+        async with self._cond:
+            if self._shared_holders < 1:
+                raise RuntimeError("release_shared without holder")
+            self._shared_holders -= 1
+            self._cond.notify_all()
+
+    async def acquire_exclusive(self) -> None:
+        """获取独占持有权。等待所有共享持有者释放。"""
+        async with self._cond:
+            self._exclusive_waiters += 1
+            try:
+                while self._exclusive_held or self._shared_holders > 0:
+                    await self._cond.wait()
+                self._exclusive_held = True
+            finally:
+                self._exclusive_waiters -= 1
+
+    async def release_exclusive(self) -> None:
+        """释放独占持有权。"""
+        async with self._cond:
+            if not self._exclusive_held:
+                raise RuntimeError("release_exclusive without holder")
+            self._exclusive_held = False
+            self._cond.notify_all()
+
+    @contextlib.asynccontextmanager
+    async def shared(self) -> AsyncIterator[None]:
+        """共享模式 context manager。"""
+        await self.acquire_shared()
+        try:
+            yield
+        finally:
+            await self.release_shared()
+
+    @contextlib.asynccontextmanager
+    async def exclusive(self) -> AsyncIterator[None]:
+        """独占模式 context manager。"""
+        await self.acquire_exclusive()
+        try:
+            yield
+        finally:
+            await self.release_exclusive()
 
 
-def get_main_path_limiter() -> asyncio.Semaphore:
-    """Return the shared main-path limiter (max=1), creating it on first call."""
-    global _main_path_limiter
-    if _main_path_limiter is None:
-        _main_path_limiter = asyncio.Semaphore(1)
-    return _main_path_limiter
+_main_path_gate = MainPathGate(max_shared=1)
 
 
-def reset_main_path_limiter() -> None:
-    """Reset the limiter (for testing only)."""
-    global _main_path_limiter
-    _main_path_limiter = None
+def get_main_path_gate() -> MainPathGate:
+    """返回模块级 MainPathGate 单例。"""
+    return _main_path_gate
+
+
+def configure_main_path_gate(max_shared: int) -> MainPathGate:
+    """启动期就地配置 gate 的 max_shared。"""
+    _main_path_gate.configure(max_shared)
+    return _main_path_gate
+
+
+def reset_main_path_gate(max_shared: int = 1) -> None:
+    """重建 gate 实例（仅供测试使用）。"""
+    global _main_path_gate
+    _main_path_gate = MainPathGate(max_shared=max_shared)
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +831,9 @@ class Orchestrator:
         # 写 PID 文件（此时 SIGTERM 已有 handler，不会被默认行为杀死）
         write_pid_file(self._pid_path)
         logger.info("pid_file_written", pid=os.getpid(), path=str(self._pid_path))
+
+        # 配置 MainPathGate（必须早于 TQ / MergeQueue / recovery dispatch）
+        configure_main_path_gate(self._settings.max_planning_concurrent)
 
         # 初始化 TransitionQueue（传入 phase_defs 以启用条件跳过）
         from ato.config import build_phase_definitions
@@ -1683,9 +1794,13 @@ class Orchestrator:
         phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, task.phase)
         workspace = phase_cfg.get("workspace", "main")
 
-        limiter = get_main_path_limiter() if workspace == "main" else None
-        if limiter is not None:
-            await limiter.acquire()
+        gate = get_main_path_gate() if workspace == "main" else None
+        is_shared = bool(phase_cfg.get("parallel_safe", False))
+        if gate is not None:
+            if is_shared:
+                await gate.acquire_shared()
+            else:
+                await gate.acquire_exclusive()
         try:
             db = await _gc(self._db_path)
             try:
@@ -1906,8 +2021,11 @@ class Orchestrator:
                 task, error_message="dispatch_failed:batch_restart_exception"
             )
         finally:
-            if limiter is not None:
-                limiter.release()
+            if gate is not None:
+                if is_shared:
+                    await gate.release_shared()
+                else:
+                    await gate.release_exclusive()
 
     @staticmethod
     async def _get_base_commit(worktree_path: Path) -> str:
@@ -2432,12 +2550,12 @@ class Orchestrator:
 
                 project_root = derive_project_root(self._db_path)
                 mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
-                limiter = get_main_path_limiter()
-                await limiter.acquire()
+                gate = get_main_path_gate()
+                await gate.acquire_exclusive()
                 try:
                     success, message = await mgr.batch_spec_commit(batch_id, story_ids)
                 finally:
-                    limiter.release()
+                    await gate.release_exclusive()
                 if success:
                     if db is not None:
                         await mark_batch_spec_committed(db, batch_id)

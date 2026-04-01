@@ -3688,12 +3688,12 @@ class TestValidatingFileFallback:
 
 
 class TestConvergentLoopMainWorkspaceSerialControl:
-    async def test_workspace_main_convergent_loop_waits_for_limiter(
+    async def test_workspace_main_convergent_loop_waits_for_gate(
         self,
         initialized_db_path: Path,
     ) -> None:
         from ato.config import ATOSettings
-        from ato.core import get_main_path_limiter, reset_main_path_limiter
+        from ato.core import get_main_path_gate, reset_main_path_gate
         from ato.models.schemas import BmadParseResult, BmadSkillType
 
         settings = ATOSettings(
@@ -3769,9 +3769,10 @@ class TestConvergentLoopMainWorkspaceSerialControl:
             parsed_at=_NOW,
         )
 
-        reset_main_path_limiter()
-        limiter = get_main_path_limiter()
-        await limiter.acquire()
+        reset_main_path_gate()
+        gate = get_main_path_gate()
+        await gate.acquire_exclusive()
+        acquired = True
         try:
             with (
                 patch("ato.subprocess_mgr.SubprocessManager.dispatch_with_retry", dispatch_mock),
@@ -3785,14 +3786,15 @@ class TestConvergentLoopMainWorkspaceSerialControl:
                 await asyncio.sleep(0.05)
                 dispatch_mock.assert_not_called()
 
-                limiter.release()
+                await gate.release_exclusive()
+                acquired = False
                 await asyncio.wait_for(bg, timeout=1.0)
 
             dispatch_mock.assert_awaited_once()
         finally:
-            if limiter.locked():
-                limiter.release()
-            reset_main_path_limiter()
+            if acquired:
+                await gate.release_exclusive()
+            reset_main_path_gate()
 
 
 # ---------------------------------------------------------------------------

@@ -377,17 +377,17 @@ class TransitionQueue:
         story_ids = [s.story_id for _, s in batch_stories]
 
         try:
-            from ato.core import derive_project_root, get_main_path_limiter
+            from ato.core import derive_project_root, get_main_path_gate
             from ato.worktree_mgr import WorktreeManager
 
-            limiter = get_main_path_limiter()
-            await limiter.acquire()
+            gate = get_main_path_gate()
+            await gate.acquire_exclusive()
             try:
                 project_root = derive_project_root(self._db_path)
                 mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
                 success, message = await mgr.batch_spec_commit(batch.batch_id, story_ids)
             finally:
-                limiter.release()
+                await gate.release_exclusive()
 
             if success:
                 await mark_batch_spec_committed(db, batch.batch_id)

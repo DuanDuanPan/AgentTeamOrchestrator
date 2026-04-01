@@ -82,6 +82,7 @@ class PhaseConfig(BaseModel):
     next_on_failure: str | None = None
     workspace: Literal["main", "worktree"] | None = None
     skip_when: str | None = None
+    parallel_safe: bool = False
 
 
 class ConvergentLoopConfig(BaseModel):
@@ -132,6 +133,7 @@ class ATOSettings(BaseSettings):
     roles: dict[str, RoleConfig]
     phases: list[PhaseConfig]
     max_concurrent_agents: int = 4
+    max_planning_concurrent: int = 3
     polling_interval: float = 3.0
     convergent_loop: ConvergentLoopConfig = ConvergentLoopConfig()
     timeout: TimeoutConfig = TimeoutConfig()
@@ -195,6 +197,7 @@ class PhaseDefinition:
     effort: str | None = None
     reasoning_effort: str | None = None
     reasoning_summary_format: str | None = None
+    parallel_safe: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +340,18 @@ def _validate_config(config: ATOSettings) -> None:
             raise ConfigError(f"配置错误：阶段名 '{phase.name}' 重复定义")
         phase_names.add(phase.name)
 
+    # parallel_safe 仅对 workspace: main 有效
+    for phase in config.phases:
+        resolved_ws = _resolve_workspace(phase)
+        if phase.parallel_safe and resolved_ws != "main":
+            logger.warning(
+                "config_parallel_safe_ignored",
+                phase=phase.name,
+                workspace=resolved_ws,
+                hint="parallel_safe: true 仅对 workspace: main 的阶段有效，"
+                "此设置将被忽略",
+            )
+
     # 验证角色引用
     for phase in config.phases:
         if phase.role not in config.roles:
@@ -411,6 +426,17 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
         raise ConfigError("配置错误：convergent_loop.convergence_threshold 必须在 [0, 1] 范围内")
     if config.max_concurrent_agents < 1:
         raise ConfigError("配置错误：max_concurrent_agents 必须 >= 1")
+    if config.max_planning_concurrent < 1:
+        raise ConfigError("配置错误：max_planning_concurrent 必须 >= 1")
+    if config.max_planning_concurrent > config.max_concurrent_agents:
+        logger.warning(
+            "config_planning_exceeds_agents",
+            max_planning_concurrent=config.max_planning_concurrent,
+            max_concurrent_agents=config.max_concurrent_agents,
+            hint="max_planning_concurrent 大于 max_concurrent_agents，"
+            "并发 planning dispatch 可能导致系统总资源消耗超出预期"
+            "（SubprocessManager 是实例级限流，不构成跨 dispatch 全局上限）",
+        )
     if config.timeout.structured_job <= 0:
         raise ConfigError("配置错误：timeout.structured_job 必须 > 0")
     if config.timeout.interactive_session <= 0:
@@ -493,6 +519,7 @@ def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
                 effort=effort,
                 reasoning_effort=reasoning_effort,
                 reasoning_summary_format=reasoning_summary_format,
+                parallel_safe=phase.parallel_safe,
             )
         )
 

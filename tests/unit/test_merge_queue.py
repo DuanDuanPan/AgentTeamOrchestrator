@@ -1528,9 +1528,9 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """AC3: structured pass + clean workspace → exit_code=0。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1578,9 +1578,9 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """AC4: structured fail → status=completed, exit_code=1, error_message=summary。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1633,9 +1633,9 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """无效 structured_output → 标记失败。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1683,9 +1683,9 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """半残 payload（有 regression_status 但缺其他 required 字段）→ fail-closed。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1734,9 +1734,9 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """非�� regression_status 枚举值 → fail-closed。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1790,9 +1790,9 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """字段类型错误（如 commands_attempted 为 str）→ fail-closed。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1845,10 +1845,10 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """git status 失败 → fail-closed，不放行 regression pass。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
         from ato.merge_queue import _WorkspaceSnapshotError
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1891,9 +1891,9 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """AC8: workspace 新增脏文件 → 即使 regression_status=pass 也判失败。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)
@@ -1948,10 +1948,10 @@ class TestCodexRegressionRunner:
         self, initialized_db_path: Path
     ) -> None:
         """AC5: CLIAdapterError → SubprocessManager 已写终态，runner 只记日志不覆写。"""
-        from ato.core import reset_main_path_limiter
+        from ato.core import reset_main_path_gate
         from ato.models.schemas import CLIAdapterError, ErrorCategory
 
-        reset_main_path_limiter()
+        reset_main_path_gate()
 
         queue = self._make_queue(initialized_db_path)
         task_id = await self._setup_task(initialized_db_path)

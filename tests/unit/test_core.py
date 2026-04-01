@@ -308,6 +308,7 @@ def _make_settings() -> MagicMock:
     """创建一个 mock ATOSettings。"""
     settings = MagicMock()
     settings.polling_interval = 1.0
+    settings.max_planning_concurrent = 3
     return settings
 
 
@@ -2503,20 +2504,20 @@ class TestBatchRestartPhaseOptions:
 
 
 class TestPreWorktreeSerialControl:
-    """验证 pre-worktree phases（planning/creating/designing）共享 main-path limiter (max=1)。"""
+    """验证 main-path gate 共享-独占门控行为。"""
 
-    async def test_limiter_is_shared_singleton(self) -> None:
-        """get_main_path_limiter 返回同一个 Semaphore 实例。"""
-        from ato.core import get_main_path_limiter, reset_main_path_limiter
+    async def test_gate_is_shared_singleton(self) -> None:
+        """get_main_path_gate 返回同一个 MainPathGate 实例。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
 
-        reset_main_path_limiter()
-        lim1 = get_main_path_limiter()
-        lim2 = get_main_path_limiter()
-        assert lim1 is lim2
-        reset_main_path_limiter()
+        reset_main_path_gate()
+        g1 = get_main_path_gate()
+        g2 = get_main_path_gate()
+        assert g1 is g2
+        reset_main_path_gate()
 
-    async def test_workspace_main_phases_use_limiter(self) -> None:
-        """workspace: main 阶段通过 phase_cfg 驱动 limiter（不再依赖硬编码集合）。"""
+    async def test_workspace_main_phases_use_gate(self) -> None:
+        """workspace: main 阶段通过 phase_cfg 驱动 gate（不再依赖硬编码集合）。"""
         from ato.config import ATOSettings
         from ato.recovery import RecoveryEngine
 
@@ -2541,39 +2542,269 @@ class TestPreWorktreeSerialControl:
         )
         planning_cfg = RecoveryEngine._resolve_phase_config_static(settings, "planning")
         developing_cfg = RecoveryEngine._resolve_phase_config_static(settings, "developing")
-        assert planning_cfg["workspace"] == "main"  # should use limiter
-        assert developing_cfg["workspace"] == "worktree"  # should NOT use limiter
+        assert planning_cfg["workspace"] == "main"  # should use gate
+        assert developing_cfg["workspace"] == "worktree"  # should NOT use gate
 
-    async def test_only_one_pre_worktree_job_at_a_time(self) -> None:
-        """同一时刻最多只有 1 个 pre-worktree structured_job 在执行。"""
-        from ato.core import get_main_path_limiter, reset_main_path_limiter
+    async def test_exclusive_serializes_jobs(self) -> None:
+        """独占模式下同一时刻最多只有 1 个 job 在执行。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
 
-        reset_main_path_limiter()
-        limiter = get_main_path_limiter()
+        reset_main_path_gate()
+        gate = get_main_path_gate()
 
         max_concurrent = 0
         active = 0
 
         async def simulate_dispatch(phase: str) -> str:
             nonlocal max_concurrent, active
-            async with limiter:
+            async with gate.exclusive():
                 active += 1
                 if active > max_concurrent:
                     max_concurrent = active
-                await asyncio.sleep(0.01)  # simulate work
+                await asyncio.sleep(0.01)
                 active -= 1
                 return phase
 
-        # 同时启动 3 个 pre-worktree dispatch
         results = await asyncio.gather(
-            simulate_dispatch("planning"),
-            simulate_dispatch("creating"),
-            simulate_dispatch("designing"),
+            simulate_dispatch("merging"),
+            simulate_dispatch("regression"),
+            simulate_dispatch("batch_commit"),
         )
 
-        assert set(results) == {"planning", "creating", "designing"}
+        assert set(results) == {"merging", "regression", "batch_commit"}
         assert max_concurrent == 1, f"Expected max 1 concurrent, got {max_concurrent}"
-        reset_main_path_limiter()
+        reset_main_path_gate()
+
+
+class TestMainPathGateConcurrency:
+    """MainPathGate 共享-独占门控并发语义测试。"""
+
+    async def test_shared_mode_allows_concurrent(self) -> None:
+        """多个 shared holder 可以同时持有。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate(max_shared=3)
+        gate = get_main_path_gate()
+
+        max_concurrent = 0
+        active = 0
+
+        async def shared_task() -> None:
+            nonlocal max_concurrent, active
+            async with gate.shared():
+                active += 1
+                if active > max_concurrent:
+                    max_concurrent = active
+                await asyncio.sleep(0.02)
+                active -= 1
+
+        await asyncio.gather(shared_task(), shared_task(), shared_task())
+        assert max_concurrent == 3, f"Expected 3 concurrent shared, got {max_concurrent}"
+        reset_main_path_gate()
+
+    async def test_shared_mode_respects_max_cap(self) -> None:
+        """5 个并发 shared 请求在 max_shared=3 下最多 3 个同时运行。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate(max_shared=3)
+        gate = get_main_path_gate()
+
+        max_concurrent = 0
+        active = 0
+
+        async def shared_task() -> None:
+            nonlocal max_concurrent, active
+            async with gate.shared():
+                active += 1
+                if active > max_concurrent:
+                    max_concurrent = active
+                await asyncio.sleep(0.02)
+                active -= 1
+
+        await asyncio.gather(*(shared_task() for _ in range(5)))
+        assert max_concurrent == 3, f"Expected max 3 concurrent shared, got {max_concurrent}"
+        reset_main_path_gate()
+
+    async def test_exclusive_blocked_by_shared(self) -> None:
+        """独占获取需等待所有共享持有者释放。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate(max_shared=3)
+        gate = get_main_path_gate()
+
+        exclusive_entered = False
+        await gate.acquire_shared()
+        try:
+
+            async def try_exclusive() -> None:
+                nonlocal exclusive_entered
+                await gate.acquire_exclusive()
+                exclusive_entered = True
+                await gate.release_exclusive()
+
+            task = asyncio.create_task(try_exclusive())
+            await asyncio.sleep(0.02)
+            assert not exclusive_entered, "Exclusive should be blocked by shared"
+        finally:
+            await gate.release_shared()
+
+        await asyncio.wait_for(task, timeout=1.0)
+        assert exclusive_entered
+        reset_main_path_gate()
+
+    async def test_shared_blocked_by_exclusive(self) -> None:
+        """共享获取被独占持有者阻塞。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate()
+        gate = get_main_path_gate()
+
+        shared_entered = False
+        await gate.acquire_exclusive()
+        try:
+
+            async def try_shared() -> None:
+                nonlocal shared_entered
+                await gate.acquire_shared()
+                shared_entered = True
+                await gate.release_shared()
+
+            task = asyncio.create_task(try_shared())
+            await asyncio.sleep(0.02)
+            assert not shared_entered, "Shared should be blocked by exclusive"
+        finally:
+            await gate.release_exclusive()
+
+        await asyncio.wait_for(task, timeout=1.0)
+        assert shared_entered
+        reset_main_path_gate()
+
+    async def test_shared_blocked_by_waiting_exclusive(self) -> None:
+        """写优先：一旦有独占等待者，新共享请求被阻塞。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate(max_shared=3)
+        gate = get_main_path_gate()
+
+        # 先获取一个 shared
+        await gate.acquire_shared()
+        exclusive_acquired = False
+        new_shared_acquired = False
+
+        async def exclusive_waiter() -> None:
+            nonlocal exclusive_acquired
+            await gate.acquire_exclusive()
+            exclusive_acquired = True
+            await gate.release_exclusive()
+
+        async def new_shared_waiter() -> None:
+            nonlocal new_shared_acquired
+            await gate.acquire_shared()
+            new_shared_acquired = True
+            await gate.release_shared()
+
+        # 启动独占等待者
+        exc_task = asyncio.create_task(exclusive_waiter())
+        await asyncio.sleep(0.02)
+        assert not exclusive_acquired
+
+        # 启动新的共享请求（应被独占等待者阻塞）
+        shared_task = asyncio.create_task(new_shared_waiter())
+        await asyncio.sleep(0.02)
+        assert not new_shared_acquired, "New shared should be blocked by waiting exclusive"
+
+        # 释放初始 shared → 独占获取 → 释放 → 新 shared 获取
+        await gate.release_shared()
+        await asyncio.wait_for(exc_task, timeout=1.0)
+        await asyncio.wait_for(shared_task, timeout=1.0)
+        assert exclusive_acquired
+        assert new_shared_acquired
+        reset_main_path_gate()
+
+    async def test_exclusive_mutual_exclusion(self) -> None:
+        """独占持有者之间互斥。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate()
+        gate = get_main_path_gate()
+
+        max_concurrent = 0
+        active = 0
+
+        async def exclusive_task() -> None:
+            nonlocal max_concurrent, active
+            async with gate.exclusive():
+                active += 1
+                if active > max_concurrent:
+                    max_concurrent = active
+                await asyncio.sleep(0.01)
+                active -= 1
+
+        await asyncio.gather(exclusive_task(), exclusive_task(), exclusive_task())
+        assert max_concurrent == 1
+        reset_main_path_gate()
+
+    async def test_gate_context_managers(self) -> None:
+        """shared() 和 exclusive() context manager 正常工作。"""
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate(max_shared=2)
+        gate = get_main_path_gate()
+
+        async with gate.shared():
+            assert gate._shared_holders == 1
+        assert gate._shared_holders == 0
+
+        async with gate.exclusive():
+            assert gate._exclusive_held is True
+        assert gate._exclusive_held is False
+        reset_main_path_gate()
+
+    async def test_configure_rejects_busy_gate(self) -> None:
+        """gate 忙时不允许 reconfigure。"""
+        import pytest
+
+        from ato.core import get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate()
+        gate = get_main_path_gate()
+
+        await gate.acquire_shared()
+        with pytest.raises(RuntimeError, match="cannot reconfigure"):
+            gate.configure(5)
+        await gate.release_shared()
+        reset_main_path_gate()
+
+    async def test_configure_idle_gate(self) -> None:
+        """空闲 gate 可以成功 reconfigure。"""
+        from ato.core import configure_main_path_gate, get_main_path_gate, reset_main_path_gate
+
+        reset_main_path_gate()
+        gate = get_main_path_gate()
+        configure_main_path_gate(5)
+        assert gate._max_shared == 5
+        reset_main_path_gate()
+
+    async def test_max_shared_validation(self) -> None:
+        """max_shared < 1 应被拒绝。"""
+        import pytest
+
+        from ato.core import MainPathGate
+
+        with pytest.raises(ValueError, match="max_shared must be >= 1"):
+            MainPathGate(max_shared=0)
+
+    async def test_release_without_holder_raises(self) -> None:
+        """无持有者时 release 应抛出错误。"""
+        import pytest
+
+        from ato.core import MainPathGate
+
+        gate = MainPathGate()
+        with pytest.raises(RuntimeError, match="release_shared without holder"):
+            await gate.release_shared()
+        with pytest.raises(RuntimeError, match="release_exclusive without holder"):
+            await gate.release_exclusive()
 
 
 # ---------------------------------------------------------------------------

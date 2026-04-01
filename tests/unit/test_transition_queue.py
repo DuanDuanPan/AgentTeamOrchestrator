@@ -803,13 +803,13 @@ class TestBatchSpecCommitOnDevReady:
         mock_commit.assert_not_called()
         await tq.stop()
 
-    async def test_batch_spec_commit_waits_for_main_path_limiter(
+    async def test_batch_spec_commit_waits_for_main_path_gate(
         self, initialized_db_path: Path
     ) -> None:
-        """spec commit 应等待 validating/main workspace 释放共享 limiter。"""
+        """spec commit 应等待 gate 独占释放后才执行。"""
         from unittest.mock import AsyncMock, patch
 
-        from ato.core import get_main_path_limiter, reset_main_path_limiter
+        from ato.core import get_main_path_gate, reset_main_path_gate
         from ato.models.db import insert_batch, insert_batch_story_links
         from ato.models.schemas import BatchRecord, BatchStoryLink
 
@@ -830,9 +830,10 @@ class TestBatchSpecCommitOnDevReady:
         tq = TransitionQueue(initialized_db_path)
         await tq.start()
 
-        reset_main_path_limiter()
-        limiter = get_main_path_limiter()
-        await limiter.acquire()
+        reset_main_path_gate()
+        gate = get_main_path_gate()
+        await gate.acquire_exclusive()
+        acquired = True
         try:
             with (
                 patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
@@ -843,14 +844,15 @@ class TestBatchSpecCommitOnDevReady:
                 await asyncio.sleep(0.05)
                 mock_commit.assert_not_called()
 
-                limiter.release()
+                await gate.release_exclusive()
+                acquired = False
                 await asyncio.wait_for(tq._queue.join(), timeout=1.0)
 
             mock_commit.assert_called_once()
         finally:
-            if limiter.locked():
-                limiter.release()
-            reset_main_path_limiter()
+            if acquired:
+                await gate.release_exclusive()
+            reset_main_path_gate()
             await tq.stop()
 
     async def test_precommit_failure_creates_approval(self, initialized_db_path: Path) -> None:

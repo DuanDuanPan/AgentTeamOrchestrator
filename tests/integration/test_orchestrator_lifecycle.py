@@ -30,6 +30,7 @@ async def setup_db(tmp_path: Path) -> Path:
 def _make_settings(polling_interval: float = 0.1) -> MagicMock:
     settings = MagicMock()
     settings.polling_interval = polling_interval
+    settings.max_planning_concurrent = 3
     return settings
 
 

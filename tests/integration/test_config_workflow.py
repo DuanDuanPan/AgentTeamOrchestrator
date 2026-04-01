@@ -139,3 +139,54 @@ phases:
 
         with pytest.raises(ConfigError, match=r"done.*保留.*终态"):
             load_config(config_path)
+
+    def test_parallel_safe_round_trip(self, tmp_path: Path) -> None:
+        """YAML → ATOSettings → PhaseDefinition → phase_cfg 的 parallel_safe round-trip。"""
+        from ato.config import build_phase_definitions, load_config
+        from ato.recovery import RecoveryEngine
+
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+  reviewer:
+    cli: codex
+
+phases:
+  - name: creating
+    role: dev
+    type: structured_job
+    next_on_success: merging
+    workspace: main
+    parallel_safe: true
+
+  - name: merging
+    role: dev
+    type: structured_job
+    next_on_success: done
+    workspace: main
+
+max_planning_concurrent: 5
+"""
+        config_path = tmp_path / "ato.yaml"
+        config_path.write_text(yaml_content, encoding="utf-8")
+
+        settings = load_config(config_path)
+
+        # 校验 settings 层
+        assert settings.max_planning_concurrent == 5
+        assert settings.phases[0].parallel_safe is True
+        assert settings.phases[1].parallel_safe is False
+
+        # 校验 PhaseDefinition 层
+        defs = build_phase_definitions(settings)
+        creating_def = next(d for d in defs if d.name == "creating")
+        merging_def = next(d for d in defs if d.name == "merging")
+        assert creating_def.parallel_safe is True
+        assert merging_def.parallel_safe is False
+
+        # 校验 phase_cfg 层
+        creating_cfg = RecoveryEngine._resolve_phase_config_static(settings, "creating")
+        merging_cfg = RecoveryEngine._resolve_phase_config_static(settings, "merging")
+        assert creating_cfg["parallel_safe"] is True
+        assert merging_cfg["parallel_safe"] is False

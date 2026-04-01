@@ -717,6 +717,7 @@ class RecoveryEngine:
                     "effort": pd.effort,
                     "reasoning_effort": pd.reasoning_effort,
                     "reasoning_summary_format": pd.reasoning_summary_format,
+                    "parallel_safe": pd.parallel_safe,
                 }
         return {}
 
@@ -1368,12 +1369,16 @@ class RecoveryEngine:
                     await db.close()
 
             workspace = self._resolve_dispatch_workspace(phase_cfg, worktree_path)
-            limiter: asyncio.Semaphore | None = None
+            gate = None
+            is_shared = bool(phase_cfg.get("parallel_safe", False))
             if workspace == "main":
-                from ato.core import get_main_path_limiter
+                from ato.core import get_main_path_gate
 
-                limiter = get_main_path_limiter()
-                await limiter.acquire()
+                gate = get_main_path_gate()
+                if is_shared:
+                    await gate.acquire_shared()
+                else:
+                    await gate.acquire_exclusive()
 
             try:
                 # workspace: worktree 的阶段要求 worktree 存在
@@ -1485,8 +1490,11 @@ class RecoveryEngine:
                     story_id=task.story_id,
                 )
             finally:
-                if limiter is not None:
-                    limiter.release()
+                if gate is not None:
+                    if is_shared:
+                        await gate.release_shared()
+                    else:
+                        await gate.release_exclusive()
 
             if parse_result.verdict == "parse_failed":
                 # Story 9.1f: validating-only artifact-file fallback
@@ -1658,11 +1666,15 @@ class RecoveryEngine:
         worktree_path = await self._get_story_worktree(task.story_id)
         workspace = self._resolve_dispatch_workspace(phase_cfg, worktree_path)
 
-        from ato.core import get_main_path_limiter
+        from ato.core import get_main_path_gate
 
-        limiter = get_main_path_limiter() if workspace == "main" else None
-        if limiter is not None:
-            await limiter.acquire()
+        is_shared = bool(phase_cfg.get("parallel_safe", False))
+        gate = get_main_path_gate() if workspace == "main" else None
+        if gate is not None:
+            if is_shared:
+                await gate.acquire_shared()
+            else:
+                await gate.acquire_exclusive()
         try:
             # 显式 workspace: worktree 但缺 worktree → 尝试创建，失败则 dispatch_failed
             if workspace == "worktree" and worktree_path is None:
@@ -1771,8 +1783,11 @@ class RecoveryEngine:
             )
             await self._mark_dispatch_failed(task)
         finally:
-            if limiter is not None:
-                limiter.release()
+            if gate is not None:
+                if is_shared:
+                    await gate.release_shared()
+                else:
+                    await gate.release_exclusive()
 
     def _generate_manifest_before_gate(self, story_id: str) -> None:
         """Story 9.1d: 在 design gate 前基于磁盘真相生成 manifest。"""

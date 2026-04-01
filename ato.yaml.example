@@ -70,6 +70,7 @@ phases:
     type: structured_job
     next_on_success: designing
     workspace: main
+    parallel_safe: true
 
   - name: designing
     role: ux_designer
@@ -77,6 +78,7 @@ phases:
     next_on_success: validating
     workspace: main
     skip_when: "not story.has_ui"
+    parallel_safe: true
 
   - name: validating
     role: validator
@@ -84,6 +86,7 @@ phases:
     next_on_success: dev_ready
     next_on_failure: creating
     workspace: main
+    parallel_safe: true
 
   - name: dev_ready
     role: developer
@@ -143,6 +146,9 @@ phases:
 
 # 最大并发 agent 数量
 max_concurrent_agents: 4
+
+# Planning 阶段（parallel_safe: true）跨 story 最大并发数
+max_planning_concurrent: 3
 
 # ---------------------------------------------------------------------------
 # Convergent Loop 参数

@@ -2,10 +2,10 @@
 title: 'Planning 阶段跨 Story 并行调度（Main-Path Parallel Dispatch）'
 slug: 'planning-phase-parallel-dispatch'
 created: '2026-03-31'
-status: 'ready'
-stepsCompleted: []
+status: 'complete-with-known-gaps'
+stepsCompleted: ['task-1', 'task-2', 'task-3', 'task-4', 'task-5', 'task-6', 'task-7', 'task-8']
 tech_stack: ['python>=3.11', 'asyncio', 'aiosqlite', 'pydantic>=2.0', 'structlog']
-files_to_modify: ['src/ato/core.py', 'src/ato/config.py', 'src/ato/recovery.py', 'src/ato/transition_queue.py', 'src/ato/merge_queue.py', 'ato.yaml.example', 'tests/unit/test_core.py', 'tests/unit/test_recovery.py', 'tests/unit/test_transition_queue.py', 'tests/unit/test_merge_queue.py', 'tests/unit/test_config.py', 'tests/integration/test_config_workflow.py']
+files_to_modify: ['src/ato/core.py', 'src/ato/config.py', 'src/ato/recovery.py', 'src/ato/transition_queue.py', 'src/ato/merge_queue.py', 'ato.yaml.example', 'tests/unit/test_core.py', 'tests/unit/test_recovery.py', 'tests/unit/test_transition_queue.py', 'tests/unit/test_merge_queue.py', 'tests/unit/test_config.py', 'tests/integration/test_config_workflow.py', 'tests/integration/test_tui_pilot.py', 'tests/integration/test_orchestrator_lifecycle.py']
 code_patterns: ['asyncio.Condition 共享-独占门控', 'PhaseConfig → PhaseDefinition → _resolve_phase_config_static 字段传播', 'configure_main_path_gate 启动期就地配置']
 test_patterns: ['pytest-asyncio', 'asyncio.gather 并发竞争验证', 'reset_main_path_gate 测试辅助函数', 'asyncio.wait_for 超时断言']
 ---
@@ -50,7 +50,7 @@ Story C designing ┘
 
 - 新增 `parallel_safe` 配置并打通 `PhaseConfig -> PhaseDefinition -> _resolve_phase_config_static()` 传播链
 - 引入 `MainPathGate`，替换 `_main_path_limiter`
-- 适配全部 6 个生产代码调用点
+- 适配全部 8 个生产代码调用点
 - 更新相关测试与配置模板
 - 为 `max_planning_concurrent` 增加配置校验
 
@@ -59,7 +59,18 @@ Story C designing ┘
 - 单 story 内部阶段并行化
 - 状态机拓扑变更
 - 数据模型 / DB schema 改动
-- 对 agent 是否会在 planning 阶段执行 git 的行为约束增强
+
+**前提约束（Precondition — 非本 spec 实现但必须保证）：**
+
+Planning agent 在 `workspace: main` 上运行时 **不得执行 git 写操作**（add、commit、rebase、checkout 等）。当前仅通过 prompt 约束实现，这不是可执行保证。如果此前提被违反，MainPathGate 的共享模式假设（多个 planning 并发读写各自隔离路径）将失效，后果不是"性能退化"而是仓库状态污染。
+
+**fail-closed 要求：** 后续版本必须通过以下至少一种机制将此前提升级为可执行约束：
+
+1. **命令级 denylist**：CLI adapter 在 planning 阶段拦截 `git add/commit/rebase/checkout/reset` 等写操作
+2. **主工作区变更快照**：dispatch 前记录 `git status --porcelain` + HEAD sha，完成后比较，不一致则 fail + 告警
+3. **planning 改用 worktree 执行**：彻底消除对 main workspace 的共享假设
+
+在上述可执行约束落地前，本 spec 的并行安全性存在已知缺口，实施者须知晓此风险。
 
 ## Context for Development
 
@@ -103,6 +114,10 @@ Story C designing ┘
 | 4 | `src/ato/core.py` | `_handle_spec_batch_precommit` | spec batch retry |
 | 5 | `src/ato/transition_queue.py` | `_on_enter_dev_ready` | batch spec commit |
 | 6 | `src/ato/merge_queue.py` | `_run_regression_via_codex` | regression execution |
+| 7 | `src/ato/merge_queue.py` | `_run_merge_worker` / `_execute_merge` | merge to main（`checkout main` + `git merge --ff-only`，经由 `worktree_mgr.merge_to_main()`） |
+| 8 | `src/ato/core.py` | `_handle_approval_decision` | regression_failure → revert（经由 `worktree_mgr.revert_merge_range()`） |
+
+**⚠️ 注意：** 调用点 #7 和 #8 在本 spec 首次编写时被遗漏。`_execute_merge()` 执行 `git checkout main` + `git merge --ff-only`，`revert_merge_range()` 执行 `git revert`，两者都直接修改 main 仓库状态，必须在 gate 独占保护下执行。如果遗漏，AC#2 的互斥保证不成立。
 
 ### 配置字段传播链
 
@@ -254,6 +269,8 @@ def reset_main_path_gate(max_shared: int = 1) -> None:
 4. gate 单例不做惰性替换，只允许启动前就地配置，避免 split-brain。
 5. 新增 `ATOSettings.max_planning_concurrent: int = 3`，并要求校验 `>= 1`。
 6. `parallel_safe` 默认 `False`，保持后向兼容和 `settings=None` 时的保守回退。
+7. 当 `max_planning_concurrent > max_concurrent_agents` 时发出配置警告（`config_planning_exceeds_agents`）。**注意：** SubprocessManager 是实例级的（每次 dispatch 新建），其 `_semaphore` 不构成跨 dispatch 的全局上限（见"当前并发控制现状"章节）。因此 `max_concurrent_agents` 只限制单个 dispatch 内的子进程并发，不限制 MainPathGate 放行的跨 dispatch 总并发。警告的意义在于提示操作者：并发 planning dispatch 数量超过单 dispatch 子进程上限时，系统总资源消耗可能超出预期。**代码中的 warning 文案（`config.py`）须同步修正**，移除"超出部分将在 SubprocessManager 层排队"的错误表述。
+8. 当 `parallel_safe: true` 出现在非 `workspace: main` 的 phase 上时发出配置警告，因为该标志仅影响 MainPathGate 的获取模式，对 worktree 执行的 phase 无意义。
 
 ## Implementation Plan
 
@@ -359,7 +376,7 @@ finally:
 
 - Files: `src/ato/core.py`, `src/ato/transition_queue.py`, `src/ato/merge_queue.py`
 - Action:
-  - batch spec retry / batch spec commit / regression 全部改为 gate 独占模式
+  - batch spec retry / batch spec commit / regression / **merge to main / revert** 全部改为 gate 独占模式
 
 推荐写法：
 
@@ -374,6 +391,10 @@ async with gate.exclusive():
 - `src/ato/core.py::_handle_spec_batch_precommit`
 - `src/ato/transition_queue.py::_on_enter_dev_ready`
 - `src/ato/merge_queue.py::_run_regression_via_codex`
+- `src/ato/merge_queue.py::_run_merge_worker` — gate.exclusive() 应包裹整个 `_execute_merge()` 调用，因为 `merge_to_main()` 执行 `git checkout main` + `git merge --ff-only`
+- `src/ato/core.py::_handle_approval_decision` — 当 `atype == "regression_failure"` 且 `decision == "revert"` 时，`revert_merge_range()` 执行 `git revert`，必须在 gate.exclusive() 内
+
+**注意 gate 嵌套：** `_run_regression_via_codex` 已在内部获取 gate.exclusive()。当 `_run_merge_worker` 获取 gate 后调用 regression 时，regression 内部的 gate 获取会死锁。解决方式：将 merge worker 的 gate 范围设为仅覆盖 `_execute_merge()`，regression 保持自己的独立 gate 获取。
 
 ### Task 7: 测试适配
 
@@ -391,27 +412,40 @@ async with gate.exclusive():
 
 ### Task 8: 新增并发与配置测试
 
-- Files: `tests/unit/test_core.py`, `tests/unit/test_config.py`, `tests/integration/test_config_workflow.py`
+- Files: `tests/unit/test_core.py`, `tests/unit/test_config.py`, `tests/integration/test_config_workflow.py`, `tests/integration/test_tui_pilot.py`, `tests/integration/test_orchestrator_lifecycle.py`
 - Action:
   - gate 并发语义测试
   - `parallel_safe` 配置传播测试
   - `max_planning_concurrent` 校验测试
   - YAML -> settings -> phase definitions -> phase_cfg 的 round-trip 测试
+  - **TUI/CLI 回归验证**（对应 AC#10）：在 `test_tui_pilot.py` 中新增或扩展测试，验证并行 planning 场景下 dashboard 的等待态、审批可见性和恢复态展示不回归；在现有 CLI runner 测试中验证配置变更后的命令行输出一致性
 
 建议新增测试：
 
+**Gate 并发语义（必测）：**
+
 - `test_shared_mode_allows_concurrent`
+- `test_shared_mode_respects_max_cap` — 饱和测试：N > max_shared 个任务并发，验证同时持有数不超过 max_shared（如 5 任务 / max_shared=3 → 同时运行最多 3）
 - `test_exclusive_blocked_by_shared`
 - `test_shared_blocked_by_exclusive`
 - `test_shared_blocked_by_waiting_exclusive`
 - `test_exclusive_mutual_exclusion`
 - `test_gate_context_managers`
+- `test_busy_gate_rejects_reconfigure` — 当 gate 有持有者或等待者时，`configure()` 必须抛出 `RuntimeError`（对应 AC#7）
+
+**配置传播（必测）：**
+
 - `test_parallel_safe_field_in_phase_config`
 - `test_parallel_safe_default_false`
 - `test_parallel_safe_propagated_to_phase_definition`
 - `test_max_planning_concurrent_in_settings`
 - `test_invalid_max_planning_concurrent_rejected`
 - `test_parallel_safe_round_trip`
+
+**交叉校验（必测，对应 Review F-02/F-03）：**
+
+- `test_max_planning_concurrent_exceeds_agents_warns` — `max_planning_concurrent > max_concurrent_agents` 时发出 `config_planning_exceeds_agents` 级别警告
+- `test_parallel_safe_on_non_main_workspace_warns` — `parallel_safe: true` 配置在非 main workspace 的 phase 上时发出警告
 
 ## Acceptance Criteria
 
@@ -424,13 +458,45 @@ async with gate.exclusive():
 7. `MainPathGate` 不会在运行中被新的单例对象替换。
 8. `release_*()` 为 async，状态更新即时生效，不需要 `asyncio.sleep(0)` 或后台 task 才能解锁后继 waiter。
 9. `uv run pytest tests/unit/ tests/integration/` 无回归。
+10. 涉及 approval 队列可见性、recovery 恢复态、convergent-loop 状态的变更须通过 TUI pilot 测试（`tests/integration/test_tui_pilot.py`）和 CLI runner 测试（`typer.testing.CliRunner`）验证 dashboard 的等待态、恢复态、审批可见性不回归。
 
 ## Risks & Mitigations
 
 | 风险 | 概率 | 缓解措施 |
 |------|------|---------|
-| planning agent 意外在 main workspace 上执行 git 操作 | 中 | 通过 prompt 明确禁止；并明确说明这不是 gate 能解决的问题，后续若需要应单独增加行为约束或审计 |
+| planning agent 意外在 main workspace 上执行 git 操作 | 中 | **当前仅 prompt 约束，非可执行保证。** 后续版本须落地 fail-closed 机制（命令 denylist / 变更快照 / worktree 隔离，见 Scope 前提约束章节）。在此之前并行安全性有已知缺口 |
 | 写优先会让 planning 在独占请求密集时延迟 | 低 | 接受该 trade-off；独占操作稀疏且有界，若线上观察到问题再升级为 FIFO 公平门控 |
 | `max_planning_concurrent` 设置过高导致资源压力 | 中 | 默认值 3；通过配置文档提示按机器资源调优 |
 | 测试迁移遗漏旧 `Semaphore` 语义残留 | 中 | 全量 grep `get_main_path_limiter`, `reset_main_path_limiter`, `.locked()`, `async with limiter` 并逐一清理 |
 | startup 前未按约定配置 gate | 低 | 在 `Orchestrator._startup()` 早期统一调用 `configure_main_path_gate()`；独立测试显式 `reset_main_path_gate(n)` |
+
+## Review Notes
+
+- 对抗性代码审查已完成
+- 发现：8 条总计，6 条 real 已修复，2 条 noise 跳过
+- 解决方式：auto-fix
+- **以下修复已合并到正文对应章节（Technical Decisions #7/#8, 建议测试矩阵）：**
+  - F-01: `configure()` 添加安全注释说明同步读取在启动序下的安全性
+  - F-02: 添加 `max_planning_concurrent > max_concurrent_agents` 的交叉校验警告 → 已写入 Technical Decisions #7 + 测试矩阵
+  - F-03: 添加 `parallel_safe: true` 在非 main workspace phase 上的配置警告 → 已写入 Technical Decisions #8 + 测试矩阵
+  - F-04: 新增 shared 并发上限测试（5 任务 / max_shared=3 → cap=3）→ 已写入测试矩阵
+  - F-05: MainPathGate docstring 记录写优先饥饿 trade-off
+  - F-06: 确认 `reset_main_path_gate()` 已标注仅测试用
+
+### Spec 修补记录 Round 1（2026-04-01）
+
+针对 spec 后审查发现的 4 项问题：
+
+1. **（高）Git 安全 fail-closed 约束**：在 Scope 新增"前提约束"章节，明确 prompt 约束的不充分性和 3 种 fail-closed 升级路径
+2. **（中）AC 扩展 CLI/TUI 联动验证**：新增 AC#10，要求 approval/recovery/convergent-loop 变更通过 TUI pilot + CLI runner 验证
+3. **（中）补充核心不变量必测项**：测试矩阵新增 `test_shared_mode_respects_max_cap`（饱和）、`test_busy_gate_rejects_reconfigure`（lifecycle）、交叉校验警告测试
+4. **（低）Review Notes 回写正文**：F-02/F-03/F-04 的内容已合并到 Technical Decisions 和测试矩阵，消除正文/注释不一致
+
+### Spec 修补记录 Round 2（2026-04-01）
+
+针对第二轮审查发现的 4 项问题：
+
+1. **（高）遗漏 merge/revert 调用点**：调用点清单从 6 个扩展到 8 个，新增 `_run_merge_worker`（#7，`merge_to_main()` 执行 `git checkout main` + `git merge --ff-only`）和 `_handle_approval_decision` revert 路径（#8，`revert_merge_range()` 执行 `git revert`）。Task 6 同步更新，并补充 gate 嵌套注意事项（regression 内部已有独立 gate 获取，merge worker 的 gate 范围不能包裹 regression）
+2. **（中）Technical Decision #7 错误心智模型**：修正"超出部分将在 SubprocessManager 层排队"的表述。SubprocessManager 是实例级限流（每次 dispatch 新建），不构成跨 dispatch 全局上限。同步修正 `src/ato/config.py` 中的 warning 文案
+3. **（中）files_to_modify / Task 8 未覆盖 AC#10**：frontmatter 和 Task 8 补入 `tests/integration/test_tui_pilot.py` + `tests/integration/test_orchestrator_lifecycle.py`，消除实施计划与验收标准的 traceability 断裂
+4. **（中）status 降级**：从 `complete` 改为 `complete-with-known-gaps`，反映 Precondition 中声明的 fail-closed 约束尚未闭合

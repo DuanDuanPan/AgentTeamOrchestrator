@@ -1523,3 +1523,175 @@ class TestEvaluateSkipCondition:
     def test_double_not(self, story_no_ui: StoryRecord) -> None:
         result = evaluate_skip_condition("not not story.has_ui", story_no_ui)
         assert result is False  # not not False == False
+
+
+# ---------------------------------------------------------------------------
+# parallel_safe 配置字段测试
+# ---------------------------------------------------------------------------
+
+
+class TestParallelSafeConfig:
+    """parallel_safe 字段在 PhaseConfig / PhaseDefinition / phase_cfg 中的传播。"""
+
+    def test_parallel_safe_field_in_phase_config(self) -> None:
+        """PhaseConfig 默认 parallel_safe=False。"""
+        from ato.config import PhaseConfig
+
+        pc = PhaseConfig(
+            name="creating",
+            role="dev",
+            type="structured_job",
+            next_on_success="done",
+        )
+        assert pc.parallel_safe is False
+
+    def test_parallel_safe_explicit_true(self) -> None:
+        """PhaseConfig 可以显式设置 parallel_safe=True。"""
+        from ato.config import PhaseConfig
+
+        pc = PhaseConfig(
+            name="creating",
+            role="dev",
+            type="structured_job",
+            next_on_success="done",
+            parallel_safe=True,
+        )
+        assert pc.parallel_safe is True
+
+    def test_parallel_safe_default_false_in_phase_definition(self) -> None:
+        """PhaseDefinition 默认 parallel_safe=False。"""
+        pd = PhaseDefinition(
+            name="x",
+            role="dev",
+            cli_tool="claude",
+            model=None,
+            sandbox=None,
+            phase_type="structured_job",
+            next_on_success="done",
+            next_on_failure=None,
+            timeout_seconds=1800,
+        )
+        assert pd.parallel_safe is False
+
+    def test_parallel_safe_propagated_to_phase_definition(self) -> None:
+        """parallel_safe: true 从 PhaseConfig 传播到 PhaseDefinition。"""
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "creating",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "main",
+                    "parallel_safe": True,
+                },
+            ],
+        )
+        defs = build_phase_definitions(settings)
+        assert len(defs) == 1
+        assert defs[0].parallel_safe is True
+
+    def test_parallel_safe_false_propagated(self) -> None:
+        """parallel_safe: false（默认）也正确传播。"""
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "merging",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "main",
+                },
+            ],
+        )
+        defs = build_phase_definitions(settings)
+        assert defs[0].parallel_safe is False
+
+    def test_parallel_safe_in_resolve_phase_config_static(self) -> None:
+        """_resolve_phase_config_static 返回 parallel_safe 字段。"""
+        from ato.recovery import RecoveryEngine
+
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "creating",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "workspace": "main",
+                    "parallel_safe": True,
+                },
+            ],
+        )
+        cfg = RecoveryEngine._resolve_phase_config_static(settings, "creating")
+        assert cfg["parallel_safe"] is True
+
+    def test_parallel_safe_absent_when_settings_none(self) -> None:
+        """settings=None 时 _resolve_phase_config_static 返回空 dict。"""
+        from ato.recovery import RecoveryEngine
+
+        cfg = RecoveryEngine._resolve_phase_config_static(None, "creating")
+        assert cfg == {}
+        assert cfg.get("parallel_safe", False) is False
+
+
+# ---------------------------------------------------------------------------
+# max_planning_concurrent 配置测试
+# ---------------------------------------------------------------------------
+
+
+class TestMaxPlanningConcurrent:
+    """max_planning_concurrent 配置字段校验。"""
+
+    def test_max_planning_concurrent_in_settings(self) -> None:
+        """ATOSettings 默认 max_planning_concurrent=3。"""
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "working",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                },
+            ],
+        )
+        assert settings.max_planning_concurrent == 3
+
+    def test_max_planning_concurrent_custom_value(self) -> None:
+        """max_planning_concurrent 可以自定义。"""
+        settings = ATOSettings(
+            roles={"dev": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "working",
+                    "role": "dev",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                },
+            ],
+            max_planning_concurrent=5,
+        )
+        assert settings.max_planning_concurrent == 5
+
+    def test_invalid_max_planning_concurrent_rejected(self, tmp_path: Path) -> None:
+        """max_planning_concurrent < 1 被领域验证拒绝。"""
+        yaml_content = """\
+roles:
+  dev:
+    cli: claude
+
+phases:
+  - name: working
+    role: dev
+    type: structured_job
+    next_on_success: done
+
+max_planning_concurrent: 0
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match="max_planning_concurrent 必须 >= 1"):
+            load_config(p)
