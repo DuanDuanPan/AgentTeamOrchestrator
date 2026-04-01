@@ -731,6 +731,9 @@ class TestProcessApprovalDecisions:
                 expected_artifact="restart_requested",
             )
             await db.execute("UPDATE tasks SET phase = 'reviewing' WHERE task_id = 't1'")
+            await db.execute(
+                "UPDATE stories SET current_phase = 'reviewing' WHERE story_id = 'test-story-1'"
+            )
             await db.commit()
         finally:
             await db.close()
@@ -805,6 +808,9 @@ class TestProcessApprovalDecisions:
             await db.execute(
                 "UPDATE tasks SET phase = 'fixing', role = 'developer' "
                 "WHERE task_id = 't-fix-placeholder'"
+            )
+            await db.execute(
+                "UPDATE stories SET current_phase = 'fixing' WHERE story_id = 'test-story-1'"
             )
             await db.commit()
         finally:
@@ -1484,6 +1490,9 @@ class TestConvergentRestartSingleApproval:
                 expected_artifact="restart_requested",
             )
             await db.execute("UPDATE tasks SET phase = 'reviewing' WHERE task_id = 't-conv-1'")
+            await db.execute(
+                "UPDATE stories SET current_phase = 'reviewing' WHERE story_id = 'test-story-conv'"
+            )
             await db.commit()
         finally:
             await db.close()
@@ -3919,12 +3928,16 @@ class TestBatchRestartWorkspaceBranches:
         mock_adapter.execute.assert_not_called()
 
     async def test_batch_restart_worktree_workspace_with_worktree_uses_it(
-        self, initialized_db_path: Path
+        self, initialized_db_path: Path, tmp_path: Path
     ) -> None:
         """workspace: worktree 且 worktree_path 存在时使用 worktree_path 作为 cwd。"""
         from ato.config import ATOSettings
         from ato.models.db import get_connection, update_story_worktree_path
         from ato.models.schemas import AdapterResult, TaskRecord
+
+        # 使用真实存在的目录（Bug 3 fix 会验证目录存在性）
+        wt_dir = tmp_path / "wt-fix"
+        wt_dir.mkdir()
 
         settings = ATOSettings(
             roles={
@@ -3952,7 +3965,10 @@ class TestBatchRestartWorkspaceBranches:
                 "cli_tool = 'claude', expected_artifact = 'restart_requested' "
                 "WHERE task_id = 't-ws3'"
             )
-            await update_story_worktree_path(db, "s-ws3", "/tmp/wt-fix")
+            await db.execute(
+                "UPDATE stories SET current_phase = 'fixing' WHERE story_id = 's-ws3'"
+            )
+            await update_story_worktree_path(db, "s-ws3", str(wt_dir))
             await db.commit()
         finally:
             await db.close()
@@ -3982,10 +3998,10 @@ class TestBatchRestartWorkspaceBranches:
 
         mock_adapter.execute.assert_called_once()
         options = mock_adapter.execute.call_args[0][1]
-        assert options["cwd"] == "/tmp/wt-fix"
+        assert options["cwd"] == str(wt_dir)
 
     async def test_batch_restart_fixing_context_continues_convergent_loop(
-        self, initialized_db_path: Path
+        self, initialized_db_path: Path, tmp_path: Path
     ) -> None:
         """fixing restart 成功后应提交 fix_done，并继续触发 convergent-loop 后续 rereview。"""
         from ato.config import ATOSettings
@@ -4037,7 +4053,13 @@ class TestBatchRestartWorkspaceBranches:
                     ),
                 ),
             )
-            await update_story_worktree_path(db, "s-fix-followup", "/tmp/wt-followup")
+            await db.execute(
+                "UPDATE stories SET current_phase = 'fixing' "
+                "WHERE story_id = 's-fix-followup'"
+            )
+            wt_dir = tmp_path / "wt-followup"
+            wt_dir.mkdir()
+            await update_story_worktree_path(db, "s-fix-followup", str(wt_dir))
             await db.commit()
         finally:
             await db.close()
@@ -4083,4 +4105,4 @@ class TestBatchRestartWorkspaceBranches:
         assert event.event_name == "fix_done"
         mock_continue.assert_awaited_once()
         assert mock_continue.await_args is not None
-        assert mock_continue.await_args.kwargs["worktree_path"] == "/tmp/wt-followup"
+        assert mock_continue.await_args.kwargs["worktree_path"] == str(wt_dir)

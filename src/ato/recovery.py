@@ -680,7 +680,34 @@ class RecoveryEngine:
         - convergent_loop: 通过 ConvergentLoop.run_first_review() 走完整质量门控
         - structured_job: 后台 re-dispatch（遵守 config）+ transition
         """
-        from ato.models.db import get_connection, update_task_status
+        from ato.models.db import get_connection, get_story, update_task_status
+
+        # --- Phase 一致性校验 ---
+        # 防止 story 已推进到下一阶段后，旧阶段的 stale task 被重新调度。
+        db = await get_connection(self._db_path)
+        try:
+            story = await get_story(db, task.story_id)
+        finally:
+            await db.close()
+        if story is None or story.current_phase != task.phase:
+            logger.info(
+                "recovery_reschedule_phase_mismatch",
+                task_id=task.task_id,
+                story_id=task.story_id,
+                task_phase=task.phase,
+                story_phase=story.current_phase if story else None,
+            )
+            db2 = await get_connection(self._db_path)
+            try:
+                await update_task_status(
+                    db2,
+                    task.task_id,
+                    "failed",
+                    error_message="superseded_phase_mismatch",
+                )
+            finally:
+                await db2.close()
+            return
 
         db = await get_connection(self._db_path)
         try:

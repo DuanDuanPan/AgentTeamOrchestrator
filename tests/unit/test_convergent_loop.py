@@ -3748,8 +3748,13 @@ class TestConvergenceRateThreshold:
         assert result.converged is True
 
     @pytest.mark.asyncio
-    async def test_threshold_not_met(self, initialized_db_path: Any) -> None:
-        """Task 6.3: 收敛率 < threshold 即使无 blocking → 不收敛。"""
+    async def test_suggestion_only_always_converges(self, initialized_db_path: Any) -> None:
+        """Task 6.3 (updated): suggestion-only 不阻止收敛。
+
+        convergence_rate 只统计 blocking findings。当 DB 中只有 suggestion 时，
+        blocking 集合为空 → rate=1.0，且 no_open_blocking=True → converged。
+        这修复了 suggestion-only findings 导致无限循环的 bug。
+        """
         story = _make_story(story_id="story-below")
         db = await get_connection(initialized_db_path)
         try:
@@ -3792,8 +3797,8 @@ class TestConvergenceRateThreshold:
         loop, _sub, _bmad, _tq = _make_loop(initialized_db_path, parse_result=parse_result)
 
         result = await loop.run_rereview(story.story_id, 2, "/tmp/wt")
-        # rate = 1/5 = 0.2 < 0.5, even though no blocking → not converged
-        assert result.converged is False
+        # blocking findings 为空 → rate=1.0 ≥ 0.5, no_open_blocking=True → converged
+        assert result.converged is True
 
     @pytest.mark.asyncio
     async def test_threshold_met_but_open_blocking(self, initialized_db_path: Any) -> None:
@@ -4217,9 +4222,13 @@ class TestConvergenceRateDedupRegression:
         assert rate == 0.0
 
     def test_mixed_hashes_with_duplicates(self) -> None:
-        """2 个不同逻辑 finding，其中一个有重复行。"""
+        """2 个不同逻辑 finding，其中一个有重复行。
+
+        convergence_rate 只统计 blocking findings。suggestion 类型的
+        finding B 不计入分母/分子，因此只有 blocking finding A（closed）→ 1.0。
+        """
         findings = [
-            # 逻辑 finding A: 2 条 DB 行，均 closed
+            # 逻辑 finding A: 2 条 DB 行，均 closed (blocking)
             _make_finding_record_for_rereview(
                 story_id="s-mix",
                 finding_id="f-a1",
@@ -4236,7 +4245,7 @@ class TestConvergenceRateDedupRegression:
                 rule_id="RA",
                 status="closed",
             ),
-            # 逻辑 finding B: 1 条 DB 行，open
+            # 逻辑 finding B: 1 条 DB 行，open (suggestion — 不计入 rate)
             _make_finding_record_for_rereview(
                 story_id="s-mix",
                 finding_id="f-b1",
@@ -4247,8 +4256,8 @@ class TestConvergenceRateDedupRegression:
             ),
         ]
         rate = ConvergentLoop._calculate_convergence_rate(findings)
-        # 2 个逻辑 finding：A closed, B open → 1/2 = 0.5
-        assert rate == 0.5
+        # blocking 只有 A（closed）→ 1/1 = 1.0；suggestion B 不参与计算
+        assert rate == 1.0
 
     @pytest.mark.asyncio
     async def test_first_review_dedup_on_persist(self, initialized_db_path: Any) -> None:

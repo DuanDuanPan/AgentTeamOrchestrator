@@ -1080,7 +1080,7 @@ class Orchestrator:
         Interactive phase → SubprocessManager.dispatch_interactive()（开新终端）
         Non-interactive phase → SubprocessManager.dispatch_with_retry()（后台子进程）
         """
-        from ato.models.db import update_task_status
+        from ato.models.db import get_story, update_task_status
 
         db = await get_connection(self._db_path)
         try:
@@ -1155,6 +1155,19 @@ class Orchestrator:
         }
 
         for task in rescheduled:
+            # --- Phase 一致性校验：task.phase 必须匹配 story.current_phase ---
+            # 防止 story 已推进到下一阶段后，旧阶段的 stale pending task 被 dispatch。
+            db_check = await get_connection(self._db_path)
+            try:
+                story = await get_story(db_check, task.story_id)
+            finally:
+                await db_check.close()
+            if story is None or story.current_phase != task.phase:
+                await _mark_superseded(
+                    task, reason="superseded_phase_mismatch"
+                )
+                continue
+
             dispatch_key = self._restart_dispatch_key(task)
             if task.task_id in self._inflight_restart_dispatches:
                 logger.debug(
@@ -1809,6 +1822,16 @@ class Orchestrator:
                 await db.close()
 
             worktree_path = story.worktree_path if story else None
+
+            # DB 中的 worktree_path 可能是 stale 的（merge 阶段删除了磁盘目录但
+            # 未清空 DB 字段）。检查目录是否实际存在，不存在则视为 None。
+            if worktree_path is not None and not Path(worktree_path).is_dir():
+                logger.warning(
+                    "batch_restart_worktree_stale",
+                    story_id=task.story_id,
+                    worktree_path=worktree_path,
+                )
+                worktree_path = None
 
             # workspace: worktree 但缺 worktree → 尝试创建
             if workspace == "worktree" and worktree_path is None:

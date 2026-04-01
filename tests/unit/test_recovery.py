@@ -72,12 +72,13 @@ def _make_story(
     story_id: str,
     *,
     worktree_path: str | None = None,
+    current_phase: str = "developing",
 ) -> StoryRecord:
     return StoryRecord(
         story_id=story_id,
         title=f"Test Story {story_id}",
         status="in_progress",
-        current_phase="developing",
+        current_phase=current_phase,
         worktree_path=worktree_path,
         created_at=_NOW,
         updated_at=_NOW,
@@ -523,7 +524,7 @@ class TestRecoveryActions:
         """structured_job phase: 后台 dispatch + transition event。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="creating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="creating"),
@@ -563,7 +564,7 @@ class TestRecoveryActions:
         """dev_ready phase reschedule 提交 start_dev 事件。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="dev_ready"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="dev_ready"),
@@ -601,7 +602,7 @@ class TestRecoveryActions:
         """Story 9.4: 旧 DB 中 phase='planning' 的 task reschedule 应提交 create_done 事件。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="planning"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="planning"),
@@ -642,7 +643,7 @@ class TestRecoveryActions:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="reviewing"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="reviewing"),
@@ -705,7 +706,7 @@ class TestRecoveryActions:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -762,7 +763,7 @@ class TestRecoveryActions:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="qa_testing"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="qa_testing"),
@@ -851,7 +852,7 @@ class TestRecoveryProgressLogging:
     ) -> None:
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="creating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="creating"),
@@ -905,7 +906,7 @@ class TestRecoveryProgressLogging:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s-validate", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s-validate", worktree_path="/tmp/wt", current_phase="validating"))
             await insert_task(
                 db,
                 _make_task(
@@ -977,7 +978,7 @@ class TestRecoveryProgressLogging:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="creating"))
             await update_story_worktree_path(db, "s1", "/tmp/test-worktree")
             await insert_task(
                 db,
@@ -1053,7 +1054,7 @@ class TestRecoveryProgressLogging:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="creating"))
             await update_story_worktree_path(db, "s1", "/tmp/test-worktree")
             await insert_task(
                 db,
@@ -1113,7 +1114,7 @@ class TestRecoveryDispatchRetry:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="creating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="creating"),
@@ -1173,7 +1174,7 @@ class TestRecoveryDispatchRetry:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="reviewing"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="reviewing"),
@@ -1560,7 +1561,7 @@ class TestConvergentLoopPromptFormat:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -1614,7 +1615,7 @@ class TestConvergentLoopPromptFormat:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="qa_testing"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="qa_testing"),
@@ -2166,7 +2167,7 @@ class TestDispatchErrorFallback:
         """structured_job dispatch 内部异常 → task 标 failed + 创建 approval。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", current_phase="creating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="creating"),
@@ -2228,7 +2229,7 @@ class TestRecoveryCostNoneFallback:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2297,7 +2298,7 @@ class TestRecoveryCostNoneFallback:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2395,7 +2396,7 @@ class TestConvergentLoopGenericBranchModelPassthrough:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2456,7 +2457,7 @@ class TestConvergentLoopGenericBranchModelPassthrough:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2944,7 +2945,7 @@ class TestCreatingDispatchUsesHelper:
         """AC4: recovery._dispatch_structured_job creating 路径经过 helper。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s-create"))
+            await insert_story(db, _make_story("s-create", current_phase="creating"))
             await insert_task(
                 db,
                 _make_task(
@@ -3004,7 +3005,7 @@ class TestTemplateContextBriefingPreservation:
         """creating 走模板分支时，task.context_briefing 仍拼入 prompt。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s-ctx"))
+            await insert_story(db, _make_story("s-ctx", current_phase="creating"))
             task = _make_task(
                 "t-ctx",
                 "s-ctx",
@@ -3048,7 +3049,7 @@ class TestTemplateContextBriefingPreservation:
         """designing 走模板分支时，task.context_briefing 也保留。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s-des"))
+            await insert_story(db, _make_story("s-des", current_phase="designing"))
             task = _make_task(
                 "t-des",
                 "s-des",
@@ -3089,7 +3090,7 @@ class TestTemplateContextBriefingPreservation:
         """context_briefing 为 None 时，模板输出不带 'Previous context' 后缀。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s-noctx"))
+            await insert_story(db, _make_story("s-noctx", current_phase="creating"))
             await insert_task(
                 db,
                 _make_task(
@@ -3838,7 +3839,7 @@ class TestWorkspaceAwareDispatch:
         db = await get_connection(initialized_db_path)
         try:
             # story 无 worktree_path
-            await insert_story(db, _make_story("s-ws", worktree_path=None))
+            await insert_story(db, _make_story("s-ws", worktree_path=None, current_phase="creating"))
             await insert_task(
                 db,
                 _make_task(
@@ -3944,7 +3945,7 @@ class TestWorkspaceAwareDispatch:
         db = await get_connection(initialized_db_path)
         try:
             # story 有 worktree，但 dev_ready 是 workspace: main
-            await insert_story(db, _make_story("s-dr", worktree_path="/tmp/wt"))
+            await insert_story(db, _make_story("s-dr", worktree_path="/tmp/wt", current_phase="dev_ready"))
             await insert_task(
                 db,
                 _make_task(
@@ -4054,7 +4055,7 @@ class TestWorkspaceAwareDispatch:
         db = await get_connection(initialized_db_path)
         try:
             # story 无 worktree_path
-            await insert_story(db, _make_story("s-fix", worktree_path=None))
+            await insert_story(db, _make_story("s-fix", worktree_path=None, current_phase="fixing"))
             await insert_task(
                 db,
                 _make_task(

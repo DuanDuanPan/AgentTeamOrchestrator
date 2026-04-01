@@ -498,19 +498,23 @@ class ConvergentLoop:
 
     @staticmethod
     def _calculate_convergence_rate(findings: Sequence[FindingRecord]) -> float:
-        """基于当前已持久化的 findings snapshot 计算 closed / total。
+        """基于当前已持久化的 **blocking** findings snapshot 计算 closed / total。
+
+        只统计 severity=="blocking" 的 findings，suggestion 不影响收敛率。
+        这与 first-review 的收敛判定保持一致（只看 blocking count）。
 
         按 dedup_hash 逻辑去重：同一 dedup_hash 可能对应多条 DB 行
         （首轮 parser 返回重复 finding 或跨轮次 new finding），
         只要该 hash 下**任一**记录仍为 open/still_open 就视为未关闭。
 
-        当 findings 为空时返回 1.0（无 finding = 自然收敛）。
+        当 blocking findings 为空时返回 1.0（无 blocking finding = 自然收敛）。
         """
-        if not findings:
+        blocking = [f for f in findings if f.severity == "blocking"]
+        if not blocking:
             return 1.0
         # 按 dedup_hash 分组，取每组的"最差"状态
         by_hash: dict[str, bool] = {}  # hash → is_closed
-        for f in findings:
+        for f in blocking:
             if f.dedup_hash not in by_hash:
                 by_hash[f.dedup_hash] = f.status == "closed"
             else:
@@ -1341,6 +1345,11 @@ class ConvergentLoop:
         finally:
             await db.close()
 
+        # Re-review prompt 只传 blocking findings 给 reviewer，减少无效 token 开销。
+        # suggestion 不阻塞收敛、fixer 也不修 suggestion，无需 reviewer 报告。
+        # 但 matching 仍使用完整 previous_findings，让 suggestion 正常进入 closed 状态。
+        blocking_for_prompt = [f for f in previous_findings if f.severity == "blocking"]
+
         # --- structlog: round start ---
         logger.info(
             "convergent_loop_round_start",
@@ -1349,10 +1358,12 @@ class ConvergentLoop:
             phase="reviewing",
             scope="narrowed",
             previous_open_count=len(previous_findings),
+            blocking_in_prompt=len(blocking_for_prompt),
+            skipped_suggestions=len(previous_findings) - len(blocking_for_prompt),
         )
 
         # --- Build scoped re-review prompt ---
-        rereview_prompt = self._build_rereview_prompt(previous_findings, resolved_path)
+        rereview_prompt = self._build_rereview_prompt(blocking_for_prompt, resolved_path)
         # Story 9.1d: 附加 UX 上下文（manifest 存在时）
         rereview_prompt = self._append_ux_context(story_id, rereview_prompt)
 

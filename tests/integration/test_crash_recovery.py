@@ -231,7 +231,7 @@ class TestFourRecoveryScenarios:
         """AC4: Structured Job 无 artifact → reschedule → 后台 dispatch + transition。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", phase="creating"))
             # 使用 creating（structured_job），不是 reviewing（convergent_loop）
             await insert_task(db, _make_running_task("t1", "s1", pid=99999, phase="creating"))
         finally:
@@ -267,7 +267,7 @@ class TestFourRecoveryScenarios:
         """dev_ready phase reschedule 提交 start_dev 事件。"""
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1"))
+            await insert_story(db, _make_story("s1", phase="dev_ready"))
             await insert_task(db, _make_running_task("t1", "s1", pid=99999, phase="dev_ready"))
         finally:
             await db.close()
