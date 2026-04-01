@@ -332,6 +332,7 @@ async def _init_async(project_path: Path, db_path: Path) -> None:
 def batch_select(
     epics_file: Path | None = typer.Option(None, "--epics-file", help="Epics 文件路径"),
     db_path: Path | None = typer.Option(None, "--db-path", help="SQLite 数据库路径"),
+    config_path: Path | None = typer.Option(None, "--config", help="ato.yaml 配置文件路径"),
     max_stories: int = typer.Option(5, "--max-stories", help="推荐 batch 最大 story 数"),
     story_ids: str | None = typer.Option(
         None,
@@ -367,9 +368,26 @@ def batch_select(
         )
         raise typer.Exit(code=EXIT_ENV_ERROR)
 
+    # 读取 max_planning_concurrent 配置（降级为 1 = 串行）
+    max_planning = 1
+    resolved_config = _resolve_config_path(config_path, resolved_db)
+    if resolved_config is not None:
+        try:
+            settings = load_config(resolved_config)
+            max_planning = settings.max_planning_concurrent
+        except Exception:
+            logger.warning("batch_select_config_load_failed", exc_info=True)
+
     try:
         asyncio.run(
-            _batch_select_async(resolved_db, resolved_epics, max_stories, story_ids, use_llm)
+            _batch_select_async(
+                resolved_db,
+                resolved_epics,
+                max_stories,
+                story_ids,
+                use_llm,
+                max_initial_active=max_planning,
+            )
         )
     except click.exceptions.Exit:
         raise
@@ -384,6 +402,8 @@ async def _batch_select_async(
     max_stories: int,
     story_ids: str | None,
     use_llm: bool = False,
+    *,
+    max_initial_active: int = 1,
 ) -> None:
     from ato.batch import (
         BatchProposal,
@@ -555,7 +575,12 @@ async def _batch_select_async(
                         selected_indices.append(idx)
 
         # 确认 batch（返回实际写入数量，排除不可回退 stories）
-        batch, actual_count = await confirm_batch(db, proposal, selected_indices=selected_indices)
+        batch, actual_count = await confirm_batch(
+            db,
+            proposal,
+            selected_indices=selected_indices,
+            max_initial_active=max_initial_active,
+        )
         typer.echo(f"✅ Batch 已创建 ({batch.batch_id[:8]}...)，包含 {actual_count} 个 stories。")
 
     finally:

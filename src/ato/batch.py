@@ -525,8 +525,14 @@ async def confirm_batch(
     db: aiosqlite.Connection,
     proposal: BatchProposal,
     selected_indices: list[int] | None = None,
+    *,
+    max_initial_active: int = 1,
 ) -> tuple[BatchRecord, int]:
     """在单个事务内原子完成 batch 创建。
+
+    Args:
+        max_initial_active: 初始激活（进入 creating）的 story 数量上限。
+            默认 1（串行 planning），设为 >1 时前 N 个 story 并行进入 creating。
 
     Returns:
         (BatchRecord, int): 创建的 batch 记录和实际写入 batch 的 story 数量。
@@ -613,7 +619,7 @@ async def confirm_batch(
                         info.story_key,
                         info.title,
                         "backlog",
-                        "queued" if seq > 0 else "creating",
+                        "creating" if seq < max_initial_active else "queued",
                         None,
                         int(info.has_ui),
                         now_iso,
@@ -621,20 +627,22 @@ async def confirm_batch(
                     ),
                 )
             else:
-                # 更新已存在 story 的 has_ui（batch select 可能重新设置）
-                await db.execute(
-                    "UPDATE stories SET has_ui = ? WHERE story_id = ?",
-                    (int(info.has_ui), info.story_key),
-                )
+                # 仅当 info.has_ui=True 时覆盖（LLM 推荐主动标注）；
+                # 默认 False 时保留 DB 原值，避免 --story-ids 路径误清。
+                if info.has_ui:
+                    await db.execute(
+                        "UPDATE stories SET has_ui = ? WHERE story_id = ?",
+                        (1, info.story_key),
+                    )
 
             await db.execute(
                 "INSERT INTO batch_stories (batch_id, story_id, sequence_no) VALUES (?, ?, ?)",
                 (batch_id, info.story_key, seq),
             )
 
-        # 5. 更新状态：seq=0 → planning(status) + creating(phase)，其余 → queued
+        # 5. 更新状态：前 max_initial_active 个 → planning + creating，其余 → queued
         for seq, info in enumerate(actionable):
-            if seq == 0:
+            if seq < max_initial_active:
                 await db.execute(
                     "UPDATE stories SET status = ?, current_phase = ?, "
                     "updated_at = ? WHERE story_id = ?",
