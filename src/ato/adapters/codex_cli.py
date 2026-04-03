@@ -322,11 +322,39 @@ class CodexAdapter(BaseAdapter):
         self,
         stdout: asyncio.StreamReader,
         on_progress: ProgressCallback | None,
+        *,
+        idle_timeout: float = 300,
     ) -> list[dict[str, Any]]:
-        """逐行读取 JSONL stdout，收集事件列表并透传 ProgressEvent。"""
+        """逐行读取 JSONL stdout，收集事件列表并透传 ProgressEvent。
+
+        Args:
+            idle_timeout: 连续无输出的最大秒数。超时后抛出 TimeoutError，
+                由调用方 execute() 的 ``except TimeoutError`` 统一处理。
+        """
         events: list[dict[str, Any]] = []
         while True:
-            line = await stdout.readline()
+            try:
+                line = await asyncio.wait_for(
+                    stdout.readline(),
+                    timeout=idle_timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "codex_stream_idle_timeout",
+                    idle_seconds=idle_timeout,
+                )
+                if on_progress is not None:
+                    with contextlib.suppress(Exception):
+                        await on_progress(
+                            ProgressEvent(
+                                event_type="error",
+                                summary=f"空闲超时 ({idle_timeout}s 无输出)",
+                                cli_tool="codex",
+                                timestamp=datetime.now(tz=UTC),
+                                raw={},
+                            )
+                        )
+                raise
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()
@@ -362,15 +390,26 @@ class CodexAdapter(BaseAdapter):
         # 如果需要结构化输出但未指定 output_file，使用临时文件
         temp_dir: tempfile.TemporaryDirectory[str] | None = None
         output_file_path: Path | None = None
-        managed_output_file = False
         output_file_mtime_ns_before: int | None = None
         output_file_size_before: int | None = None
 
+        # Codex CLI --output-schema 需要文件路径而非内联 JSON 字符串
+        if opts.get("output_schema"):
+            if temp_dir is None:
+                temp_dir = tempfile.TemporaryDirectory()
+            schema_file = Path(temp_dir.name) / "output_schema.json"
+            schema_val = opts["output_schema"]
+            schema_file.write_text(
+                schema_val if isinstance(schema_val, str) else json.dumps(schema_val),
+                encoding="utf-8",
+            )
+            opts = {**opts, "output_schema": str(schema_file)}
+
         if opts.get("output_schema") and not opts.get("output_file"):
-            temp_dir = tempfile.TemporaryDirectory()
+            if temp_dir is None:
+                temp_dir = tempfile.TemporaryDirectory()
             output_file_path = Path(temp_dir.name) / "codex_output.json"
             opts = {**opts, "output_file": str(output_file_path)}
-            managed_output_file = True
         elif opts.get("output_file"):
             output_file_path = Path(str(opts["output_file"]))
 
@@ -390,6 +429,7 @@ class CodexAdapter(BaseAdapter):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 limit=16 * 1024 * 1024,  # 16MB — MCP 工具可能返回超大 JSON
+                start_new_session=True,  # PID == PGID，使 cleanup 可杀整个进程组
             )
             stderr_task = asyncio.create_task(drain_stderr(proc.stderr))  # type: ignore[arg-type]
             try:
@@ -398,10 +438,12 @@ class CodexAdapter(BaseAdapter):
 
                 # timeout 覆盖整个子进程生命周期（stdout + stderr + wait），
                 # 而非仅 _consume_stream，防止进程关闭 stdout 后僵死
+                idle_timeout: float = opts.get("idle_timeout", 300)
                 async with asyncio.timeout(timeout_seconds):
                     events = await self._consume_stream(
                         proc.stdout,  # type: ignore[arg-type]
                         on_progress,
+                        idle_timeout=idle_timeout,
                     )
                     stderr = await stderr_task
                     await proc.wait()
@@ -571,5 +613,5 @@ class CodexAdapter(BaseAdapter):
             )
             return result
         finally:
-            if managed_output_file and temp_dir is not None:
+            if temp_dir is not None:
                 temp_dir.cleanup()

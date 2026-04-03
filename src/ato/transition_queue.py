@@ -545,8 +545,19 @@ class TransitionQueue:
             )
 
     async def _on_story_done(self, db: aiosqlite.Connection, story_id: str) -> None:
-        """Story 完成后的 post-commit hook：里程碑通知 + batch 完成检测。"""
+        """Story 完成后的 post-commit hook：worktree 清理 + 里程碑通知 + batch 完成检测。"""
         from ato.models.db import complete_batch, get_active_batch, get_batch_progress
+
+        # Worktree cleanup — 兜底清理，无论经由哪条路径到达 done
+        try:
+            from ato.core import derive_project_root
+            from ato.worktree_mgr import WorktreeManager
+
+            project_root = derive_project_root(self._db_path)
+            mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+            await mgr.cleanup(story_id)
+        except Exception:
+            logger.warning("worktree_cleanup_on_done_failed", story_id=story_id, exc_info=True)
 
         send_user_notification("milestone", f"Story {story_id} 已完成！")
 

@@ -206,8 +206,14 @@ class ClaudeAdapter(BaseAdapter):
         self,
         stdout: asyncio.StreamReader,
         on_progress: ProgressCallback | None,
+        *,
+        idle_timeout: float = 300,
     ) -> dict[str, Any] | None:
         """逐行读取 stream-json stdout，收集 result 事件并透传 ProgressEvent。
+
+        Args:
+            idle_timeout: 连续无输出的最大秒数。超时后抛出 TimeoutError，
+                由调用方 execute() 的 ``except TimeoutError`` 统一处理。
 
         Returns:
             result 事件 dict，或 None（如果未收到 result 事件）。
@@ -215,7 +221,28 @@ class ClaudeAdapter(BaseAdapter):
         """
         result_data: dict[str, Any] | None = None
         while True:
-            line = await stdout.readline()
+            try:
+                line = await asyncio.wait_for(
+                    stdout.readline(),
+                    timeout=idle_timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "claude_stream_idle_timeout",
+                    idle_seconds=idle_timeout,
+                )
+                if on_progress is not None:
+                    with contextlib.suppress(Exception):
+                        await on_progress(
+                            ProgressEvent(
+                                event_type="error",
+                                summary=f"空闲超时 ({idle_timeout}s 无输出)",
+                                cli_tool="claude",
+                                timestamp=datetime.now(tz=UTC),
+                                raw={},
+                            )
+                        )
+                raise
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()
@@ -256,6 +283,7 @@ class ClaudeAdapter(BaseAdapter):
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             limit=16 * 1024 * 1024,  # 16MB — MCP 工具可能返回超大 JSON
+            start_new_session=True,  # PID == PGID，使 cleanup 可杀整个进程组
         )
         stderr_task = asyncio.create_task(drain_stderr(proc.stderr))  # type: ignore[arg-type]
         try:
@@ -264,13 +292,32 @@ class ClaudeAdapter(BaseAdapter):
 
             # timeout 覆盖整个子进程生命周期（stdout + stderr + wait），
             # 而非仅 _consume_stream，防止进程关闭 stdout 后僵死
+            idle_timeout: float = (options or {}).get("idle_timeout", 300)
+            post_result_timeout: float = (options or {}).get(
+                "post_result_timeout",
+                30,
+            )
             async with asyncio.timeout(timeout_seconds):
                 result_data = await self._consume_stream(
                     proc.stdout,  # type: ignore[arg-type]
                     on_progress,
+                    idle_timeout=idle_timeout,
                 )
-                stderr = await stderr_task
-                await proc.wait()
+                # Post-result: 短超时等待进程退出。
+                # _consume_stream 返回后 stdout 已 EOF，进程*应该*很快退出，
+                # 但 orphan 子进程（如 pnpm lint）可能导致 proc.wait() 阻塞。
+                try:
+                    async with asyncio.timeout(post_result_timeout):
+                        stderr = await stderr_task
+                        await proc.wait()
+                except TimeoutError:
+                    logger.warning(
+                        "claude_post_result_timeout",
+                        post_result_seconds=post_result_timeout,
+                        has_result=result_data is not None,
+                    )
+                    await cleanup_process(proc, timeout=3)
+                    stderr = stderr_task.result() if stderr_task.done() else ""
         except TimeoutError as exc:
             if on_progress:
                 with contextlib.suppress(Exception):

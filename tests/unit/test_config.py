@@ -85,8 +85,10 @@ class TestValidConfigLoad:
         config = load_config(p)
         assert config.convergent_loop.max_rounds == 3
         assert config.convergent_loop.convergence_threshold == 0.5
-        assert config.timeout.structured_job == 1800
+        assert config.timeout.structured_job == 3600
         assert config.timeout.interactive_session == 7200
+        assert config.timeout.idle_timeout == 300
+        assert config.timeout.post_result_timeout == 30
         assert config.cost is None
         assert config.model_map == {}
 
@@ -793,7 +795,7 @@ class TestBuildPhaseDefinitions:
         assert d.phase_type == "structured_job"
         assert d.next_on_success == "done"
         assert d.next_on_failure is None
-        assert d.timeout_seconds == 1800
+        assert d.timeout_seconds == 3600
 
     def test_cli_tool_from_role(self, tmp_path: Path) -> None:
         """cli_tool 从 RoleConfig.cli 解析。"""

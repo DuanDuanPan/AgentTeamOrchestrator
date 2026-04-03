@@ -860,6 +860,12 @@ class RecoveryEngine:
         if timeout and task.cli_tool == "claude":
             opts["max_turns"] = max(1, timeout // 60)
 
+        # 传递 timeout 配置给 adapter（避免使用 adapter 默认的 1800s）
+        if self._settings:
+            opts["timeout"] = self._settings.timeout.structured_job
+            opts.setdefault("idle_timeout", self._settings.timeout.idle_timeout)
+            opts.setdefault("post_result_timeout", self._settings.timeout.post_result_timeout)
+
         return opts or None
 
     async def _get_story_worktree(self, story_id: str) -> str | None:
@@ -1012,6 +1018,11 @@ class RecoveryEngine:
             reviewer_opts["model"] = phase_cfg["model"]
         if phase_cfg.get("sandbox"):
             reviewer_opts["sandbox"] = phase_cfg["sandbox"]
+        if self._settings:
+            _to = self._settings.timeout
+            reviewer_opts["timeout"] = _to.structured_job
+            reviewer_opts["idle_timeout"] = _to.idle_timeout
+            reviewer_opts["post_result_timeout"] = _to.post_result_timeout
         return phase_cfg.get("max_concurrent", 4), reviewer_opts or None
 
     def _build_convergent_loop(
@@ -1546,6 +1557,11 @@ class RecoveryEngine:
                 model = phase_cfg.get("model")
                 if model:
                     dispatch_opts["model"] = model
+                if self._settings:
+                    _to = self._settings.timeout
+                    dispatch_opts["timeout"] = _to.structured_job
+                    dispatch_opts["idle_timeout"] = _to.idle_timeout
+                    dispatch_opts["post_result_timeout"] = _to.post_result_timeout
 
                 result = await mgr.dispatch_with_retry(
                     story_id=task.story_id,

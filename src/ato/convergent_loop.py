@@ -1109,6 +1109,10 @@ class ConvergentLoop:
         fix_prompt = self._build_fix_prompt(blocking_findings, resolved_path)
         fix_opts: dict[str, Any] = {"cwd": resolved_path}
         self._apply_profile_options(fix_opts, fix_profile)
+        # 传递 timeout 配置（来自 reviewer_options）
+        for _tk in ("timeout", "idle_timeout", "post_result_timeout"):
+            if _tk in self._reviewer_options:
+                fix_opts.setdefault(_tk, self._reviewer_options[_tk])
 
         result = await self._subprocess_mgr.dispatch_with_retry(
             story_id=story_id,
@@ -1372,6 +1376,10 @@ class ConvergentLoop:
         review_profile = self._get_review_profile(stage)
         rereview_opts: dict[str, Any] = {"cwd": resolved_path}
         self._apply_profile_options(rereview_opts, review_profile)
+        # timeout/idle_timeout/post_result_timeout 始终从 reviewer_options 继承
+        for _tk in ("timeout", "idle_timeout", "post_result_timeout"):
+            if _tk in self._reviewer_options:
+                rereview_opts.setdefault(_tk, self._reviewer_options[_tk])
         if stage == "standard":
             rereview_opts.update(self._reviewer_options)
         result = await self._subprocess_mgr.dispatch_with_retry(

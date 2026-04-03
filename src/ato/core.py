@@ -1163,9 +1163,7 @@ class Orchestrator:
             finally:
                 await db_check.close()
             if story is None or story.current_phase != task.phase:
-                await _mark_superseded(
-                    task, reason="superseded_phase_mismatch"
-                )
+                await _mark_superseded(task, reason="superseded_phase_mismatch")
                 continue
 
             dispatch_key = self._restart_dispatch_key(task)
@@ -1934,6 +1932,9 @@ class Orchestrator:
                 options["reasoning_effort"] = reasoning_effort
             if reasoning_summary_format := phase_cfg.get("reasoning_summary_format"):
                 options["reasoning_summary_format"] = reasoning_summary_format
+            options["timeout"] = self._settings.timeout.structured_job
+            options["idle_timeout"] = self._settings.timeout.idle_timeout
+            options["post_result_timeout"] = self._settings.timeout.post_result_timeout
 
             result = await mgr.dispatch_with_retry(
                 story_id=task.story_id,
@@ -2116,9 +2117,9 @@ class Orchestrator:
                     continue
                 if story_id in stories_with_decided_auth:
                     continue
-                # 跳过已在 merge queue 中的
+                # 跳过已在 merge queue 中的（failed 条目除外，允许重试）
                 entry = await get_merge_queue_entry(db, story_id)
-                if entry is not None:
+                if entry is not None and entry.status != "failed":
                     continue
 
                 # 收集审批上下文（AC2 — 阶段转换、成本、CL 轮次）

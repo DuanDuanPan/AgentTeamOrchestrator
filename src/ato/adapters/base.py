@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -13,13 +16,32 @@ from ato.models.schemas import AdapterResult, ProgressCallback
 ProcessStartCallback = Callable[[asyncio.subprocess.Process], Awaitable[None]]
 
 
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill 整个进程组（含 orphan 子进程）。降级为 proc.kill()。
+
+    当进程以 ``start_new_session=True`` 启动时，PID == PGID，
+    ``os.killpg`` 可杀死整个进程组树。
+    """
+    pid = proc.pid
+    if pid is None:
+        proc.kill()
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+
 async def cleanup_process(
     proc: asyncio.subprocess.Process,
     timeout: int = 5,
 ) -> None:
-    """三阶段清理协议：SIGTERM → wait(timeout) → SIGKILL → wait。
+    """三阶段清理协议：SIGTERM → wait(timeout) → SIGKILL(pgid) → wait。
 
-    所有 subprocess 调用必须在 ``try/finally`` 中调用此函数。
+    当进程以 ``start_new_session=True`` 启动时，SIGKILL 阶段通过
+    ``os.killpg`` 杀死整个进程组（含孤儿子进程），防止 orphan grandchild
+    导致 ``proc.wait()`` 永久阻塞。
     """
     if proc.returncode is not None:
         return
@@ -29,7 +51,7 @@ async def cleanup_process(
         return
     except TimeoutError:
         pass
-    proc.kill()
+    _kill_process_group(proc)
     await proc.wait()  # kill 后必须 wait，防止 zombie
 
 

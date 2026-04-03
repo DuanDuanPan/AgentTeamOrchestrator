@@ -100,8 +100,10 @@ class TimeoutConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    structured_job: int = 1800
+    structured_job: int = 3600
     interactive_session: int = 7200
+    idle_timeout: int = 300
+    post_result_timeout: int = 30
 
 
 class CostConfig(BaseModel):
@@ -348,8 +350,7 @@ def _validate_config(config: ATOSettings) -> None:
                 "config_parallel_safe_ignored",
                 phase=phase.name,
                 workspace=resolved_ws,
-                hint="parallel_safe: true 仅对 workspace: main 的阶段有效，"
-                "此设置将被忽略",
+                hint="parallel_safe: true 仅对 workspace: main 的阶段有效，此设置将被忽略",
             )
 
     # 验证角色引用
@@ -446,6 +447,10 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
             raise ConfigError("配置错误：cost.budget_per_story 必须 > 0")
         if config.cost.blocking_threshold < 0:
             raise ConfigError("配置错误：cost.blocking_threshold 必须 >= 0")
+    if config.timeout.idle_timeout <= 0:
+        raise ConfigError("配置错误：timeout.idle_timeout 必须 > 0")
+    if config.timeout.post_result_timeout <= 0:
+        raise ConfigError("配置错误：timeout.post_result_timeout 必须 > 0")
     if config.polling_interval <= 0:
         raise ConfigError("配置错误：polling_interval 必须 > 0")
 
