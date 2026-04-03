@@ -21,7 +21,7 @@ from ato.models.db import (
     set_current_merge_story,
     set_merge_queue_frozen,
 )
-from ato.models.schemas import StoryRecord
+from ato.models.schemas import CLIAdapterError, StoryRecord
 
 _NOW = datetime.now(tz=UTC)
 _EARLIER = _NOW - timedelta(minutes=5)
@@ -468,19 +468,20 @@ class TestMergeQueueClass:
         finally:
             await db.close()
 
-    async def test_rebase_conflict_escalates_on_failure(self, initialized_db_path: Path) -> None:
+    async def test_rebase_conflict_escalates_when_disabled(self, initialized_db_path: Path) -> None:
+        """max_attempts=0 时直接 escalate 给操作者。"""
         queue, worktree_mgr, _ = self._make_queue(initialized_db_path)
+        queue._settings.merge_conflict_resolution_max_attempts = 0
         await _insert_test_story(initialized_db_path, "s1")
 
         worktree_mgr.get_conflict_files = AsyncMock(return_value=["file1.py", "file2.py"])
-        worktree_mgr.continue_rebase = AsyncMock(return_value=(False, "still conflicting"))
+        worktree_mgr.get_path = AsyncMock(return_value=Path("/fake/worktree"))
         worktree_mgr.abort_rebase = AsyncMock()
 
         result = await queue._handle_rebase_conflict("s1", "CONFLICT in file1.py")
         assert result is False
-        worktree_mgr.continue_rebase.assert_not_awaited()
+        worktree_mgr.abort_rebase.assert_awaited_once()
 
-        # Should have created a rebase_conflict approval
         from ato.models.db import get_pending_approvals
 
         db = await get_connection(initialized_db_path)
@@ -490,6 +491,79 @@ class TestMergeQueueClass:
             assert len(conflict_approvals) == 1
         finally:
             await db.close()
+
+    async def test_rebase_conflict_escalates_when_no_worktree(
+        self, initialized_db_path: Path
+    ) -> None:
+        """worktree 不存在时直接 escalate。"""
+        queue, worktree_mgr, _ = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        worktree_mgr.get_conflict_files = AsyncMock(return_value=["file1.py"])
+        worktree_mgr.get_path = AsyncMock(return_value=None)
+        worktree_mgr.abort_rebase = AsyncMock()
+
+        result = await queue._handle_rebase_conflict("s1", "CONFLICT in file1.py")
+        assert result is False
+
+    async def test_rebase_conflict_agent_resolves_successfully(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """agent 成功解决冲突后 rebase --continue 成功。"""
+        queue, worktree_mgr, _ = self._make_queue(initialized_db_path)
+        queue._settings.merge_conflict_resolution_max_attempts = 1
+        await _insert_test_story(initialized_db_path, "s1")
+
+        worktree_mgr.get_path = AsyncMock(return_value=Path("/fake/worktree"))
+        # agent 解决后无剩余冲突文件
+        worktree_mgr.get_conflict_files = AsyncMock(
+            side_effect=[["file1.py"], []],
+        )
+        worktree_mgr.continue_rebase = AsyncMock(return_value=(True, ""))
+        worktree_mgr.abort_rebase = AsyncMock()
+
+        with (
+            patch("ato.subprocess_mgr.SubprocessManager") as mock_mgr_cls,
+            patch("ato.adapters.claude_cli.ClaudeAdapter"),
+        ):
+            mock_mgr_inst = AsyncMock()
+            mock_mgr_cls.return_value = mock_mgr_inst
+            mock_mgr_inst.dispatch_with_retry = AsyncMock(return_value=MagicMock())
+
+            result = await queue._handle_rebase_conflict("s1", "CONFLICT in file1.py")
+
+        assert result is True
+        worktree_mgr.continue_rebase.assert_awaited_once()
+        worktree_mgr.abort_rebase.assert_not_awaited()
+
+    async def test_rebase_conflict_agent_fails_then_escalates(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """agent 失败后 escalate 给操作者。"""
+        queue, worktree_mgr, _ = self._make_queue(initialized_db_path)
+        queue._settings.merge_conflict_resolution_max_attempts = 1
+        await _insert_test_story(initialized_db_path, "s1")
+
+        worktree_mgr.get_path = AsyncMock(return_value=Path("/fake/worktree"))
+        worktree_mgr.get_conflict_files = AsyncMock(return_value=["file1.py"])
+        worktree_mgr.abort_rebase = AsyncMock()
+
+        with (
+            patch("ato.subprocess_mgr.SubprocessManager") as mock_mgr_cls,
+            patch("ato.adapters.claude_cli.ClaudeAdapter"),
+        ):
+            mock_mgr_inst = AsyncMock()
+            mock_mgr_cls.return_value = mock_mgr_inst
+            mock_mgr_inst.dispatch_with_retry = AsyncMock(
+                side_effect=CLIAdapterError("agent crashed", exit_code=1),
+            )
+
+            result = await queue._handle_rebase_conflict("s1", "CONFLICT in file1.py")
+
+        assert result is False
+        worktree_mgr.abort_rebase.assert_awaited_once()
 
     async def test_precommit_failure_creates_approval(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)

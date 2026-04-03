@@ -124,6 +124,51 @@ and test suite autonomously. Look for pytest, unittest, jest, cargo test, go tes
 other standard test runners. Execute the full test suite you discover."""
 
 
+def _build_conflict_resolution_prompt(
+    conflict_files: list[str],
+    conflict_output: str,
+    attempt: int,
+) -> str:
+    """构建 rebase 冲突解决的 Claude agent prompt。"""
+    files_list = "\n".join(f"  - {f}" for f in conflict_files)
+    retry_note = ""
+    if attempt > 0:
+        retry_note = (
+            f"\n\nThis is retry attempt #{attempt + 1}. "
+            "Previous attempt did not fully resolve all conflicts. "
+            "Pay closer attention to the conflict markers and ensure "
+            "every conflicted file is resolved correctly."
+        )
+    return f"""\
+You are resolving git rebase merge conflicts in this worktree.
+
+## Conflicted files
+{files_list}
+
+## Git output
+```
+{conflict_output[:2000]}
+```
+
+## Instructions
+
+1. Read each conflicted file listed above.
+2. Understand both sides of the conflict (HEAD vs incoming changes).
+3. Resolve each conflict by editing the file to produce correct, working code
+   that integrates both sides appropriately.
+4. After resolving, run `git add <file>` for each resolved file.
+5. Do NOT run `git rebase --continue` — the orchestrator will handle that.
+6. Do NOT create new commits.
+
+Important:
+- Remove ALL conflict markers (<<<<<<< , =======, >>>>>>>).
+- Ensure the resolved code compiles/parses correctly.
+- Prefer preserving both sides' intent when possible.
+- If changes are incompatible, prefer the incoming (feature branch) version
+  but adapt it to work with the current HEAD state.{retry_note}
+"""
+
+
 def _build_regression_prompt(repo_root: Path, settings: ATOSettings) -> str:
     """构建 regression runner 的 Codex prompt。
 
@@ -519,16 +564,17 @@ class MergeQueue:
 
         # Step 1: Rebase worktree onto main
         logger.info("merge_rebase_started", story_id=story_id)
-        success, stderr = await self._worktree_mgr.rebase_onto_main(
+        success, rebase_output = await self._worktree_mgr.rebase_onto_main(
             story_id,
             timeout_seconds=self._settings.merge_rebase_timeout,
         )
 
         if not success:
-            # 检测冲突
-            if "CONFLICT" in stderr:
+            # 检测冲突 — git 将 "CONFLICT" 输出到 stdout，
+            # rebase_output 已合并 stdout+stderr。
+            if "CONFLICT" in rebase_output:
                 logger.info("merge_rebase_conflict", story_id=story_id)
-                resolved = await self._handle_rebase_conflict(story_id, stderr)
+                resolved = await self._handle_rebase_conflict(story_id, rebase_output)
                 if not resolved:
                     # escalate — approval 已创建，清理 current
                     await self._clear_current_merge_story_lock(
@@ -537,8 +583,9 @@ class MergeQueue:
                     )
                     return
             else:
-                # 非冲突的 rebase 失败
-                logger.error("merge_rebase_failed", story_id=story_id, stderr=stderr)
+                # 非冲突的 rebase 失败 — 尝试 abort 残留 rebase 状态
+                await self._worktree_mgr.abort_rebase(story_id)
+                logger.error("merge_rebase_failed", story_id=story_id, stderr=rebase_output)
                 await self._mark_merge_failed_and_release_lock(
                     story_id,
                     context="rebase_failed",
@@ -939,27 +986,157 @@ class MergeQueue:
     async def _handle_rebase_conflict(
         self,
         story_id: str,
-        conflict_stderr: str,
+        conflict_output: str,
     ) -> bool:
         """处理 rebase 冲突：调度 agent 修复，失败则 escalate。
+
+        流程（FR52）：
+        1. 获取冲突文件列表
+        2. 循环尝试调度 Claude agent 解决冲突（最多 max_attempts 次）
+        3. agent 解决后执行 ``git rebase --continue``
+        4. 全部 commit 应用完毕 → 返回 True
+        5. 所有尝试失败 → abort rebase，创建 approval escalate 给操作者
 
         Returns:
             True 表示冲突已解决，False 表示需要人工介入。
         """
-        # 获取冲突文件列表
+        import uuid
+
+        from ato.adapters.claude_cli import ClaudeAdapter
+        from ato.subprocess_mgr import SubprocessManager
+
         conflict_files = await self._worktree_mgr.get_conflict_files(story_id)
+        worktree_path = await self._worktree_mgr.get_path(story_id)
 
         max_attempts = self._settings.merge_conflict_resolution_max_attempts
-        if max_attempts > 0:
+        if max_attempts <= 0 or worktree_path is None:
+            # 配置禁用自动解决或 worktree 不存在，直接 escalate
             logger.info(
-                "merge_conflict_auto_resolve_skipped",
+                "merge_conflict_auto_resolve_disabled",
                 story_id=story_id,
-                configured_attempts=max_attempts,
+                max_attempts=max_attempts,
                 conflict_files=conflict_files,
-                note="No automated conflict resolver is wired in the current MVP",
+            )
+            return await self._escalate_rebase_conflict(
+                story_id,
+                conflict_files,
+                conflict_output,
             )
 
-        # 自动解决失败，abort rebase 并 escalate
+        adapter = ClaudeAdapter()
+        mgr = SubprocessManager(
+            max_concurrent=1,
+            adapter=adapter,
+            db_path=self._db_path,
+        )
+
+        for attempt in range(max_attempts):
+            # 每轮重新获取冲突文件（上一轮可能部分解决）
+            if attempt > 0:
+                conflict_files = await self._worktree_mgr.get_conflict_files(story_id)
+                if not conflict_files:
+                    # 冲突已全部解决，尝试 continue
+                    break
+
+            logger.info(
+                "merge_conflict_agent_dispatch",
+                story_id=story_id,
+                attempt=attempt + 1,
+                max_attempts=max_attempts,
+                conflict_files=conflict_files,
+            )
+
+            prompt = _build_conflict_resolution_prompt(
+                conflict_files,
+                conflict_output,
+                attempt,
+            )
+            task_id = str(uuid.uuid4())
+            opts: dict[str, Any] = {"cwd": str(worktree_path)}
+
+            try:
+                await mgr.dispatch_with_retry(
+                    story_id=story_id,
+                    phase="merge_conflict_resolution",
+                    role="developer",
+                    cli_tool="claude",
+                    prompt=prompt,
+                    options=opts,
+                    task_id=task_id,
+                    max_retries=0,
+                )
+            except CLIAdapterError:
+                logger.warning(
+                    "merge_conflict_agent_failed",
+                    story_id=story_id,
+                    attempt=attempt + 1,
+                )
+                continue
+
+            # agent 完成后检查是否还有冲突文件
+            remaining = await self._worktree_mgr.get_conflict_files(story_id)
+            if remaining:
+                logger.warning(
+                    "merge_conflict_still_unresolved",
+                    story_id=story_id,
+                    remaining_files=remaining,
+                    attempt=attempt + 1,
+                )
+                continue
+
+            # 无冲突文件，尝试 rebase --continue
+            break
+        else:
+            # 所有尝试用尽，escalate
+            logger.error(
+                "merge_conflict_auto_resolve_exhausted",
+                story_id=story_id,
+                attempts=max_attempts,
+            )
+            return await self._escalate_rebase_conflict(
+                story_id,
+                conflict_files,
+                conflict_output,
+            )
+
+        # 冲突已解决，循环 rebase --continue 直到所有 commit 应用完毕
+        # （rebase 可能在后续 commit 再次产生冲突）
+        continue_success, continue_output = await self._worktree_mgr.continue_rebase(
+            story_id,
+        )
+        if not continue_success:
+            if "CONFLICT" in continue_output:
+                # 后续 commit 又有冲突 — 递归处理
+                logger.info(
+                    "merge_conflict_subsequent_commit",
+                    story_id=story_id,
+                )
+                return await self._handle_rebase_conflict(
+                    story_id,
+                    continue_output,
+                )
+            # 其他 rebase --continue 错误
+            logger.error(
+                "merge_rebase_continue_failed",
+                story_id=story_id,
+                stderr=continue_output,
+            )
+            return await self._escalate_rebase_conflict(
+                story_id,
+                conflict_files,
+                continue_output,
+            )
+
+        logger.info("merge_conflict_resolved", story_id=story_id)
+        return True
+
+    async def _escalate_rebase_conflict(
+        self,
+        story_id: str,
+        conflict_files: list[str],
+        conflict_output: str,
+    ) -> bool:
+        """Abort rebase 并创建 approval escalate 给操作者。"""
         await self._worktree_mgr.abort_rebase(story_id)
 
         from ato.approval_helpers import create_approval
@@ -974,7 +1151,7 @@ class MergeQueue:
                 payload_dict={
                     "options": ["manual_resolve", "skip", "abandon"],
                     "conflict_files": conflict_files,
-                    "stderr": conflict_stderr[:500],
+                    "stderr": conflict_output[:500],
                 },
             )
         finally:

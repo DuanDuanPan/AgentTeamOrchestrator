@@ -1493,7 +1493,22 @@ async def enqueue_merge(
     approved_at: datetime,
     enqueued_at: datetime,
 ) -> None:
-    """将 story 加入 merge queue。"""
+    """将 story 加入 merge queue。
+
+    若同一 story 已有 ``failed`` 状态的记录（retry 场景），
+    则更新为 ``waiting`` 而非插入新行，避免 UNIQUE 约束冲突。
+    """
+    # 先尝试将已有的 failed 记录重置为 waiting
+    cursor = await db.execute(
+        "UPDATE merge_queue SET approval_id = ?, approved_at = ?, "
+        "enqueued_at = ?, status = 'waiting' "
+        "WHERE story_id = ? AND status = 'failed'",
+        (approval_id, _dt_to_iso(approved_at), _dt_to_iso(enqueued_at), story_id),
+    )
+    if cursor.rowcount > 0:
+        await db.commit()
+        return
+
     await db.execute(
         "INSERT INTO merge_queue (story_id, approval_id, approved_at, enqueued_at, status) "
         "VALUES (?, ?, ?, ?, 'waiting')",

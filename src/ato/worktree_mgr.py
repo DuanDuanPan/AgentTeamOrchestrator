@@ -289,7 +289,9 @@ class WorktreeManager:
             timeout_seconds: 超时秒数，None 则使用默认值。
 
         Returns:
-            (success, stderr) 元组。
+            (success, combined_output) 元组。combined_output 包含
+            stdout + stderr，确保 git 输出的 ``CONFLICT`` 关键字
+            （位于 stdout）不会丢失。
         """
         worktree_path = await self.get_path(story_id)
         if worktree_path is None:
@@ -320,7 +322,7 @@ class WorktreeManager:
             rebase_target = "origin/main"
 
         # rebase onto target
-        returncode, _stdout, stderr = await self._run_git(
+        returncode, stdout, stderr = await self._run_git(
             "-C",
             str(worktree_path),
             "rebase",
@@ -328,23 +330,34 @@ class WorktreeManager:
             timeout_seconds=timeout,
         )
         if returncode != 0:
-            return False, stderr
+            # git rebase 将 "CONFLICT ..." 输出到 stdout，
+            # "error: could not apply ..." 输出到 stderr。
+            # 合并两者确保调用方能检测冲突关键字。
+            combined = stdout + stderr
+            return False, combined
 
         return True, ""
 
     async def continue_rebase(self, story_id: str) -> tuple[bool, str]:
-        """在 worktree 中执行 git rebase --continue。"""
+        """在 worktree 中执行 git rebase --continue。
+
+        Returns:
+            (success, combined_output) — 合并 stdout+stderr
+            确保 ``CONFLICT`` 关键字可被调用方检测。
+        """
         worktree_path = await self.get_path(story_id)
         if worktree_path is None:
             return False, f"No worktree found for story '{story_id}'"
 
-        returncode, _stdout, stderr = await self._run_git(
+        returncode, stdout, stderr = await self._run_git(
             "-C",
             str(worktree_path),
             "rebase",
             "--continue",
         )
-        return returncode == 0, stderr
+        if returncode != 0:
+            return False, stdout + stderr
+        return True, ""
 
     async def abort_rebase(self, story_id: str) -> None:
         """在 worktree 中执行 git rebase --abort。"""
@@ -611,9 +624,7 @@ class WorktreeManager:
         if rc_ls != 0:
             return False, f"git ls-files failed (rc={rc_ls}): {stderr_ls}"
 
-        has_changes = bool(
-            diff_out.strip() or staged_out.strip() or ls_out.strip()
-        )
+        has_changes = bool(diff_out.strip() or staged_out.strip() or ls_out.strip())
         if not has_changes:
             return True, "all spec files already committed (idempotent)"
 
@@ -626,7 +637,11 @@ class WorktreeManager:
         # 不吞 index 中其他已暂存的无关变更。
         commit_msg = f"spec(batch-{batch_id}): add validated story specifications"
         rc_commit, _stdout_commit, stderr_commit = await self._run_git(
-            "commit", "-m", commit_msg, "--", *paths_to_add,
+            "commit",
+            "-m",
+            commit_msg,
+            "--",
+            *paths_to_add,
         )
         if rc_commit != 0:
             return False, f"git commit failed: {stderr_commit}"
