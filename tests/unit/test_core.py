@@ -473,7 +473,7 @@ class TestProcessApprovalDecisions:
             await db.close()
 
     async def test_blocking_abnormal_consumed(self, initialized_db_path: Path) -> None:
-        """blocking 审批消费。"""
+        """blocking 审批消费——story 在 reviewing 阶段时发出 review_fail。"""
         await _insert_test_approval(
             initialized_db_path,
             approval_id="cccc3333-0000-0000-0000-000000000000",
@@ -481,13 +481,25 @@ class TestProcessApprovalDecisions:
             decision="confirm_fix",
         )
 
+        # 将 story 设为 reviewing（blocking_abnormal 只在 convergent loop 阶段产生）
+        from ato.models.db import get_connection
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE stories SET current_phase = 'reviewing' WHERE story_id = 'test-story-1'"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
         settings = _make_settings()
         orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
         # 需要 TQ 才能 submit transition
         orchestrator._tq = AsyncMock()
         await orchestrator._process_approval_decisions()
 
-        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+        from ato.models.db import get_decided_unconsumed_approvals
 
         db = await get_connection(initialized_db_path)
         try:
@@ -496,8 +508,66 @@ class TestProcessApprovalDecisions:
         finally:
             await db.close()
 
-        # 验证 TQ 收到了 transition event
+        # 验证 TQ 收到了 review_fail transition event
         orchestrator._tq.submit.assert_awaited_once()
+        submitted_event = orchestrator._tq.submit.call_args[0][0]
+        assert submitted_event.event_name == "review_fail"
+
+    @pytest.mark.parametrize(
+        "phase, expected_event",
+        [
+            ("reviewing", "review_fail"),
+            ("qa_testing", "qa_fail"),
+            ("uat", "uat_fail"),
+            ("regression", "regression_fail"),
+        ],
+    )
+    async def test_blocking_abnormal_confirm_fix_phase_aware(
+        self, initialized_db_path: Path, phase: str, expected_event: str
+    ) -> None:
+        """confirm_fix 应根据 story 当前 phase 发出正确的 fail 事件。"""
+        from ato.models.db import get_connection, insert_story
+        from ato.models.schemas import StoryRecord
+
+        story_id = f"phase-test-{phase}"
+        now = datetime.now(tz=UTC)
+
+        # 创建处于指定 phase 的 story
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id=story_id,
+                    title=f"Test {phase}",
+                    status="in_progress",
+                    current_phase=phase,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id=f"ba-{phase}-0000-0000-0000-000000000000",
+            approval_type="blocking_abnormal",
+            decision="confirm_fix",
+            story_id=story_id,
+        )
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+        await orchestrator._process_approval_decisions()
+
+        orchestrator._tq.submit.assert_awaited_once()
+        submitted_event = orchestrator._tq.submit.call_args[0][0]
+        assert submitted_event.event_name == expected_event, (
+            f"phase={phase}: expected {expected_event}, got {submitted_event.event_name}"
+        )
+        assert submitted_event.story_id == story_id
 
     async def test_approval_non_blocking_other_stories(self, initialized_db_path: Path) -> None:
         """审批等待不阻塞其他 story。
@@ -3965,9 +4035,7 @@ class TestBatchRestartWorkspaceBranches:
                 "cli_tool = 'claude', expected_artifact = 'restart_requested' "
                 "WHERE task_id = 't-ws3'"
             )
-            await db.execute(
-                "UPDATE stories SET current_phase = 'fixing' WHERE story_id = 's-ws3'"
-            )
+            await db.execute("UPDATE stories SET current_phase = 'fixing' WHERE story_id = 's-ws3'")
             await update_story_worktree_path(db, "s-ws3", str(wt_dir))
             await db.commit()
         finally:
@@ -4054,8 +4122,7 @@ class TestBatchRestartWorkspaceBranches:
                 ),
             )
             await db.execute(
-                "UPDATE stories SET current_phase = 'fixing' "
-                "WHERE story_id = 's-fix-followup'"
+                "UPDATE stories SET current_phase = 'fixing' WHERE story_id = 's-fix-followup'"
             )
             wt_dir = tmp_path / "wt-followup"
             wt_dir.mkdir()

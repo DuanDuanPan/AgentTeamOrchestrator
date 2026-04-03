@@ -2230,10 +2230,35 @@ class Orchestrator:
         if atype == "blocking_abnormal":
             if decision == "confirm_fix":
                 if self._tq is not None:
+                    # 根据 story 当前 phase 选择正确的 fail 事件:
+                    # reviewing → review_fail, qa_testing → qa_fail, etc.
+                    _phase_fail_events = {
+                        "reviewing": "review_fail",
+                        "qa_testing": "qa_fail",
+                        "uat": "uat_fail",
+                        "regression": "regression_fail",
+                    }
+                    from ato.models.db import get_story
+
+                    _db = await get_connection(self._db_path)
+                    try:
+                        _story = await get_story(_db, approval.story_id)
+                    finally:
+                        await _db.close()
+                    _phase = _story.current_phase if _story else "reviewing"
+                    _event = _phase_fail_events.get(_phase)
+                    if _event is None:
+                        logger.warning(
+                            "blocking_abnormal_confirm_fix_noop",
+                            story_id=approval.story_id,
+                            current_phase=_phase,
+                            reason="no fail event for current phase",
+                        )
+                        return True
                     await self._tq.submit(
                         TransitionEvent(
                             story_id=approval.story_id,
-                            event_name="review_fail",
+                            event_name=_event,
                             source="cli",
                             submitted_at=datetime.now(tz=UTC),
                         )
