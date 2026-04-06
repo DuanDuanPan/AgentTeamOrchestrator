@@ -1288,6 +1288,28 @@ class RecoveryEngine:
             )
             return
 
+        async def _cleanup_review_placeholder() -> None:
+            """清理 review placeholder（由 _dispatch_batch_restart 防竞态插入）。
+
+            必须在 continue_after_fix_success 完全结束后调用，
+            不能提前清理——BMAD parse 期间 placeholder 是防止 poll cycle
+            抢先 dispatch 的唯一屏障。
+            """
+            db_clean = await get_connection(self._db_path)
+            try:
+                cursor = await db_clean.execute(
+                    "UPDATE tasks SET status = 'completed', "
+                    "error_message = 'consumed_by_continue_after_fix' "
+                    "WHERE story_id = ? AND phase = 'reviewing' "
+                    "AND status = 'pending' "
+                    "AND expected_artifact = 'convergent_loop_review_placeholder'",
+                    (task.story_id,),
+                )
+                if cursor.rowcount > 0:
+                    await db_clean.commit()
+            finally:
+                await db_clean.close()
+
         max_concurrent, reviewer_options = self._resolve_reviewing_dispatch_options()
         loop = self._build_convergent_loop(
             story_id=task.story_id,
@@ -1296,12 +1318,17 @@ class RecoveryEngine:
         )
 
         rereview_round = fix_round + 1
-        result = await loop.run_rereview(
-            task.story_id,
-            rereview_round,
-            worktree_path=resolved_worktree,
-            stage=stage,
-        )
+        try:
+            result = await loop.run_rereview(
+                task.story_id,
+                rereview_round,
+                worktree_path=resolved_worktree,
+                stage=stage,
+            )
+        finally:
+            # 无论 rereview 成功/失败/异常，都要清理 placeholder
+            await _cleanup_review_placeholder()
+
         if result.converged or loop._is_abnormal_result(result):
             return
 
@@ -1995,29 +2022,57 @@ class RecoveryEngine:
             )
 
             if result.status == "success":
-                event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
-                if event_name is not None:
-                    # Design gate: designing phase 需要验证 UX 产出物
-                    if event_name == "design_done":
-                        # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
-                        self._generate_manifest_before_gate(task.story_id)
-                        gate_ok = await self._check_design_gate(task)
-                        if not gate_ok:
-                            return
+                # fixing phase: 走 convergent loop 控制流，不直接 transition
+                fix_round, _fix_stage = self._parse_fix_resume_context(task)
+                if task.phase == "fixing" and fix_round is not None:
+                    from ato.convergent_loop import ConvergentLoop
+
+                    await ConvergentLoop.insert_review_placeholder(
+                        story_id=task.story_id,
+                        db_path=self._db_path,
+                    )
                     await self._transition_queue.submit(
                         TransitionEvent(
                             story_id=task.story_id,
-                            event_name=event_name,
+                            event_name="fix_done",
                             source="agent",
                             submitted_at=datetime.now(tz=UTC),
                         )
+                    )
+                    await self.continue_after_fix_success(
+                        task,
+                        worktree_path=options.get("cwd") if options else None,
                     )
                     logger.info(
                         "recovery_dispatch_complete",
                         task_id=task.task_id,
                         story_id=task.story_id,
-                        transition_event=event_name,
+                        transition_event="fix_done",
                     )
+                else:
+                    event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
+                    if event_name is not None:
+                        # Design gate: designing phase 需要验证 UX 产出物
+                        if event_name == "design_done":
+                            # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
+                            self._generate_manifest_before_gate(task.story_id)
+                            gate_ok = await self._check_design_gate(task)
+                            if not gate_ok:
+                                return
+                        await self._transition_queue.submit(
+                            TransitionEvent(
+                                story_id=task.story_id,
+                                event_name=event_name,
+                                source="agent",
+                                submitted_at=datetime.now(tz=UTC),
+                            )
+                        )
+                        logger.info(
+                            "recovery_dispatch_complete",
+                            task_id=task.task_id,
+                            story_id=task.story_id,
+                            transition_event=event_name,
+                        )
             else:
                 logger.warning(
                     "recovery_dispatch_failed",

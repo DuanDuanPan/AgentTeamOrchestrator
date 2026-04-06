@@ -411,6 +411,13 @@ class ConvergentLoop:
             fix_round = global_round - 1
 
             # Step 1: Escalated fix (Codex fixer_escalation)
+            # Insert placeholder BEFORE dispatch to prevent poll-cycle race
+            # (same pattern as standard phase in run_rereview)
+            await self._insert_fix_placeholder(
+                story_id,
+                round_num=fix_round,
+                stage="escalated",
+            )
             logger.info(
                 "convergent_loop_escalated_fix_start",
                 story_id=story_id,
@@ -1191,6 +1198,40 @@ class ConvergentLoop:
             suggestion_count=0,
             open_count=len(blocking_findings),
         )
+
+    @staticmethod
+    async def insert_review_placeholder(
+        *,
+        story_id: str,
+        db_path: Path,
+    ) -> str:
+        """Insert a pending reviewing task to prevent poll-cycle race.
+
+        Used by ``_dispatch_batch_restart`` before submitting ``fix_done``
+        transition, so ``_dispatch_undispatched_stories`` sees the pending
+        task and skips the story.
+        """
+        from ato.models.db import get_connection, insert_task
+        from ato.models.schemas import TaskRecord
+
+        task_id = str(uuid.uuid4())
+        db = await get_connection(db_path)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=task_id,
+                    story_id=story_id,
+                    phase="reviewing",
+                    role="reviewer",
+                    cli_tool="codex",
+                    status="pending",
+                    expected_artifact="convergent_loop_review_placeholder",
+                ),
+            )
+        finally:
+            await db.close()
+        return task_id
 
     async def _insert_fix_placeholder(
         self,

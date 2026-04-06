@@ -2216,6 +2216,17 @@ class Orchestrator:
 
                 fix_round, _fix_stage = RecoveryEngine._parse_fix_resume_context(task)
                 if task.phase == "fixing" and fix_round is not None:
+                    # fixing 属于 convergent loop 控制流。提交 fix_done
+                    # transition 后，由 continue_after_fix_success 接管
+                    # re-review → escalation 的完整编排。
+                    # 必须先插入 reviewing placeholder 防止 poll cycle
+                    # 在 transition 后抢先 dispatch reviewing task。
+                    from ato.convergent_loop import ConvergentLoop
+
+                    await ConvergentLoop.insert_review_placeholder(
+                        story_id=task.story_id,
+                        db_path=self._db_path,
+                    )
                     await self._tq.submit(
                         TransitionEvent(
                             story_id=task.story_id,
@@ -2224,12 +2235,20 @@ class Orchestrator:
                             submitted_at=datetime.now(tz=UTC),
                         )
                     )
+                    from ato.config import build_phase_definitions
+
+                    phase_defs = build_phase_definitions(self._settings)
                     engine = RecoveryEngine(
                         db_path=self._db_path,
                         subprocess_mgr=None,
                         transition_queue=self._tq,
                         nudge=self._nudge,
                         settings=self._settings,
+                        convergent_loop_phases={
+                            pd.name
+                            for pd in phase_defs
+                            if pd.phase_type == "convergent_loop"
+                        },
                     )
                     await engine.continue_after_fix_success(
                         task,
