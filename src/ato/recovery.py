@@ -311,6 +311,151 @@ async def _build_creating_prompt_with_findings(
     )
 
 
+async def build_group_prompt(
+    phase: str,
+    story_ids: list[str],
+    db_path: Path,
+) -> str:
+    """为同一 phase 的多个 story 构建单会话批量 prompt。
+
+    采用"共享说明 + 每 story 变量表"结构，避免重复工作流/约束描述。
+    仅支持 structured_job 类型的 batchable 阶段（creating/designing）。
+    """
+    if len(story_ids) == 1:
+        return await _build_single_story_group_prompt(phase, story_ids[0], db_path)
+
+    template = _STRUCTURED_JOB_PROMPTS.get(phase)
+    if template is None:
+        msg = f"No structured_job prompt template for phase: {phase}"
+        raise ValueError(msg)
+
+    header = (
+        f"本次会话需要依次处理 {len(story_ids)} 个 story 的 {phase} 阶段。\n"
+        "请严格按顺序完成每个 story，完成一个后再处理下一个。\n"
+        "每个 story 的产出物相互独立，请确保每个都生成完整的输出文件。\n\n"
+    )
+
+    # creating: 模板短，直接拼接（含 per-story findings）
+    if phase == "creating":
+        blocks: list[str] = []
+        for i, sid in enumerate(story_ids, 1):
+            prompt = _format_structured_job_prompt(template, sid)
+            prompt = await _build_creating_prompt_with_findings(prompt, sid, db_path)
+            blocks.append(f"## Story {i}/{len(story_ids)}: {sid}\n\n{prompt}")
+        tail = (
+            "\n\n---\n\n"
+            "## 关键提醒\n\n"
+            "1. 每个 story 必须运行 /bmad-create-story 生成完整规格\n"
+            "2. 完成一个 story 后再处理下一个"
+        )
+        return header + "\n\n---\n\n".join(blocks) + tail
+
+    # designing: 共享工作流 + 每 story 路径表
+    if phase == "designing":
+        return header + _build_designing_group_body(story_ids)
+
+    # 其他 phase: fallback 到逐 story 拼接
+    blocks = []
+    for i, sid in enumerate(story_ids, 1):
+        prompt = _format_structured_job_prompt(template, sid)
+        blocks.append(f"## Story {i}/{len(story_ids)}: {sid}\n\n{prompt}")
+    return header + "\n\n---\n\n".join(blocks)
+
+
+async def _build_single_story_group_prompt(
+    phase: str, story_id: str, db_path: Path
+) -> str:
+    """单 story 时直接用原始模板，无 group 开销。"""
+    template = _STRUCTURED_JOB_PROMPTS.get(phase)
+    if template is None:
+        msg = f"No structured_job prompt template for phase: {phase}"
+        raise ValueError(msg)
+    prompt = _format_structured_job_prompt(template, story_id)
+    if phase == "creating":
+        prompt = await _build_creating_prompt_with_findings(prompt, story_id, db_path)
+    return prompt
+
+
+def _build_designing_group_body(story_ids: list[str]) -> str:
+    """designing 阶段：共享工作流说明 + 每 story 路径变量表。"""
+    from ato.design_artifacts import ARTIFACTS_REL, derive_design_artifact_paths_relative
+
+    # 每 story 的路径表
+    story_sections: list[str] = []
+    for i, sid in enumerate(story_ids, 1):
+        artifacts_dir = ARTIFACTS_REL
+        story_file = f"{artifacts_dir}/{sid}.md"
+        rel = derive_design_artifact_paths_relative(sid)
+        story_sections.append(
+            f"### Story {i}/{len(story_ids)}: {sid}\n\n"
+            f"| 变量 | 路径 |\n"
+            f"|------|------|\n"
+            f"| story_file | {story_file} |\n"
+            f"| ux_dir | {rel['ux_dir']} |\n"
+            f"| ux_spec | {rel['ux_spec']} |\n"
+            f"| template_pen | {rel['template_pen']} |\n"
+            f"| prototype_pen | {rel['prototype_pen']} |\n"
+            f"| snapshot_json | {rel['snapshot_json']} |\n"
+            f"| save_report_json | {rel['save_report_json']} |\n"
+            f"| exports_dir | {rel['exports_dir']} |"
+        )
+
+    shared_workflow = (
+        "## 共享工作流程（对每个 story 重复执行）\n\n"
+        "对下方列出的每个 story，依次执行以下步骤，"
+        "将路径变量表中的值代入对应位置：\n\n"
+        "1. **读取 story 规格** — 读取 `{story_file}` 理解功能需求和 AC\n"
+        "2. **运行 /frontend-design** — 生成 UX 设计规格，保存为 `{ux_spec}`\n"
+        "3. **准备 .pen 模板** — 从 `{template_pen}` 复制到 `{prototype_pen}`\n"
+        "4. **使用 Pencil MCP 编辑设计**\n"
+        '   a. open_document(filePath="{prototype_pen}")\n'
+        "   b. get_guidelines(topic) 获取设计指南\n"
+        "   c. get_style_guide_tags → get_style_guide(tags)\n"
+        "   d. batch_design(operations=...) 创建原型\n"
+        "   e. get_screenshot 验证设计\n"
+        "5. **强制落盘**\n"
+        '   a. batch_get(filePath="{prototype_pen}", readDepth=99, '
+        "includePathGeometry=true)\n"
+        "   b. 读取磁盘 `{prototype_pen}` (json.load)\n"
+        "   c. 保留顶层字段，仅替换 children\n"
+        "   d. 临时文件 + rename 原子写入回 `{prototype_pen}`\n"
+        "   e. 保存内存树为 `{snapshot_json}`\n"
+        "   f. 生成落盘报告 `{save_report_json}`\n"
+        "6. **落盘验证**\n"
+        "   a. json.load `{prototype_pen}` 确认解析成功\n"
+        '   b. batch_get(filePath="{prototype_pen}") 回读验证\n'
+        "   c. 写入 `{save_report_json}` 验证字段\n"
+        '7. **导出 PNG** — export_nodes(outputDir="{exports_dir}", ...)\n\n'
+        "## 产出物要求\n\n"
+        "每个 story 的 `{ux_dir}/` 目录下必须包含：\n"
+        "- ux-spec.md、prototype.pen、prototype.snapshot.json、"
+        "prototype.save-report.json、exports/*.png\n\n"
+        "## 重要约束\n\n"
+        "- .pen 模板必须先复制到目标路径再 open_document\n"
+        "- batch_design 在已打开文件上操作\n"
+        "- 不要用 batch_get 结果直接覆盖 .pen 文件\n"
+        "- 落盘后必须回读验证\n"
+        "- 不要跳过 export_nodes\n\n"
+    )
+
+    # 尾部关键约束提醒（Lost in the Middle: 结尾信息关注度最高）
+    tail_reminder = (
+        "\n\n---\n\n"
+        "## 关键提醒（请在处理每个 story 时重新确认）\n\n"
+        "1. 每个 story 必须独立执行完整 7 步流程\n"
+        "2. 落盘后必须回读验证，失败则中止\n"
+        "3. 不要跳过 export_nodes\n"
+        "4. 完成一个 story 后再处理下一个"
+    )
+
+    return (
+        shared_workflow
+        + "---\n\n"
+        + "\n\n---\n\n".join(story_sections)
+        + tail_reminder
+    )
+
+
 async def _build_developing_prompt_with_suggestion_findings(
     base_prompt: str,
     story_id: str,
@@ -801,6 +946,7 @@ class RecoveryEngine:
                     "reasoning_effort": pd.reasoning_effort,
                     "reasoning_summary_format": pd.reasoning_summary_format,
                     "parallel_safe": pd.parallel_safe,
+                    "batchable": pd.batchable,
                 }
         return {}
 

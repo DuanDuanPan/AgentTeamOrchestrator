@@ -63,6 +63,8 @@ roles:
 # type 取值：structured_job | convergent_loop | interactive_session
 # next_on_success: 成功后跳转的阶段（或 "done" 表示完成）
 # next_on_failure: 失败后跳转的阶段（可选）
+# parallel_safe: true 时走 MainPathGate 共享锁（允许多 story 并发持有）
+# batchable: true 时同 phase 的多个 story 合并到单个 LLM 会话依次处理（节省上下文加载成本）
 
 phases:
   - name: creating
@@ -71,6 +73,7 @@ phases:
     next_on_success: designing
     workspace: main
     parallel_safe: true
+    batchable: true
 
   - name: designing
     role: ux_designer
@@ -79,6 +82,7 @@ phases:
     workspace: main
     skip_when: "not story.has_ui"
     parallel_safe: true
+    batchable: true
 
   - name: validating
     role: validator

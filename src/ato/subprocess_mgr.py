@@ -499,6 +499,165 @@ class SubprocessManager:
         assert last_exc is not None
         raise last_exc
 
+    async def dispatch_group(
+        self,
+        *,
+        tasks: list[TaskRecord],
+        prompt: str,
+        cli_tool: CLITool,
+        options: dict[str, Any] | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> AdapterResult:
+        """单会话批量 dispatch：一个 CLI 会话处理多个 story。
+
+        所有 tasks 共享同一个 group_id，使用一个 semaphore slot。
+        第一个 task 作为"主 task"绑定 PID 和进度追踪。
+        """
+        from ato.models.db import (
+            get_connection,
+            insert_cost_log,
+            update_task_status,
+        )
+
+        if not tasks:
+            msg = "dispatch_group requires at least one task"
+            raise ValueError(msg)
+
+        primary_task = tasks[0]
+
+        structlog.contextvars.bind_contextvars(
+            group_id=primary_task.group_id,
+            phase=primary_task.phase,
+            cli_tool=cli_tool,
+            story_count=len(tasks),
+        )
+
+        logger.info(
+            "dispatch_group_waiting_semaphore",
+            story_ids=[t.story_id for t in tasks],
+            phase=primary_task.phase,
+        )
+
+        async def _on_process_start(proc: asyncio.subprocess.Process) -> None:
+            pid = proc.pid
+            if pid is not None:
+                self._running[pid] = RunningTask(
+                    task_id=primary_task.task_id,
+                    story_id=primary_task.story_id,
+                    phase=primary_task.phase,
+                    pid=pid,
+                )
+                # 更新所有 tasks 的 PID
+                for t in tasks:
+                    db2 = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(db2, t.task_id, "running", pid=pid)
+                    finally:
+                        await db2.close()
+                logger.info(
+                    "dispatch_group_pid_registered",
+                    pid=pid,
+                    task_ids=[t.task_id for t in tasks],
+                )
+
+        async with self._semaphore:
+            # 标记所有 tasks 为 running
+            now = datetime.now(tz=UTC)
+            for t in tasks:
+                db = await get_connection(self._db_path)
+                try:
+                    await update_task_status(
+                        db,
+                        t.task_id,
+                        "running",
+                        started_at=now,
+                        pid=None,
+                        exit_code=None,
+                        error_message=None,
+                        completed_at=None,
+                        duration_ms=None,
+                        cost_usd=None,
+                    )
+                finally:
+                    await db.close()
+
+            logger.info(
+                "dispatch_group_started",
+                story_ids=[t.story_id for t in tasks],
+                phase=primary_task.phase,
+            )
+
+            try:
+                result = await self._resolve_adapter(cli_tool).execute(
+                    prompt,
+                    options,
+                    on_process_start=_on_process_start,
+                    on_progress=on_progress,
+                )
+            except CLIAdapterError:
+                # 标记所有 tasks 失败
+                completed_at = datetime.now(tz=UTC)
+                for t in tasks:
+                    db = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(
+                            db,
+                            t.task_id,
+                            "failed",
+                            completed_at=completed_at,
+                            error_message="group_dispatch_adapter_error",
+                        )
+                    finally:
+                        await db.close()
+                self._unregister_running(primary_task.task_id)
+                raise
+
+            # 会话完成：先持久化主 task 的结果和成本
+            completed_at = datetime.now(tz=UTC)
+            per_story_cost = (
+                result.cost_usd / len(tasks) if result.cost_usd else 0.0
+            )
+            for t in tasks:
+                db = await get_connection(self._db_path)
+                try:
+                    await update_task_status(
+                        db,
+                        t.task_id,
+                        "completed" if result.status == "success" else "failed",
+                        completed_at=completed_at,
+                        exit_code=result.exit_code,
+                        cost_usd=per_story_cost,
+                        duration_ms=result.duration_ms,
+                        error_message=result.error_message,
+                        text_result=result.text_result,
+                    )
+                finally:
+                    await db.close()
+
+            # 记录成本日志（整体一条）
+            cost_record = CostLogRecord(
+                cost_log_id=str(uuid.uuid4()),
+                story_id=primary_task.story_id,
+                task_id=primary_task.task_id,
+                phase=primary_task.phase,
+                role=primary_task.role,
+                cli_tool=cli_tool,
+                model=None,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cost_usd=result.cost_usd,
+                duration_ms=result.duration_ms,
+                created_at=completed_at,
+            )
+            db = await get_connection(self._db_path)
+            try:
+                await insert_cost_log(db, cost_record)
+            finally:
+                await db.close()
+
+            self._unregister_running(primary_task.task_id)
+            return result
+
     async def dispatch_interactive(
         self,
         *,

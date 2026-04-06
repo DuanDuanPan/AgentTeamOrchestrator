@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     error_message    TEXT,
     text_result      TEXT,
     last_activity_type    TEXT,
-    last_activity_summary TEXT
+    last_activity_summary TEXT,
+    group_id              TEXT
 )"""
 
 _APPROVALS_DDL = """\
@@ -477,7 +478,7 @@ def _row_to_story(row: aiosqlite.Row) -> StoryRecord:
 _TASK_COLUMNS = (
     "task_id, story_id, phase, role, cli_tool, status, pid, expected_artifact, "
     "context_briefing, started_at, completed_at, exit_code, cost_usd, duration_ms, "
-    "error_message, text_result"
+    "error_message, text_result, group_id"
 )
 
 
@@ -485,7 +486,7 @@ async def insert_task(db: aiosqlite.Connection, task: TaskRecord) -> None:
     """插入一条 task 记录。"""
     await db.execute(
         f"INSERT INTO tasks ({_TASK_COLUMNS}) VALUES ("
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             task.task_id,
             task.story_id,
@@ -503,9 +504,23 @@ async def insert_task(db: aiosqlite.Connection, task: TaskRecord) -> None:
             task.duration_ms,
             task.error_message,
             task.text_result,
+            task.group_id,
         ),
     )
     await db.commit()
+
+
+async def get_tasks_by_group(
+    db: aiosqlite.Connection,
+    group_id: str,
+) -> list[TaskRecord]:
+    """查询同一 group_id 下的所有 tasks。"""
+    cursor = await db.execute(
+        "SELECT * FROM tasks WHERE group_id = ? ORDER BY rowid",
+        (group_id,),
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_task(r) for r in rows]
 
 
 async def get_tasks_by_story(
@@ -637,7 +652,7 @@ async def get_tasks_by_status(
 
 
 async def mark_running_tasks_paused(db: aiosqlite.Connection) -> int:
-    """批量将所有 status='running' 的 task 标记为 'paused'。
+    """批量将所有 status='running' 或 'pending' 的 task 标记为 'paused'。
 
     不自动 commit——调用方负责事务边界。
 
@@ -645,8 +660,8 @@ async def mark_running_tasks_paused(db: aiosqlite.Connection) -> int:
         受影响的行数。
     """
     cursor = await db.execute(
-        "UPDATE tasks SET status = ? WHERE status = ?",
-        ("paused", "running"),
+        "UPDATE tasks SET status = ? WHERE status IN (?, ?)",
+        ("paused", "running", "pending"),
     )
     return cursor.rowcount
 

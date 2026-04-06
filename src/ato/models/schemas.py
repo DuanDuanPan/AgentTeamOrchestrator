@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 10
+SCHEMA_VERSION: int = 11
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -386,6 +386,7 @@ class TaskRecord(_StrictBase):
     text_result: str | None = None
     last_activity_type: str | None = None
     last_activity_summary: str | None = None
+    group_id: str | None = None
 
 
 # Approval 状态

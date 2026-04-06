@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import aiosqlite
 import structlog
@@ -27,6 +27,7 @@ from ato.models.db import (
     mark_running_tasks_paused,
 )
 from ato.models.schemas import (
+    AdapterResult,
     ApprovalRecord,
     ProgressCallback,
     RecoveryResult,
@@ -1410,8 +1411,12 @@ class Orchestrator:
         """检测 active batch 中处于活跃阶段但无 task 的 stories 并调度。
 
         每次 poll cycle 末尾调用。幂等：dispatch 创建 task 后即不再命中。
+        对 batchable phase，同 phase 的多个 story 分组为单会话批量 dispatch。
         """
+        from collections import defaultdict
+
         from ato.models.db import get_undispatched_stories
+        from ato.recovery import RecoveryEngine
 
         db = await get_connection(self._db_path)
         try:
@@ -1419,7 +1424,54 @@ class Orchestrator:
         finally:
             await db.close()
 
+        # 按 phase 分组 batchable stories
+        batchable_groups: dict[str, list[StoryRecord]] = defaultdict(list)
+        single_stories: list[StoryRecord] = []
+
         for story in stories:
+            if story.story_id in self._inflight_initial_dispatches:
+                continue
+            phase_cfg = RecoveryEngine._resolve_phase_config_static(
+                self._settings, story.current_phase
+            )
+            is_batchable = phase_cfg.get("batchable", False)
+            if is_batchable and phase_cfg.get("phase_type") == "structured_job":
+                batchable_groups[story.current_phase].append(story)
+            else:
+                single_stories.append(story)
+
+        # 批量 dispatch batchable groups
+        for phase, group_stories in batchable_groups.items():
+            sids = [s.story_id for s in group_stories]
+            for sid in sids:
+                self._inflight_initial_dispatches.add(sid)
+
+            async def _run_group(
+                stories_list: list[StoryRecord] = group_stories,
+                phase_name: str = phase,
+            ) -> None:
+                try:
+                    await self._dispatch_group_phase(stories_list, phase_name)
+                finally:
+                    for s in stories_list:
+                        self._inflight_initial_dispatches.discard(s.story_id)
+
+            task = asyncio.create_task(
+                _run_group(),
+                name=f"dispatch-group-{phase}-{len(group_stories)}stories",
+            )
+            self._background_tasks.append(task)
+            task.add_done_callback(lambda t: self._background_tasks.remove(t))
+
+            logger.info(
+                "group_dispatch_scheduled",
+                phase=phase,
+                story_ids=sids,
+                count=len(group_stories),
+            )
+
+        # 单 story dispatch（原有逻辑）
+        for story in single_stories:
             if story.story_id in self._inflight_initial_dispatches:
                 continue
 
@@ -1440,6 +1492,216 @@ class Orchestrator:
                 story_id=story.story_id,
                 phase=story.current_phase,
             )
+
+    async def _dispatch_group_phase(
+        self, stories: list[StoryRecord], phase: str
+    ) -> None:
+        """单会话批量 dispatch：多个 story 共享一次 CLI 调用。
+
+        1. 为每个 story 创建 pending task（共享 group_id）
+        2. 构建合并 prompt
+        3. 通过 SubprocessManager.dispatch_group() 执行
+        4. 逐 story 检查产物并提交 transition
+        """
+        import uuid as _uuid
+
+        from ato.models.db import get_connection as _gc
+        from ato.models.db import insert_task
+        from ato.recovery import (
+            RecoveryEngine,
+            _create_adapter,
+            build_group_prompt,
+        )
+        from ato.subprocess_mgr import SubprocessManager
+
+        phase_cfg = RecoveryEngine._resolve_phase_config_static(self._settings, phase)
+        cli_tool_raw = phase_cfg.get("cli_tool", "claude")
+        cli_tool: Literal["claude", "codex"] = "codex" if cli_tool_raw == "codex" else "claude"
+        role = phase_cfg.get("role", "developer")
+
+        group_id = str(_uuid.uuid4())
+
+        # 1. 创建 pending tasks
+        task_records: list[TaskRecord] = []
+        for story in stories:
+            task_record = TaskRecord(
+                task_id=str(_uuid.uuid4()),
+                story_id=story.story_id,
+                phase=phase,
+                role=str(role),
+                cli_tool=cli_tool,
+                status="pending",
+                expected_artifact="group_dispatch_requested",
+                group_id=group_id,
+            )
+            db = await _gc(self._db_path)
+            try:
+                await insert_task(db, task_record)
+            finally:
+                await db.close()
+            task_records.append(task_record)
+
+        # 2. 构建合并 prompt
+        story_ids = [s.story_id for s in stories]
+        try:
+            prompt = await build_group_prompt(phase, story_ids, self._db_path)
+        except Exception:
+            logger.exception(
+                "group_dispatch_prompt_build_failed",
+                phase=phase,
+                story_ids=story_ids,
+            )
+            return
+
+        # 3. 构建 options
+        options: dict[str, object] = {
+            "cwd": str(derive_project_root(self._db_path)),
+            "timeout": self._settings.timeout.structured_job,
+            "idle_timeout": self._settings.timeout.idle_timeout,
+            "post_result_timeout": self._settings.timeout.post_result_timeout,
+        }
+        if phase_model := phase_cfg.get("model"):
+            options["model"] = phase_model
+        if effort := phase_cfg.get("effort"):
+            options["effort"] = effort
+
+        # 4. 获取 main path gate（共享模式）
+        gate = get_main_path_gate()
+        await gate.acquire_shared()
+        try:
+            adapter = _create_adapter(cli_tool)
+            mgr = SubprocessManager(
+                max_concurrent=self._settings.max_concurrent_agents,
+                adapter=adapter,
+                db_path=self._db_path,
+            )
+
+            primary_task = task_records[0]
+            result = await mgr.dispatch_group(
+                tasks=task_records,
+                prompt=prompt,
+                cli_tool=cli_tool,
+                options=options,
+                on_progress=self._build_progress_callback(primary_task),
+            )
+
+            # 5. 逐 story 检查产物并提交 transition
+            await self._handle_group_result(task_records, result, phase, phase_cfg)
+
+        except Exception:
+            logger.exception(
+                "group_dispatch_failed",
+                phase=phase,
+                story_ids=story_ids,
+                group_id=group_id,
+            )
+        finally:
+            await gate.release_shared()
+
+    async def _handle_group_result(
+        self,
+        tasks: list[TaskRecord],
+        result: AdapterResult,
+        phase: str,
+        phase_cfg: dict[str, Any],
+    ) -> None:
+        """处理 group dispatch 结果：逐 story 检查产物，提交 transition。"""
+        from ato.design_artifacts import write_prototype_manifest
+        from ato.recovery import _PHASE_SUCCESS_EVENT
+
+        if result.status != "success" or self._tq is None:
+            logger.warning(
+                "group_dispatch_session_failed",
+                phase=phase,
+                result_status=result.status,
+                story_ids=[t.story_id for t in tasks],
+            )
+            return
+
+        event_name = _PHASE_SUCCESS_EVENT.get(phase)
+        if event_name is None:
+            return
+
+        project_root = derive_project_root(self._db_path)
+
+        for task in tasks:
+            # 检查该 story 的产物是否存在
+            artifact_exists = self._check_story_artifact(
+                task.story_id, phase, project_root
+            )
+
+            if artifact_exists:
+                # designing phase 需要 design gate
+                if event_name == "design_done":
+                    try:
+                        write_prototype_manifest(task.story_id, project_root)
+                    except Exception:
+                        logger.exception(
+                            "group_manifest_generation_failed",
+                            story_id=task.story_id,
+                        )
+                    gate_result = await check_design_gate(
+                        story_id=task.story_id,
+                        task_id=task.task_id,
+                        project_root=project_root,
+                    )
+                    if not gate_result.passed:
+                        from ato.approval_helpers import create_approval as _ca
+
+                        payload = build_design_gate_payload(task.task_id, gate_result)
+                        db_gate = await get_connection(self._db_path)
+                        try:
+                            await _ca(
+                                db_gate,
+                                story_id=task.story_id,
+                                approval_type="needs_human_review",
+                                payload_dict=payload,
+                            )
+                        finally:
+                            await db_gate.close()
+                        self._nudge.notify()
+                        logger.warning(
+                            "group_design_gate_failed",
+                            story_id=task.story_id,
+                        )
+                        continue
+
+                await self._tq.submit(
+                    TransitionEvent(
+                        story_id=task.story_id,
+                        event_name=event_name,
+                        source="agent",
+                        submitted_at=datetime.now(tz=UTC),
+                    )
+                )
+                logger.info(
+                    "group_story_transition_submitted",
+                    story_id=task.story_id,
+                    event_name=event_name,
+                )
+            else:
+                logger.warning(
+                    "group_story_artifact_missing",
+                    story_id=task.story_id,
+                    phase=phase,
+                )
+
+    @staticmethod
+    def _check_story_artifact(
+        story_id: str, phase: str, project_root: Path
+    ) -> bool:
+        """检查 story 的 phase 产物文件是否存在。"""
+        from ato.design_artifacts import ARTIFACTS_REL, derive_design_artifact_paths_relative
+
+        if phase == "creating":
+            artifact_path = project_root / ARTIFACTS_REL / f"{story_id}.md"
+            return artifact_path.is_file()
+        elif phase == "designing":
+            rel = derive_design_artifact_paths_relative(story_id)
+            prototype_path = project_root / rel["prototype_pen"]
+            return prototype_path.is_file()
+        # 其他 batchable phase（如 validating）暂按成功处理
+        return True
 
     async def _dispatch_initial_phase(self, story: StoryRecord) -> None:
         """为首次进入活跃阶段的 story 调度 agent 任务。

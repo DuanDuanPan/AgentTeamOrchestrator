@@ -903,11 +903,11 @@ class TestConvergentLoopProgressLogging:
             assert callable(on_progress)
             await on_progress(
                 ProgressEvent(
-                    event_type="tool_use",
-                    summary="调用函数: review",
+                    event_type="result",
+                    summary="完成 (cost=$0.05)",
                     cli_tool="codex",
                     timestamp=datetime.now(tz=UTC),
-                    raw={"type": "item.completed"},
+                    raw={"type": "result"},
                 )
             )
 
@@ -988,11 +988,11 @@ class TestConvergentLoopProgressLogging:
             assert callable(on_progress)
             await on_progress(
                 ProgressEvent(
-                    event_type="tool_use",
-                    summary="调用函数: rereview",
+                    event_type="result",
+                    summary="完成 (cost=$0.05)",
                     cli_tool="codex",
                     timestamp=datetime.now(tz=UTC),
-                    raw={"type": "item.completed"},
+                    raw={"type": "result"},
                 )
             )
 

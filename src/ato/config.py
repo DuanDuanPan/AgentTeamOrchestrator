@@ -83,6 +83,7 @@ class PhaseConfig(BaseModel):
     workspace: Literal["main", "worktree"] | None = None
     skip_when: str | None = None
     parallel_safe: bool = False
+    batchable: bool = False
 
 
 class ConvergentLoopConfig(BaseModel):
@@ -200,6 +201,7 @@ class PhaseDefinition:
     reasoning_effort: str | None = None
     reasoning_summary_format: str | None = None
     parallel_safe: bool = False
+    batchable: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +527,7 @@ def build_phase_definitions(config: ATOSettings) -> list[PhaseDefinition]:
                 reasoning_effort=reasoning_effort,
                 reasoning_summary_format=reasoning_summary_format,
                 parallel_safe=phase.parallel_safe,
+                batchable=phase.batchable,
             )
         )
 

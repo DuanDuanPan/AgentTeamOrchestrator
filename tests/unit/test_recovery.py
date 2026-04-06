@@ -881,11 +881,11 @@ class TestRecoveryProgressLogging:
 
             await on_progress(
                 ProgressEvent(
-                    event_type="tool_use",
-                    summary="调用工具: Read",
+                    event_type="result",
+                    summary="完成 (cost=$0.05)",
                     cli_tool="claude",
                     timestamp=datetime.now(tz=UTC),
-                    raw={"type": "assistant"},
+                    raw={"type": "result"},
                 )
             )
 

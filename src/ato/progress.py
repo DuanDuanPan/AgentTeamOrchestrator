@@ -20,7 +20,11 @@ def build_agent_progress_callback(
 ) -> ProgressCallback:
     """Build a logger-backed callback for normalized agent progress events."""
 
+    verbose_event_types = {"init", "tool_use", "tool_result", "other"}
+
     async def _on_progress(event: ProgressEvent) -> None:
+        if event.event_type in verbose_event_types:
+            return
         logger.info(
             "agent_progress",
             task_id=task_id,

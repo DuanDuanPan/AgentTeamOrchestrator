@@ -493,8 +493,12 @@ async def _batch_select_async(
                 )
                 last_progress: tuple[str, str, str] | None = None
 
+                verbose_event_types = {"init", "tool_use", "tool_result", "other"}
+
                 async def _echo_llm_progress(event: ProgressEvent) -> None:
                     nonlocal last_progress
+                    if event.event_type in verbose_event_types:
+                        return
                     current = (event.cli_tool, event.event_type, event.summary)
                     if current == last_progress:
                         return

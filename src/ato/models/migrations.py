@@ -274,6 +274,13 @@ async def _migrate_v9_to_v10(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE tasks ADD COLUMN text_result TEXT")
 
 
+@_register(11)
+async def _migrate_v10_to_v11(db: aiosqlite.Connection) -> None:
+    """v10 → v11: tasks 表新增 group_id 列（单会话批量 dispatch 分组标识）。"""
+    if not await _column_exists(db, "tasks", "group_id"):
+        await db.execute("ALTER TABLE tasks ADD COLUMN group_id TEXT")
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

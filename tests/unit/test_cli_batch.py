@@ -549,11 +549,11 @@ class TestBatchSelectLlmFlag:
             assert self._on_progress is not None
             await self._on_progress(
                 ProgressEvent(
-                    event_type="tool_use",
-                    summary="调用工具: Read",
+                    event_type="result",
+                    summary="完成 (cost=$0.05)",
                     cli_tool="claude",
                     timestamp=datetime.now(tz=UTC),
-                    raw={"type": "assistant"},
+                    raw={"type": "result"},
                 )
             )
             return BatchProposal(
@@ -577,5 +577,5 @@ class TestBatchSelectLlmFlag:
             )
 
         assert result.exit_code == 0
-        assert "→ [claude] 调用工具: Read" in result.output
+        assert "✓ [claude] 完成 (cost=$0.05)" in result.output
         assert "Batch 已创建" in result.output
