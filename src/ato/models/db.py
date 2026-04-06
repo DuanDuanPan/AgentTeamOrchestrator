@@ -688,6 +688,10 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
     用于检测需要初始调度的 stories（batch confirm 后首次 dispatch）。
     存在 pending blocking approval（``crash_recovery`` 或 ``needs_human_review``）
     的 story 会被排除，避免在等待人工决策期间被初始调度路径再次补发 task。
+
+    ``fixing`` 不能被全局排除：除 convergent loop 之外，UAT / regression
+    也会进入 fixing，并依赖初始调度恢复 owner task。对于 convergent loop
+    产生的 fixing，pending placeholder/task 会自然把它挡在查询结果之外。
     """
     cursor = await db.execute(
         """

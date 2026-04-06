@@ -17,6 +17,7 @@ from ato.models.db import (
     get_findings_by_story,
     get_open_findings,
     get_pending_approvals,
+    get_story,
     insert_findings_batch,
     insert_story,
     insert_task,
@@ -37,6 +38,7 @@ from ato.models.schemas import (
     TransitionEvent,
     compute_dedup_hash,
 )
+from ato.transition_queue import TransitionQueue
 
 _NOW = datetime.now(tz=UTC)
 
@@ -294,6 +296,84 @@ class TestFirstReviewOnlySuggestions:
         # review_pass because suggestions don't block convergence
         event: TransitionEvent = mock_tq.submit.call_args[0][0]
         assert event.event_name == "review_pass"
+
+
+class TestCommittedReviewTransitions:
+    """真实 TransitionQueue 下，review 方法返回前必须完成状态落库。"""
+
+    @pytest.mark.asyncio
+    async def test_first_review_waits_for_review_pass_commit(
+        self, initialized_db_path: Any
+    ) -> None:
+        story = _make_story(story_id="story-review-commit")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            loop, _sub, _bmad, _mock_tq = _make_loop(
+                initialized_db_path,
+                parse_result=_make_parse_result(verdict="approved", findings=[]),
+            )
+            loop._transition_queue = tq
+
+            result = await loop.run_first_review(story.story_id, "/tmp/wt")
+
+            db = await get_connection(initialized_db_path)
+            try:
+                updated_story = await get_story(db, story.story_id)
+            finally:
+                await db.close()
+            assert result.converged is True
+            assert updated_story is not None
+            assert updated_story.current_phase == "qa_testing"
+        finally:
+            await tq.stop()
+
+    @pytest.mark.asyncio
+    async def test_rereview_waits_for_review_pass_commit(self, initialized_db_path: Any) -> None:
+        story = _make_story(story_id="story-rereview-commit")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding_record_for_rereview(
+                        story_id=story.story_id,
+                        round_num=1,
+                        description="existing blocking issue",
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            loop, _sub, _bmad, _mock_tq = _make_loop(
+                initialized_db_path,
+                parse_result=_make_parse_result(verdict="approved", findings=[]),
+            )
+            loop._transition_queue = tq
+
+            result = await loop.run_rereview(story.story_id, 2, "/tmp/wt")
+
+            db = await get_connection(initialized_db_path)
+            try:
+                updated_story = await get_story(db, story.story_id)
+            finally:
+                await db.close()
+            assert result.converged is True
+            assert updated_story is not None
+            assert updated_story.current_phase == "qa_testing"
+        finally:
+            await tq.stop()
 
 
 class TestFirstReviewRestartReconciliation:

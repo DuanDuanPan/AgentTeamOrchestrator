@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
@@ -26,6 +27,14 @@ from ato.state_machine import (
 )
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
+
+
+@dataclass(slots=True)
+class _QueuedTransition:
+    """Internal queue envelope for optional completion acknowledgements."""
+
+    event: TransitionEvent
+    completion_future: asyncio.Future[str] | None = None
 
 # ---------------------------------------------------------------------------
 # Replay 辅助：phase → 到达该 phase 所需的事件序列
@@ -131,7 +140,7 @@ class TransitionQueue:
     ) -> None:
         self._db_path = db_path
         self._nudge = nudge
-        self._queue: asyncio.Queue[TransitionEvent | None] = asyncio.Queue()
+        self._queue: asyncio.Queue[_QueuedTransition | None] = asyncio.Queue()
         self._machines: dict[str, StoryLifecycle] = {}
         self._dev_ready_reconcile_lock = asyncio.Lock()
         self._start_dev_submitted: set[str] = set()
@@ -206,7 +215,7 @@ class TransitionQueue:
             msg = "TransitionQueue is not running, call start() first"
             raise StateTransitionError(msg)
 
-        await self._queue.put(event)
+        await self._queue.put(_QueuedTransition(event))
         logger.info(
             "transition_submitted",
             story_id=event.story_id,
@@ -217,15 +226,41 @@ class TransitionQueue:
         if self._nudge is not None:
             self._nudge.notify()
 
+    async def submit_and_wait(
+        self,
+        event: TransitionEvent,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> str:
+        """Submit an event and wait until its state transition is committed."""
+        if not self._running:
+            msg = "TransitionQueue is not running, call start() first"
+            raise StateTransitionError(msg)
+
+        completion_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        await self._queue.put(_QueuedTransition(event, completion_future))
+        logger.info(
+            "transition_submitted_waiting",
+            story_id=event.story_id,
+            event_name=event.event_name,
+            source=event.source,
+            queue_depth=self._queue.qsize(),
+        )
+        if self._nudge is not None:
+            self._nudge.notify()
+
+        return await asyncio.wait_for(completion_future, timeout=timeout_seconds)
+
     async def _consumer(self, db: aiosqlite.Connection) -> None:
         """串行处理队列中的事件。"""
 
         while True:
-            event = await self._queue.get()
-            if event is None:
+            queued = await self._queue.get()
+            if queued is None:
                 self._queue.task_done()
                 break  # 哨兵 → 退出
 
+            event = queued.event
             t_start = time.monotonic()
             bind_contextvars(
                 story_id=event.story_id,
@@ -241,6 +276,8 @@ class TransitionQueue:
                 new_state = sm.current_state_value
                 await save_story_state(db, event.story_id, new_state)
                 await db.commit()
+                if queued.completion_future is not None and not queued.completion_future.done():
+                    queued.completion_future.set_result(new_state)
 
                 # Post-commit hooks
                 await self._on_phase_skip_check(db, event.story_id, new_state, event.source)
@@ -259,6 +296,13 @@ class TransitionQueue:
                 )
             except Exception:
                 logger.exception("transition_failed")
+                if queued.completion_future is not None and not queued.completion_future.done():
+                    queued.completion_future.set_exception(
+                        StateTransitionError(
+                            "Transition failed for story "
+                            f"'{event.story_id}' via '{event.event_name}'"
+                        )
+                    )
                 # send() 后可能内存状态已变但 DB 未 commit——驱逐缓存
                 self._machines.pop(event.story_id, None)
                 try:

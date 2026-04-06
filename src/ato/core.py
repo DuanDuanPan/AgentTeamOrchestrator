@@ -800,6 +800,29 @@ class Orchestrator:
             cli_tool=task.cli_tool,
         )
 
+    async def _submit_transition_event(
+        self,
+        *,
+        story_id: str,
+        event_name: str,
+        source: Literal["agent", "cli"] = "agent",
+    ) -> None:
+        """Submit a transition and wait for commit when the queue supports it."""
+        if self._tq is None:
+            return
+
+        event = TransitionEvent(
+            story_id=story_id,
+            event_name=event_name,
+            source=source,
+            submitted_at=datetime.now(tz=UTC),
+        )
+        submit_and_wait = getattr(type(self._tq), "submit_and_wait", None)
+        if callable(submit_and_wait):
+            await self._tq.submit_and_wait(event)
+            return
+        await self._tq.submit(event)
+
     async def run(self) -> None:
         """主入口——启动 → 轮询 → 停止。
 
@@ -993,7 +1016,11 @@ class Orchestrator:
                     from ato.models.db import update_task_status
 
                     for task_id, event in task_events:
-                        await self._tq.submit(event)
+                        await self._submit_transition_event(
+                            story_id=event.story_id,
+                            event_name=event.event_name,
+                            source="cli",
+                        )
                         # submit 成功后才标记——崩溃时下次轮询会重试
                         await update_task_status(
                             db,
@@ -1008,7 +1035,11 @@ class Orchestrator:
                     from ato.models.db import update_task_status as _uts
 
                     for task_id, event in uat_fail_events:
-                        await self._tq.submit(event)
+                        await self._submit_transition_event(
+                            story_id=event.story_id,
+                            event_name=event.event_name,
+                            source="cli",
+                        )
                         await _uts(
                             db,
                             task_id,
@@ -1666,13 +1697,9 @@ class Orchestrator:
                         )
                         continue
 
-                await self._tq.submit(
-                    TransitionEvent(
-                        story_id=task.story_id,
-                        event_name=event_name,
-                        source="agent",
-                        submitted_at=datetime.now(tz=UTC),
-                    )
+                await self._submit_transition_event(
+                    story_id=task.story_id,
+                    event_name=event_name,
                 )
                 logger.info(
                     "group_story_transition_submitted",
@@ -1714,7 +1741,7 @@ class Orchestrator:
         BMAD parse/fallback/findings 流程，creating/designing 等
         structured_job 也与 restart 路径保持同一实现。
         """
-        from ato.models.db import get_story, insert_task
+        from ato.models.db import get_story, get_tasks_by_story, insert_task
         from ato.recovery import RecoveryEngine
 
         db = await get_connection(self._db_path)
@@ -1765,6 +1792,8 @@ class Orchestrator:
         phase_type = phase_cfg.get("phase_type", "structured_job")
 
         try:
+            fixing_context_briefing: str | None = None
+
             # Clean up orphaned convergent_loop_fix_placeholder before inserting
             # the real dispatch task.  The placeholder is inserted by the
             # convergent loop to prevent the main loop from racing, but when
@@ -1783,6 +1812,14 @@ class Orchestrator:
                     (story.story_id, story.current_phase),
                 )
                 await db.commit()
+
+                if story.current_phase == "fixing":
+                    story_tasks = await get_tasks_by_story(db, story.story_id)
+                    resume_phase = RecoveryEngine._infer_fix_resume_phase(story_tasks)
+                    if resume_phase is not None:
+                        fixing_context_briefing = (
+                            RecoveryEngine._build_fix_resume_phase_context(resume_phase)
+                        )
             finally:
                 await db.close()
 
@@ -1793,6 +1830,7 @@ class Orchestrator:
                 role=str(role),
                 cli_tool=cli_tool,
                 status="pending",
+                context_briefing=fixing_context_briefing,
                 expected_artifact="initial_dispatch_requested",
             )
             db = await get_connection(self._db_path)
@@ -1847,13 +1885,9 @@ class Orchestrator:
         if isinstance(self._tq, TransitionQueue):
             await self._tq.ensure_dev_ready_progress(story_id)
             return
-        await self._tq.submit(
-            TransitionEvent(
-                story_id=story_id,
-                event_name="start_dev",
-                source="agent",
-                submitted_at=datetime.now(tz=UTC),
-            )
+        await self._submit_transition_event(
+            story_id=story_id,
+            event_name="start_dev",
         )
 
     async def _dispatch_interactive_restart(
@@ -2210,104 +2244,122 @@ class Orchestrator:
                 on_progress=self._build_progress_callback(task),
             )
 
-            # 成功后提交 transition event
+            # 成功后提交 transition event。这里必须重新核对当前 phase，
+            # 防止任务运行期间 story 已被其他控制流推进，导致晚到结果重复提交事件。
             if result.status == "success" and self._tq is not None:
-                from ato.recovery import _PHASE_SUCCESS_EVENT, RecoveryEngine
+                db = await _gc(self._db_path)
+                try:
+                    latest_story = await get_story(db, task.story_id)
+                finally:
+                    await db.close()
 
-                fix_round, _fix_stage = RecoveryEngine._parse_fix_resume_context(task)
-                if task.phase == "fixing" and fix_round is not None:
-                    # fixing 属于 convergent loop 控制流。提交 fix_done
-                    # transition 后，由 continue_after_fix_success 接管
-                    # re-review → escalation 的完整编排。
-                    # 必须先插入 reviewing placeholder 防止 poll cycle
-                    # 在 transition 后抢先 dispatch reviewing task。
-                    from ato.convergent_loop import ConvergentLoop
-
-                    await ConvergentLoop.insert_review_placeholder(
+                current_phase = latest_story.current_phase if latest_story else None
+                if current_phase != task.phase:
+                    logger.warning(
+                        "dispatch_batch_restart_success_superseded",
+                        task_id=task.task_id,
                         story_id=task.story_id,
-                        db_path=self._db_path,
-                    )
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=task.story_id,
-                            event_name="fix_done",
-                            source="agent",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
-                    )
-                    from ato.config import build_phase_definitions
-
-                    phase_defs = build_phase_definitions(self._settings)
-                    engine = RecoveryEngine(
-                        db_path=self._db_path,
-                        subprocess_mgr=None,
-                        transition_queue=self._tq,
-                        nudge=self._nudge,
-                        settings=self._settings,
-                        convergent_loop_phases={
-                            pd.name
-                            for pd in phase_defs
-                            if pd.phase_type == "convergent_loop"
-                        },
-                    )
-                    await engine.continue_after_fix_success(
-                        task,
-                        worktree_path=worktree_path,
+                        phase=task.phase,
+                        story_phase=current_phase,
+                        reason="story_phase_advanced_before_success_transition",
                     )
                 else:
-                    event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
-                    if event_name is not None:
-                        # Design gate: designing phase 需要验证 UX 产出物
-                        if event_name == "design_done":
-                            project_root = derive_project_root(self._db_path)
-                            # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
-                            from ato.design_artifacts import write_prototype_manifest
+                    from ato.recovery import _PHASE_SUCCESS_EVENT, RecoveryEngine
 
-                            try:
-                                write_prototype_manifest(task.story_id, project_root)
-                            except Exception:
-                                logger.exception(
-                                    "manifest_generation_failed",
-                                    story_id=task.story_id,
-                                )
-                            gate_result = await check_design_gate(
+                    if task.phase == "fixing":
+                        event_name, continue_convergent = (
+                            RecoveryEngine._resolve_fixing_success_event(task)
+                        )
+                        if continue_convergent:
+                            # fixing 属于 convergent loop 控制流。提交 fix_done
+                            # transition 后，由 continue_after_fix_success 接管
+                            # re-review → escalation 的完整编排。
+                            # 必须先插入 reviewing placeholder 防止 poll cycle
+                            # 在 transition 后抢先 dispatch reviewing task。
+                            from ato.convergent_loop import ConvergentLoop
+
+                            await ConvergentLoop.insert_review_placeholder(
                                 story_id=task.story_id,
-                                task_id=task.task_id,
-                                project_root=project_root,
+                                db_path=self._db_path,
                             )
-                            if not gate_result.passed:
-                                from ato.approval_helpers import create_approval as _ca
-                                from ato.nudge import send_user_notification as _sun
-
-                                payload = build_design_gate_payload(task.task_id, gate_result)
-                                db_gate = await get_connection(self._db_path)
-                                try:
-                                    await _ca(
-                                        db_gate,
-                                        story_id=task.story_id,
-                                        approval_type="needs_human_review",
-                                        payload_dict=payload,
-                                    )
-                                finally:
-                                    await db_gate.close()
-                                self._nudge.notify()
-                                failure_msg = (
-                                    f"Design gate 失败: story {task.story_id} "
-                                    f"— {gate_result.reason}"
-                                )
-                                _sun(
-                                    "normal",
-                                    failure_msg,
-                                )
-                                return
-                        await self._tq.submit(
-                            TransitionEvent(
+                            await self._submit_transition_event(
                                 story_id=task.story_id,
                                 event_name=event_name,
-                                source="agent",
-                                submitted_at=datetime.now(tz=UTC),
                             )
-                        )
+                            from ato.config import build_phase_definitions
+
+                            phase_defs = build_phase_definitions(self._settings)
+                            engine = RecoveryEngine(
+                                db_path=self._db_path,
+                                subprocess_mgr=None,
+                                transition_queue=self._tq,
+                                nudge=self._nudge,
+                                settings=self._settings,
+                                convergent_loop_phases={
+                                    pd.name
+                                    for pd in phase_defs
+                                    if pd.phase_type == "convergent_loop"
+                                },
+                            )
+                            await engine.continue_after_fix_success(
+                                task,
+                                worktree_path=worktree_path,
+                            )
+                        else:
+                            await self._submit_transition_event(
+                                story_id=task.story_id,
+                                event_name=event_name,
+                            )
+                    else:
+                        success_event = _PHASE_SUCCESS_EVENT.get(task.phase)
+                        if success_event is not None:
+                            # Design gate: designing phase 需要验证 UX 产出物
+                            if success_event == "design_done":
+                                project_root = derive_project_root(self._db_path)
+                                # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
+                                from ato.design_artifacts import write_prototype_manifest
+
+                                try:
+                                    write_prototype_manifest(task.story_id, project_root)
+                                except Exception:
+                                    logger.exception(
+                                        "manifest_generation_failed",
+                                        story_id=task.story_id,
+                                    )
+                                gate_result = await check_design_gate(
+                                    story_id=task.story_id,
+                                    task_id=task.task_id,
+                                    project_root=project_root,
+                                )
+                                if not gate_result.passed:
+                                    from ato.approval_helpers import create_approval as _ca
+                                    from ato.nudge import send_user_notification as _sun
+
+                                    payload = build_design_gate_payload(task.task_id, gate_result)
+                                    db_gate = await get_connection(self._db_path)
+                                    try:
+                                        await _ca(
+                                            db_gate,
+                                            story_id=task.story_id,
+                                            approval_type="needs_human_review",
+                                            payload_dict=payload,
+                                        )
+                                    finally:
+                                        await db_gate.close()
+                                    self._nudge.notify()
+                                    failure_msg = (
+                                        f"Design gate 失败: story {task.story_id} "
+                                        f"— {gate_result.reason}"
+                                    )
+                                    _sun(
+                                        "normal",
+                                        failure_msg,
+                                    )
+                                    return
+                            await self._submit_transition_event(
+                                story_id=task.story_id,
+                                event_name=success_event,
+                            )
 
             logger.info(
                 "dispatch_batch_restart_done",
@@ -2490,13 +2542,10 @@ class Orchestrator:
                 return await self._reschedule_interactive_task(approval, mode="resume")
             if decision == "abandon":
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="escalate",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
                     )
                 return True
             # 未识别的 decision → 不消费
@@ -2536,24 +2585,18 @@ class Orchestrator:
                             reason="no fail event for current phase",
                         )
                         return True
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name=_event,
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name=_event,
+                        source="cli",
                     )
                 return True
             if decision == "human_review":
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="escalate",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
                     )
                 return True
             logger.warning(
@@ -2580,13 +2623,10 @@ class Orchestrator:
                 return True
             if decision == "reject":
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="escalate",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
                     )
                 return True
             logger.warning(
@@ -2641,13 +2681,10 @@ class Orchestrator:
                 return True
             if decision == "fix_forward":
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="regression_fail",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="regression_fail",
+                        source="cli",
                     )
                 db = await get_connection(self._db_path)
                 try:
@@ -2719,13 +2756,10 @@ class Orchestrator:
                     finally:
                         await db.close()
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="escalate",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
                     )
                 return True
             logger.warning(
@@ -2785,13 +2819,10 @@ class Orchestrator:
                 )
             if decision == "escalate":
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="escalate",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
                     )
                 return True
             logger.warning(
@@ -2808,24 +2839,18 @@ class Orchestrator:
             if decision == "skip":
                 # skip = 人工确认可跳过，escalate story
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="escalate",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
                     )
                 return True
             if decision == "escalate":
                 if self._tq is not None:
-                    await self._tq.submit(
-                        TransitionEvent(
-                            story_id=approval.story_id,
-                            event_name="escalate",
-                            source="cli",
-                            submitted_at=datetime.now(tz=UTC),
-                        )
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
                     )
                 return True
             logger.warning(

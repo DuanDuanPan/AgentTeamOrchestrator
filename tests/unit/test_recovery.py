@@ -1538,6 +1538,52 @@ class TestMissingPhaseCompleteEvents:
         event = mock_tq.submit.call_args[0][0]
         assert event.event_name == "fix_done"
 
+    @patch("ato.recovery._artifact_exists", return_value=True)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_fixing_artifact_phase_resume_submits_qa_fix_done(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t1",
+                    "s1",
+                    status="running",
+                    pid=999,
+                    phase="fixing",
+                    expected_artifact="/some/fix.json",
+                    context_briefing=json.dumps(
+                        {"fix_kind": "phase_resume", "resume_phase": "qa_testing"}
+                    ),
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+        )
+        with patch.object(
+            engine,
+            "continue_after_fix_success",
+            new=AsyncMock(),
+        ) as mock_continue:
+            await engine.run_recovery()
+
+        mock_tq.submit.assert_called_once()
+        event = mock_tq.submit.call_args[0][0]
+        assert event.event_name == "qa_fix_done"
+        mock_continue.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # Fix: convergent_loop prompt 使用 phase-specific 模板
@@ -2025,6 +2071,74 @@ class TestFixRecoveryContinuation:
             worktree_path="/tmp/wt",
             stage="standard",
         )
+
+    async def test_dispatch_structured_job_phase_resume_returns_to_qa_testing(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """QA-origin fixing recovery 成功后应提交 qa_fix_done，而不是继续 rereview。"""
+        from ato.config import ATOSettings
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                _make_story(
+                    "s-fix-qa-resume",
+                    worktree_path="/tmp/wt",
+                    current_phase="fixing",
+                ),
+            )
+        finally:
+            await db.close()
+
+        settings = ATOSettings(
+            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=settings,
+        )
+        task = _make_task(
+            "t-fix-qa-resume",
+            "s-fix-qa-resume",
+            status="pending",
+            pid=None,
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            context_briefing=json.dumps(
+                {"fix_kind": "phase_resume", "resume_phase": "qa_testing"}
+            ),
+        )
+
+        with (
+            patch.object(engine, "_submit_transition_event", new=AsyncMock()) as mock_submit,
+            patch.object(
+                engine,
+                "continue_after_fix_success",
+                new=AsyncMock(),
+            ) as mock_continue,
+        ):
+            await engine._dispatch_structured_job(task)
+
+        mock_submit.assert_awaited_once_with(
+            story_id="s-fix-qa-resume",
+            event_name="qa_fix_done",
+        )
+        mock_continue.assert_not_awaited()
 
 
 class TestRecoveryRoundSummaryReconstruction:
@@ -4087,3 +4201,187 @@ class TestWorkspaceAwareDispatch:
         mock_create.assert_called_once_with("s-fix")
         # 不应调用 adapter（不应在 project_root 上执行 fixing）
         _mock_recovery_adapter.execute.assert_not_called()
+
+
+class TestCommittedRecoveryTransitions:
+    """真实 TransitionQueue 下，recovery 返回前必须完成状态落库。"""
+
+    async def test_structured_job_waits_for_transition_commit(
+        self, initialized_db_path: Path
+    ) -> None:
+        from ato.config import ATOSettings
+        from ato.models.db import get_story
+        from ato.transition_queue import TransitionQueue
+
+        settings = ATOSettings(
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "designing",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-rec-structured", current_phase="creating"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-rec-structured",
+                    "s-rec-structured",
+                    status="pending",
+                    pid=None,
+                    phase="creating",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+        finally:
+            await db.close()
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            engine = RecoveryEngine(
+                db_path=initialized_db_path,
+                subprocess_mgr=None,
+                transition_queue=tq,
+                convergent_loop_phases=set(),
+                settings=settings,
+            )
+            task = _make_task(
+                "t-rec-structured",
+                "s-rec-structured",
+                status="pending",
+                pid=None,
+                phase="creating",
+                role="creator",
+                cli_tool="claude",
+            )
+
+            with patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(
+                    return_value=AdapterResult(
+                        status="success",
+                        exit_code=0,
+                        duration_ms=10,
+                        text_result="ok",
+                    )
+                ),
+            ):
+                await engine._dispatch_structured_job(task)
+
+            db = await get_connection(initialized_db_path)
+            try:
+                story = await get_story(db, "s-rec-structured")
+            finally:
+                await db.close()
+            assert story is not None
+            assert story.current_phase == "designing"
+        finally:
+            await tq.stop()
+
+    async def test_convergent_loop_waits_for_transition_commit(
+        self, initialized_db_path: Path
+    ) -> None:
+        from ato.config import ATOSettings
+        from ato.models.db import get_story
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+        from ato.transition_queue import TransitionQueue
+
+        settings = ATOSettings(
+            roles={"validator": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "validating",
+                    "role": "validator",
+                    "type": "convergent_loop",
+                    "next_on_success": "dev_ready",
+                    "next_on_failure": "creating",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-rec-convergent", current_phase="validating"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-rec-convergent",
+                    "s-rec-convergent",
+                    status="pending",
+                    pid=None,
+                    phase="validating",
+                    role="validator",
+                    cli_tool="claude",
+                ),
+            )
+        finally:
+            await db.close()
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            engine = RecoveryEngine(
+                db_path=initialized_db_path,
+                subprocess_mgr=None,
+                transition_queue=tq,
+                convergent_loop_phases={"validating"},
+                settings=settings,
+            )
+            task = _make_task(
+                "t-rec-convergent",
+                "s-rec-convergent",
+                status="pending",
+                pid=None,
+                phase="validating",
+                role="validator",
+                cli_tool="claude",
+            )
+
+            with (
+                patch(
+                    "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                    new=AsyncMock(
+                        return_value=AdapterResult(
+                            status="success",
+                            exit_code=0,
+                            duration_ms=10,
+                            text_result="ok",
+                        )
+                    ),
+                ),
+                patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
+            ):
+                mock_bmad = AsyncMock()
+                mock_bmad.parse.return_value = BmadParseResult(
+                    skill_type=BmadSkillType.STORY_VALIDATION,
+                    verdict="approved",
+                    findings=[],
+                    parser_mode="deterministic",
+                    raw_markdown_hash="h",
+                    raw_output_preview="ok",
+                    parsed_at=_NOW,
+                )
+                mock_bmad_cls.return_value = mock_bmad
+
+                result = await engine._dispatch_convergent_loop(task)
+
+            assert result is True
+            db = await get_connection(initialized_db_path)
+            try:
+                story = await get_story(db, "s-rec-convergent")
+            finally:
+                await db.close()
+            assert story is not None
+            assert story.current_phase == "dev_ready"
+        finally:
+            await tq.stop()

@@ -218,6 +218,63 @@ class TestTransitionQueueSerialization:
 
 
 # ---------------------------------------------------------------------------
+# Test: submit_and_wait acknowledgment
+# ---------------------------------------------------------------------------
+
+
+class TestTransitionQueueSubmitAndWait:
+    async def test_returns_after_transition_commits(self, initialized_db_path: Path) -> None:
+        """submit_and_wait() 返回时，story phase 应已持久化。"""
+        await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        new_state = await tq.submit_and_wait(_make_event("s1", "start_create"))
+
+        story = await _read_story(initialized_db_path, "s1")
+        assert new_state == "creating"
+        assert story is not None
+        assert story.current_phase == "creating"
+
+        await tq.stop()
+
+    async def test_raises_for_failed_transition(self, initialized_db_path: Path) -> None:
+        """submit_and_wait() 应将 transition 失败反馈给调用方。"""
+        await _insert_story_at_phase(initialized_db_path, "s1", "queued", "backlog")
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        with pytest.raises(StateTransitionError, match="Transition failed"):
+            await tq.submit_and_wait(_make_event("s1", "create_done"))
+
+        story = await _read_story(initialized_db_path, "s1")
+        assert story is not None
+        assert story.current_phase == "queued"
+
+        await tq.stop()
+
+    async def test_fixing_resume_event_commits_target_phase(
+        self, initialized_db_path: Path
+    ) -> None:
+        """qa_fix_done 应把 story 从 fixing 提交回 qa_testing。"""
+        await _insert_story_at_phase(initialized_db_path, "s-fix", "fixing", "review")
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        new_state = await tq.submit_and_wait(_make_event("s-fix", "qa_fix_done"))
+
+        story = await _read_story(initialized_db_path, "s-fix")
+        assert new_state == "qa_testing"
+        assert story is not None
+        assert story.current_phase == "qa_testing"
+
+        await tq.stop()
+
+
+# ---------------------------------------------------------------------------
 # Test: Error isolation
 # ---------------------------------------------------------------------------
 

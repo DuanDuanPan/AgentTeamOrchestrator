@@ -171,6 +171,21 @@ class TestGetUndispatchedStories:
         assert len(stories) == 0
 
     @pytest.mark.asyncio
+    async def test_fixing_story_without_task_detected(self, tmp_path: Path) -> None:
+        """fixing 阶段无 task 的 story 仍应可被发现并恢复 owner task。"""
+        db_path = await _setup_db(tmp_path)
+        await _insert_story(db_path, "s-1", "fixing", "in_progress")
+
+        db = await get_connection(db_path)
+        try:
+            stories = await get_undispatched_stories(db)
+        finally:
+            await db.close()
+
+        assert len(stories) == 1
+        assert stories[0].story_id == "s-1"
+
+    @pytest.mark.asyncio
     async def test_story_with_fix_placeholder_not_detected(self, tmp_path: Path) -> None:
         """convergent_loop 的 pending fix placeholder 也应阻止初始分发。"""
         import json
@@ -422,6 +437,64 @@ class TestInitialDispatchDelegation:
         assert len(tasks) == 1
         assert tasks[0].task_id == dispatched_task.task_id
         assert tasks[0].status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_fixing_initial_dispatch_inferrs_qa_resume_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """QA-origin fixing 初始调度应保留回到 qa_testing 的上下文。"""
+        import json
+
+        db_path = await _setup_db(tmp_path)
+        story = _make_story_record("s-fix-qa", current_phase="fixing", status="in_progress")
+
+        db = await get_connection(db_path)
+        try:
+            await insert_story(db, story)
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=f"task-{uuid.uuid4().hex[:8]}",
+                    story_id="s-fix-qa",
+                    phase="qa_testing",
+                    role="qa",
+                    cli_tool="codex",
+                    status="completed",
+                    started_at=datetime.now(tz=UTC),
+                    completed_at=datetime.now(tz=UTC),
+                ),
+            )
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=_make_settings(), db_path=db_path)
+
+        with (
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={
+                    "role": "fixer",
+                    "cli_tool": "claude",
+                    "phase_type": "structured_job",
+                    "workspace": "main",
+                },
+            ),
+            patch.object(
+                orchestrator,
+                "_dispatch_batch_restart",
+                new_callable=AsyncMock,
+            ) as mock_batch,
+        ):
+            await orchestrator._dispatch_initial_phase(story)
+
+        mock_batch.assert_called_once()
+        dispatched_task = mock_batch.call_args.args[0]
+        assert dispatched_task.context_briefing is not None
+        assert json.loads(dispatched_task.context_briefing) == {
+            "fix_kind": "phase_resume",
+            "resume_phase": "qa_testing",
+        }
 
     @pytest.mark.asyncio
     async def test_initial_dispatch_skips_story_blocked_by_crash_recovery(

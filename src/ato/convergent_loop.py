@@ -891,14 +891,7 @@ class ConvergentLoop:
                 blocking_count=blocking_count,
                 suggestion_count=suggestion_count,
             )
-            await self._transition_queue.submit(
-                TransitionEvent(
-                    story_id=story_id,
-                    event_name="review_pass",
-                    source="agent",
-                    submitted_at=datetime.now(tz=UTC),
-                )
-            )
+            await self._submit_transition(story_id, "review_pass")
         else:
             # --- structlog: needs fix (Task 4.3) ---
             logger.info(
@@ -915,14 +908,7 @@ class ConvergentLoop:
                 story_id,
                 round_num=round_num,
             )
-            await self._transition_queue.submit(
-                TransitionEvent(
-                    story_id=story_id,
-                    event_name="review_fail",
-                    source="agent",
-                    submitted_at=datetime.now(tz=UTC),
-                )
-            )
+            await self._submit_transition(story_id, "review_fail")
 
         return ConvergentLoopResult(
             story_id=story_id,
@@ -1006,14 +992,7 @@ class ConvergentLoop:
             errors=[e.message for e in validation_result.errors],
         )
 
-        await self._transition_queue.submit(
-            TransitionEvent(
-                story_id=story_id,
-                event_name="validate_fail",
-                source="agent",
-                submitted_at=datetime.now(tz=UTC),
-            )
-        )
+        await self._submit_transition(story_id, "validate_fail")
 
         return ConvergentLoopResult(
             story_id=story_id,
@@ -1077,14 +1056,7 @@ class ConvergentLoop:
                 stage=stage,
                 expected_artifact="convergent_loop_fix_skipped_no_blocking",
             )
-            await self._transition_queue.submit(
-                TransitionEvent(
-                    story_id=story_id,
-                    event_name="fix_done",
-                    source="agent",
-                    submitted_at=datetime.now(tz=UTC),
-                )
-            )
+            await self._submit_transition(story_id, "fix_done")
             # findings_total 仅计 blocking（fix 阶段不涉及 suggestion）
             return ConvergentLoopResult(
                 story_id=story_id,
@@ -1180,14 +1152,7 @@ class ConvergentLoop:
         )
 
         # --- Submit fix_done event ---
-        await self._transition_queue.submit(
-            TransitionEvent(
-                story_id=story_id,
-                event_name="fix_done",
-                source="agent",
-                submitted_at=datetime.now(tz=UTC),
-            )
-        )
+        await self._submit_transition(story_id, "fix_done")
 
         return ConvergentLoopResult(
             story_id=story_id,
@@ -1198,6 +1163,20 @@ class ConvergentLoop:
             suggestion_count=0,
             open_count=len(blocking_findings),
         )
+
+    async def _submit_transition(self, story_id: str, event_name: str) -> None:
+        """Submit a transition and wait for commit when supported by the queue."""
+        event = TransitionEvent(
+            story_id=story_id,
+            event_name=event_name,
+            source="agent",
+            submitted_at=datetime.now(tz=UTC),
+        )
+        submit_and_wait = getattr(type(self._transition_queue), "submit_and_wait", None)
+        if callable(submit_and_wait):
+            await self._transition_queue.submit_and_wait(event)
+            return
+        await self._transition_queue.submit(event)
 
     @staticmethod
     async def insert_review_placeholder(
@@ -1564,14 +1543,7 @@ class ConvergentLoop:
                 blocking_count=blocking_count,
                 suggestion_count=suggestion_count,
             )
-            await self._transition_queue.submit(
-                TransitionEvent(
-                    story_id=story_id,
-                    event_name="review_pass",
-                    source="agent",
-                    submitted_at=datetime.now(tz=UTC),
-                )
-            )
+            await self._submit_transition(story_id, "review_pass")
         else:
             logger.info(
                 "convergent_loop_needs_fix",
@@ -1586,14 +1558,7 @@ class ConvergentLoop:
                 round_num=round_num,
                 stage=stage,
             )
-            await self._transition_queue.submit(
-                TransitionEvent(
-                    story_id=story_id,
-                    event_name="review_fail",
-                    source="agent",
-                    submitted_at=datetime.now(tz=UTC),
-                )
-            )
+            await self._submit_transition(story_id, "review_fail")
 
         return ConvergentLoopResult(
             story_id=story_id,

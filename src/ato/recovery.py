@@ -70,6 +70,12 @@ _PHASE_FAIL_EVENT: dict[str, str] = {
     "regression": "regression_fail",
 }
 
+_FIXING_RESUME_PHASE_EVENT: dict[str, str] = {
+    "qa_testing": "qa_fix_done",
+    "uat": "uat_fix_done",
+    "regression": "regression_fix_done",
+}
+
 # Phase → BMAD skill type 映射（仅 convergent_loop phases）
 _PHASE_BMAD_SKILL: dict[str, str] = {
     "validating": "story_validation",
@@ -652,6 +658,26 @@ class RecoveryEngine:
             cli_tool=cli_tool,
         )
 
+    async def _submit_transition_event(
+        self,
+        *,
+        story_id: str,
+        event_name: str,
+        source: Literal["agent", "cli"] = "agent",
+    ) -> None:
+        """Submit a transition and wait for commit when the queue supports it."""
+        event = TransitionEvent(
+            story_id=story_id,
+            event_name=event_name,
+            source=source,
+            submitted_at=datetime.now(tz=UTC),
+        )
+        submit_and_wait = getattr(type(self._transition_queue), "submit_and_wait", None)
+        if callable(submit_and_wait):
+            await self._transition_queue.submit_and_wait(event)
+            return
+        await self._transition_queue.submit(event)
+
     async def await_background_tasks(self) -> None:
         """等待所有后台任务完成。供测试和 Orchestrator shutdown 使用。"""
         if self._background_tasks:
@@ -787,29 +813,56 @@ class RecoveryEngine:
         finally:
             await db.close()
 
-        event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
-        if event_name is not None:
-            # Design gate: designing phase 需要验证 UX 产出物
-            if event_name == "design_done":
-                # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
-                self._generate_manifest_before_gate(task.story_id)
-                gate_ok = await self._check_design_gate(task)
-                if not gate_ok:
-                    return
-            await self._transition_queue.submit(
-                TransitionEvent(
+        if task.phase == "fixing":
+            event_name, continue_convergent = self._resolve_fixing_success_event(task)
+            if continue_convergent:
+                from ato.convergent_loop import ConvergentLoop
+
+                await ConvergentLoop.insert_review_placeholder(
+                    story_id=task.story_id,
+                    db_path=self._db_path,
+                )
+                await self._submit_transition_event(
                     story_id=task.story_id,
                     event_name=event_name,
-                    source="agent",
-                    submitted_at=datetime.now(tz=UTC),
                 )
-            )
+                await self.continue_after_fix_success(
+                    task,
+                    worktree_path=await self._get_story_worktree(task.story_id),
+                )
+            else:
+                await self._submit_transition_event(
+                    story_id=task.story_id,
+                    event_name=event_name,
+                )
             logger.info(
                 "recovery_action_complete",
                 task_id=task.task_id,
                 story_id=task.story_id,
                 artifact=task.expected_artifact,
                 transition_event=event_name,
+            )
+            return
+
+        success_event = _PHASE_SUCCESS_EVENT.get(task.phase)
+        if success_event is not None:
+            # Design gate: designing phase 需要验证 UX 产出物
+            if success_event == "design_done":
+                # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
+                self._generate_manifest_before_gate(task.story_id)
+                gate_ok = await self._check_design_gate(task)
+                if not gate_ok:
+                    return
+            await self._submit_transition_event(
+                story_id=task.story_id,
+                event_name=success_event,
+            )
+            logger.info(
+                "recovery_action_complete",
+                task_id=task.task_id,
+                story_id=task.story_id,
+                artifact=task.expected_artifact,
+                transition_event=success_event,
             )
         else:
             logger.warning(
@@ -1155,6 +1208,72 @@ class RecoveryEngine:
         if stage not in ("standard", "escalated"):
             return round_num, None
         return round_num, stage
+
+    @staticmethod
+    def _build_fix_resume_phase_context(
+        resume_phase: Literal["qa_testing", "uat", "regression"],
+    ) -> str:
+        """Persist non-review fix resume metadata for restart/recovery."""
+        return json.dumps(
+            {
+                "fix_kind": "phase_resume",
+                "resume_phase": resume_phase,
+            }
+        )
+
+    @staticmethod
+    def _parse_fix_resume_phase_context(
+        task: TaskRecord,
+    ) -> Literal["qa_testing", "uat", "regression"] | None:
+        """Extract the phase a non-review fix should resume into."""
+        if not task.context_briefing:
+            return None
+        try:
+            ctx = json.loads(task.context_briefing)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        if ctx.get("fix_kind") != "phase_resume":
+            return None
+
+        resume_phase = ctx.get("resume_phase")
+        if resume_phase == "qa_testing":
+            return "qa_testing"
+        if resume_phase == "uat":
+            return "uat"
+        if resume_phase == "regression":
+            return "regression"
+        return None
+
+    @classmethod
+    def _resolve_fixing_success_event(cls, task: TaskRecord) -> tuple[str, bool]:
+        """Return the success transition for a fixing task and follow-up mode."""
+        fix_round, _stage = cls._parse_fix_resume_context(task)
+        if fix_round is not None:
+            return "fix_done", True
+
+        resume_phase = cls._parse_fix_resume_phase_context(task)
+        if resume_phase is not None:
+            return _FIXING_RESUME_PHASE_EVENT[resume_phase], False
+
+        return "fix_done", False
+
+    @staticmethod
+    def _infer_fix_resume_phase(
+        tasks: list[TaskRecord],
+    ) -> Literal["qa_testing", "uat", "regression"] | None:
+        """Infer whether fixing should resume QA/UAT/regression instead of review."""
+        for prior_task in reversed(tasks):
+            if prior_task.status != "completed" or prior_task.phase == "fixing":
+                continue
+            if prior_task.phase == "qa_testing":
+                return "qa_testing"
+            if prior_task.phase == "uat":
+                return "uat"
+            if prior_task.phase == "regression":
+                return "regression"
+            return None
+        return None
 
     def _resolve_reviewing_dispatch_options(self) -> tuple[int, dict[str, Any] | None]:
         """Resolve reviewer dispatch options from reviewing phase config."""
@@ -1865,13 +1984,9 @@ class RecoveryEngine:
 
             event_name = success_event if converged else fail_event
             if event_name is not None:
-                await self._transition_queue.submit(
-                    TransitionEvent(
-                        story_id=task.story_id,
-                        event_name=event_name,
-                        source="agent",
-                        submitted_at=datetime.now(tz=UTC),
-                    )
+                await self._submit_transition_event(
+                    story_id=task.story_id,
+                    event_name=event_name,
                 )
 
             logger.info(
@@ -1908,13 +2023,9 @@ class RecoveryEngine:
             if isinstance(self._transition_queue, TransitionQueue):
                 await self._transition_queue.ensure_dev_ready_progress(task.story_id)
             else:
-                await self._transition_queue.submit(
-                    TransitionEvent(
-                        story_id=task.story_id,
-                        event_name="start_dev",
-                        source="agent",
-                        submitted_at=datetime.now(tz=UTC),
-                    )
+                await self._submit_transition_event(
+                    story_id=task.story_id,
+                    event_name="start_dev",
                 )
             db = await get_connection(self._db_path)
             try:
@@ -2022,56 +2133,53 @@ class RecoveryEngine:
             )
 
             if result.status == "success":
-                # fixing phase: 走 convergent loop 控制流，不直接 transition
-                fix_round, _fix_stage = self._parse_fix_resume_context(task)
-                if task.phase == "fixing" and fix_round is not None:
-                    from ato.convergent_loop import ConvergentLoop
+                if task.phase == "fixing":
+                    event_name, continue_convergent = self._resolve_fixing_success_event(task)
+                    if continue_convergent:
+                        from ato.convergent_loop import ConvergentLoop
 
-                    await ConvergentLoop.insert_review_placeholder(
-                        story_id=task.story_id,
-                        db_path=self._db_path,
-                    )
-                    await self._transition_queue.submit(
-                        TransitionEvent(
+                        await ConvergentLoop.insert_review_placeholder(
                             story_id=task.story_id,
-                            event_name="fix_done",
-                            source="agent",
-                            submitted_at=datetime.now(tz=UTC),
+                            db_path=self._db_path,
                         )
-                    )
-                    await self.continue_after_fix_success(
-                        task,
-                        worktree_path=options.get("cwd") if options else None,
-                    )
+                        await self._submit_transition_event(
+                            story_id=task.story_id,
+                            event_name=event_name,
+                        )
+                        await self.continue_after_fix_success(
+                            task,
+                            worktree_path=options.get("cwd") if options else None,
+                        )
+                    else:
+                        await self._submit_transition_event(
+                            story_id=task.story_id,
+                            event_name=event_name,
+                        )
                     logger.info(
                         "recovery_dispatch_complete",
                         task_id=task.task_id,
                         story_id=task.story_id,
-                        transition_event="fix_done",
+                        transition_event=event_name,
                     )
                 else:
-                    event_name = _PHASE_SUCCESS_EVENT.get(task.phase)
-                    if event_name is not None:
+                    success_event = _PHASE_SUCCESS_EVENT.get(task.phase)
+                    if success_event is not None:
                         # Design gate: designing phase 需要验证 UX 产出物
-                        if event_name == "design_done":
+                        if success_event == "design_done":
                             # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
                             self._generate_manifest_before_gate(task.story_id)
                             gate_ok = await self._check_design_gate(task)
                             if not gate_ok:
                                 return
-                        await self._transition_queue.submit(
-                            TransitionEvent(
-                                story_id=task.story_id,
-                                event_name=event_name,
-                                source="agent",
-                                submitted_at=datetime.now(tz=UTC),
-                            )
+                        await self._submit_transition_event(
+                            story_id=task.story_id,
+                            event_name=success_event,
                         )
                         logger.info(
                             "recovery_dispatch_complete",
                             task_id=task.task_id,
                             story_id=task.story_id,
-                            transition_event=event_name,
+                            transition_event=success_event,
                         )
             else:
                 logger.warning(

@@ -4068,6 +4068,83 @@ class TestBatchRestartWorkspaceBranches:
         options = mock_adapter.execute.call_args[0][1]
         assert options["cwd"] == str(wt_dir)
 
+    async def test_batch_restart_skips_stale_success_transition(
+        self, initialized_db_path: Path
+    ) -> None:
+        """任务完成前 story 已推进时，不应再提交旧 phase 的 success transition。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={"merger": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "merging",
+                    "role": "merger",
+                    "type": "structured_job",
+                    "next_on_success": "regression",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="pending",
+            task_id="t-merge-stale",
+            story_id="s-merge-stale",
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'merging', role = 'merger', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested' "
+                "WHERE task_id = 't-merge-stale'"
+            )
+            await db.execute(
+                "UPDATE stories SET current_phase = 'regression' "
+                "WHERE story_id = 's-merge-stale'"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+        task = TaskRecord(
+            task_id="t-merge-stale",
+            story_id="s-merge-stale",
+            phase="merging",
+            role="merger",
+            cli_tool="claude",
+            status="pending",
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with (
+            patch("ato.recovery._create_adapter", return_value=object()),
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(
+                    return_value=AdapterResult(
+                        status="success",
+                        exit_code=0,
+                        duration_ms=10,
+                        text_result="merged already",
+                    )
+                ),
+            ),
+            patch.object(
+                orchestrator,
+                "_submit_transition_event",
+                new=AsyncMock(),
+            ) as mock_submit_transition,
+        ):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_submit_transition.assert_not_called()
+
     async def test_batch_restart_fixing_context_continues_convergent_loop(
         self, initialized_db_path: Path, tmp_path: Path
     ) -> None:
@@ -4173,3 +4250,267 @@ class TestBatchRestartWorkspaceBranches:
         mock_continue.assert_awaited_once()
         assert mock_continue.await_args is not None
         assert mock_continue.await_args.kwargs["worktree_path"] == str(wt_dir)
+
+    async def test_batch_restart_fixing_phase_resume_returns_to_qa_testing(
+        self, initialized_db_path: Path, tmp_path: Path
+    ) -> None:
+        """QA-origin fixing restart 成功后应提交 qa_fix_done，而不是回到 reviewing。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="pending",
+            task_id="t-fix-resume-qa",
+            story_id="s-fix-resume-qa",
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'fixing', role = 'fixer', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested', "
+                "context_briefing = ? "
+                "WHERE task_id = 't-fix-resume-qa'",
+                (json.dumps({"fix_kind": "phase_resume", "resume_phase": "qa_testing"}),),
+            )
+            await db.execute(
+                "UPDATE stories SET current_phase = 'fixing' WHERE story_id = 's-fix-resume-qa'"
+            )
+            wt_dir = tmp_path / "wt-fix-resume"
+            wt_dir.mkdir()
+            await update_story_worktree_path(db, "s-fix-resume-qa", str(wt_dir))
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        task = TaskRecord(
+            task_id="t-fix-resume-qa",
+            story_id="s-fix-resume-qa",
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            status="pending",
+            context_briefing=json.dumps(
+                {"fix_kind": "phase_resume", "resume_phase": "qa_testing"}
+            ),
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with (
+            patch("ato.recovery._create_adapter", return_value=object()),
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(
+                    return_value=AdapterResult(
+                        status="success",
+                        exit_code=0,
+                        duration_ms=10,
+                        text_result="fixed",
+                    )
+                ),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine.continue_after_fix_success",
+                new=AsyncMock(),
+            ) as mock_continue,
+            patch.object(
+                orchestrator,
+                "_submit_transition_event",
+                new=AsyncMock(),
+            ) as mock_submit_transition,
+        ):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_submit_transition.assert_awaited_once_with(
+            story_id="s-fix-resume-qa",
+            event_name="qa_fix_done",
+        )
+        mock_continue.assert_not_awaited()
+
+
+class TestCommittedCoreTransitions:
+    """真实 TransitionQueue 下，core 返回前必须完成状态落库。"""
+
+    async def test_batch_restart_waits_for_transition_commit(
+        self, initialized_db_path: Path
+    ) -> None:
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, get_story, insert_story, insert_task
+        from ato.models.schemas import AdapterResult, StoryRecord, TaskRecord
+        from ato.transition_queue import TransitionQueue
+
+        now = datetime.now(tz=UTC)
+        settings = ATOSettings(
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "designing",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-commit-restart",
+                    title="Committed Restart",
+                    status="in_progress",
+                    current_phase="creating",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-commit-restart",
+                    story_id="s-commit-restart",
+                    phase="creating",
+                    role="creator",
+                    cli_tool="claude",
+                    status="pending",
+                    started_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+            orchestrator._tq = tq
+            task = TaskRecord(
+                task_id="t-commit-restart",
+                story_id="s-commit-restart",
+                phase="creating",
+                role="creator",
+                cli_tool="claude",
+                status="pending",
+                started_at=now,
+            )
+
+            with (
+                patch("ato.recovery._create_adapter", return_value=object()),
+                patch(
+                    "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                    new=AsyncMock(
+                        return_value=AdapterResult(
+                            status="success",
+                            exit_code=0,
+                            duration_ms=10,
+                            text_result="ok",
+                        )
+                    ),
+                ),
+            ):
+                await orchestrator._dispatch_batch_restart(task)
+
+            db = await get_connection(initialized_db_path)
+            try:
+                story = await get_story(db, "s-commit-restart")
+            finally:
+                await db.close()
+            assert story is not None
+            assert story.current_phase == "designing"
+        finally:
+            await tq.stop()
+
+    async def test_group_result_waits_for_transition_commit(
+        self, initialized_db_path: Path
+    ) -> None:
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, get_story, insert_story
+        from ato.models.schemas import AdapterResult, StoryRecord, TaskRecord
+        from ato.transition_queue import TransitionQueue
+
+        now = datetime.now(tz=UTC)
+        settings = ATOSettings(
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "designing",
+                    "workspace": "main",
+                },
+            ],
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-group-commit",
+                    title="Committed Group",
+                    status="in_progress",
+                    current_phase="creating",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+        finally:
+            await db.close()
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+            orchestrator._tq = tq
+            task = TaskRecord(
+                task_id="t-group-commit",
+                story_id="s-group-commit",
+                phase="creating",
+                role="creator",
+                cli_tool="claude",
+                status="completed",
+                started_at=now,
+            )
+
+            with patch.object(orchestrator, "_check_story_artifact", return_value=True):
+                await orchestrator._handle_group_result(
+                    [task],
+                    AdapterResult(
+                        status="success",
+                        exit_code=0,
+                        duration_ms=10,
+                        text_result="ok",
+                    ),
+                    "creating",
+                    {"phase_type": "structured_job"},
+                )
+
+            db = await get_connection(initialized_db_path)
+            try:
+                story = await get_story(db, "s-group-commit")
+            finally:
+                await db.close()
+            assert story is not None
+            assert story.current_phase == "designing"
+        finally:
+            await tq.stop()

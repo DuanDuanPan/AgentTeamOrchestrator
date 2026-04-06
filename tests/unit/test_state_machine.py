@@ -180,6 +180,30 @@ class TestLegalTransitions:
         await sm.send("fix_done")
         assert sm.current_state_value == "reviewing"
 
+    async def test_qa_fix_done(self) -> None:
+        """QA-origin fixing 成功后应回到 qa_testing。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "qa_testing")
+        await sm.send("qa_fail")
+        await sm.send("qa_fix_done")
+        assert sm.current_state_value == "qa_testing"
+
+    async def test_uat_fix_done(self) -> None:
+        """UAT-origin fixing 成功后应回到 uat。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "uat")
+        await sm.send("uat_fail")
+        await sm.send("uat_fix_done")
+        assert sm.current_state_value == "uat"
+
+    async def test_regression_fix_done(self) -> None:
+        """Regression-origin fixing 成功后应回到 regression。"""
+        sm = await _make_sm()
+        await _advance_to(sm, "regression")
+        await sm.send("regression_fail")
+        await sm.send("regression_fix_done")
+        assert sm.current_state_value == "regression"
+
     async def test_qa_pass(self) -> None:
         sm = await _make_sm()
         await _advance_to(sm, "qa_testing")

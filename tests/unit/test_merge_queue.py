@@ -1249,6 +1249,82 @@ class TestHappyPathMergeRegressionPassToDone:
         worktree_mgr.cleanup.assert_awaited_once_with("s1")
 
 
+class TestCommittedMergeQueueTransitions:
+    """真实 TransitionQueue 下，merge queue 返回前必须完成状态落库。"""
+
+    async def test_regression_pass_waits_for_transition_commit(
+        self, initialized_db_path: Path
+    ) -> None:
+        from ato.merge_queue import MergeQueue
+        from ato.models.db import get_story, insert_task
+        from ato.models.schemas import TaskRecord
+        from ato.transition_queue import TransitionQueue
+
+        worktree_mgr = AsyncMock()
+        worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.cleanup = AsyncMock()
+
+        settings = MagicMock()
+        settings.merge_rebase_timeout = 120
+        settings.merge_conflict_resolution_max_attempts = 1
+        settings.regression_test_command = "echo ok"
+        settings.get_regression_commands = MagicMock(return_value=["echo ok"])
+        settings.timeout.structured_job = 1800
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            queue = MergeQueue(
+                db_path=initialized_db_path,
+                worktree_mgr=worktree_mgr,
+                transition_queue=tq,
+                settings=settings,
+            )
+            await _insert_test_story(initialized_db_path, "s-merge-commit")
+
+            task_id = "task-reg-commit"
+            now = datetime.now(tz=UTC)
+            db = await get_connection(initialized_db_path)
+            try:
+                await enqueue_merge(db, "s-merge-commit", "a-commit", _NOW, _NOW)
+                await dequeue_next_merge(db)
+                await mark_regression_dispatched(db, "s-merge-commit", task_id)
+                await db.execute(
+                    "UPDATE stories SET current_phase = 'regression' WHERE story_id = ?",
+                    ("s-merge-commit",),
+                )
+                await insert_task(
+                    db,
+                    TaskRecord(
+                        task_id=task_id,
+                        story_id="s-merge-commit",
+                        phase="regression",
+                        role="qa",
+                        cli_tool="codex",
+                        status="completed",
+                        started_at=now,
+                        completed_at=now,
+                        exit_code=0,
+                    ),
+                )
+                await set_current_merge_story(db, "s-merge-commit")
+            finally:
+                await db.close()
+
+            await queue.check_regression_completion()
+
+            db = await get_connection(initialized_db_path)
+            try:
+                story = await get_story(db, "s-merge-commit")
+            finally:
+                await db.close()
+            assert story is not None
+            assert story.current_phase == "done"
+            worktree_mgr.cleanup.assert_awaited_once_with("s-merge-commit")
+        finally:
+            await tq.stop()
+
+
 class TestRebaseConflictDoesNotFreezeQueue:
     """AC5: rebase 冲突不触发 merge queue 冻结。"""
 

@@ -261,6 +261,20 @@ class MergeQueue:
         self._settings = settings
         self._worker_tasks: dict[str, asyncio.Task[None]] = {}
 
+    async def _submit_transition_event(self, story_id: str, event_name: str) -> None:
+        """Submit a transition and wait for commit when supported by the queue."""
+        event = TransitionEvent(
+            story_id=story_id,
+            event_name=event_name,
+            source="agent",
+            submitted_at=datetime.now(tz=UTC),
+        )
+        submit_and_wait = getattr(type(self._tq), "submit_and_wait", None)
+        if callable(submit_and_wait):
+            await self._tq.submit_and_wait(event)
+            return
+        await self._tq.submit(event)
+
     async def _clear_current_merge_story_lock(
         self,
         story_id: str,
@@ -322,14 +336,7 @@ class MergeQueue:
             set_merge_queue_frozen,
         )
 
-        await self._tq.submit(
-            TransitionEvent(
-                story_id=story_id,
-                event_name="regression_pass",
-                source="agent",
-                submitted_at=datetime.now(tz=UTC),
-            )
-        )
+        await self._submit_transition_event(story_id, "regression_pass")
         await complete_merge(db, story_id, success=True)
 
         state = await get_merge_queue_state(db)
@@ -638,14 +645,7 @@ class MergeQueue:
         logger.info("merge_ff_completed", story_id=story_id)
 
         # Step 3: Transition → regression
-        await self._tq.submit(
-            TransitionEvent(
-                story_id=story_id,
-                event_name="merge_done",
-                source="agent",
-                submitted_at=datetime.now(tz=UTC),
-            )
-        )
+        await self._submit_transition_event(story_id, "merge_done")
 
         # Step 4: Dispatch regression test
         task_id = await self._dispatch_regression_test(story_id)
