@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -381,3 +382,115 @@ class TestMigrationV10:
             row = await cursor.fetchone()
             assert row is not None
             assert row[0] == 10
+
+
+class TestMigrationV12:
+    """MIGRATIONS[12] — findings 表新增 phase 列并回填历史。"""
+
+    async def test_migrate_v11_to_v12_backfills_findings_phase(self, db_path: Path) -> None:
+        """旧 findings 应根据最近的 convergent-loop task 回填 phase。"""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, 11)
+
+            review_done = datetime.now(tz=UTC) - timedelta(minutes=10)
+            qa_done = datetime.now(tz=UTC) - timedelta(minutes=1)
+            story_id = "story-v12"
+            await db.execute(
+                "INSERT INTO stories (story_id, title, status, current_phase, worktree_path, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    story_id,
+                    "Story V12",
+                    "in_progress",
+                    "reviewing",
+                    "/tmp/wt",
+                    review_done.isoformat(),
+                    qa_done.isoformat(),
+                ),
+            )
+            await db.execute(
+                "INSERT INTO tasks (task_id, story_id, phase, role, cli_tool, status, "
+                "started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "t-review",
+                    story_id,
+                    "reviewing",
+                    "reviewer",
+                    "codex",
+                    "completed",
+                    (review_done - timedelta(minutes=1)).isoformat(),
+                    review_done.isoformat(),
+                ),
+            )
+            await db.execute(
+                "INSERT INTO tasks (task_id, story_id, phase, role, cli_tool, status, "
+                "started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "t-qa",
+                    story_id,
+                    "qa_testing",
+                    "qa",
+                    "codex",
+                    "completed",
+                    (qa_done - timedelta(minutes=1)).isoformat(),
+                    qa_done.isoformat(),
+                ),
+            )
+            await db.execute(
+                "INSERT INTO findings (finding_id, story_id, round_num, severity, description, "
+                "status, file_path, rule_id, dedup_hash, line_number, fix_suggestion, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "f-review",
+                    story_id,
+                    3,
+                    "blocking",
+                    "old review issue",
+                    "open",
+                    "src/review.py",
+                    "R-REVIEW",
+                    "hash-review",
+                    None,
+                    None,
+                    review_done.isoformat(),
+                ),
+            )
+            await db.execute(
+                "INSERT INTO findings (finding_id, story_id, round_num, severity, description, "
+                "status, file_path, rule_id, dedup_hash, line_number, fix_suggestion, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "f-qa",
+                    story_id,
+                    1,
+                    "blocking",
+                    "qa issue",
+                    "open",
+                    "src/qa.py",
+                    "R-QA",
+                    "hash-qa",
+                    None,
+                    None,
+                    qa_done.isoformat(),
+                ),
+            )
+            await db.commit()
+
+            await run_migrations(db, 11, 12)
+
+            cursor = await db.execute("PRAGMA table_info(findings)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            assert "phase" in columns
+
+            cursor = await db.execute(
+                "SELECT finding_id, phase FROM findings WHERE story_id = ? ORDER BY finding_id",
+                (story_id,),
+            )
+            rows = await cursor.fetchall()
+            assert [tuple(row) for row in rows] == [
+                ("f-qa", "qa_testing"),
+                ("f-review", "reviewing"),
+            ]

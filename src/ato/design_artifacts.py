@@ -259,6 +259,47 @@ def write_save_report(
     return report_path
 
 
+def write_save_report_from_disk(
+    story_id: str,
+    project_root: Path,
+) -> Path:
+    """Rewrite save-report.json from current disk truth using the canonical schema.
+
+    This is used by the orchestrator immediately before design gate validation so
+    the gate no longer depends on model-authored JSON key names.
+    """
+    paths = derive_design_artifact_paths(story_id, project_root)
+    rel = derive_design_artifact_paths_relative(story_id)
+    pen_path = paths["prototype_pen"]
+
+    first_verify = verify_pen_integrity(pen_path)
+    reopen_verify = verify_pen_integrity(pen_path)
+
+    json_parse_verified = first_verify.json_parse_ok and first_verify.required_keys_present
+    reopen_verified = reopen_verify.json_parse_ok and reopen_verify.required_keys_present
+    children_count = (
+        reopen_verify.children_count if reopen_verified else first_verify.children_count
+    )
+
+    exported_png_count = 0
+    exports_dir = paths["exports_dir"]
+    if exports_dir.is_dir():
+        for export in exports_dir.iterdir():
+            if export.is_file() and export.suffix == ".png":
+                exported_png_count += 1
+
+    return write_save_report(
+        paths["save_report_json"],
+        story_id=story_id,
+        pen_file=rel["prototype_pen"],
+        snapshot_file=rel["snapshot_json"],
+        children_count=children_count,
+        json_parse_verified=json_parse_verified,
+        reopen_verified=reopen_verified,
+        exported_png_count=exported_png_count,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 保存后校验 (Story 9.1b AC#4)
 # ---------------------------------------------------------------------------

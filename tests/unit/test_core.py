@@ -3385,6 +3385,60 @@ class TestDesignGate:
         payload = build_design_gate_payload("t1", result)
         assert "save_report_summary" in payload
 
+    async def test_retry_hint_for_save_report_missing_keys(self, initialized_db_path: Path) -> None:
+        """designing retry 会注入精确的 save-report 键修复提示。"""
+        import json
+
+        from ato.models.db import get_connection, insert_approval, insert_story
+        from ato.models.schemas import ApprovalRecord, StoryRecord
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        now = datetime.now(tz=UTC)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s1",
+                    title="Test Story",
+                    status="in_progress",
+                    current_phase="designing",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="ap-save-report",
+                    story_id="s1",
+                    approval_type="needs_human_review",
+                    status="pending",
+                    payload=json.dumps(
+                        {
+                            "failure_codes": ["SAVE_REPORT_MISSING_KEYS"],
+                            "reason": "Design gate failed: SAVE_REPORT_MISSING_KEYS",
+                        }
+                    ),
+                    decision=None,
+                    decided_at=None,
+                    created_at=now,
+                    recommended_action=None,
+                    risk_level=None,
+                    decision_reason=None,
+                    consumed_at=None,
+                ),
+            )
+        finally:
+            await db.close()
+
+        prompt = await orchestrator._append_design_gate_failure_context("base prompt", "s1")
+        assert "prototype.save-report.json 必须精确包含" in prompt
+        assert "story_id/saved_at/pen_file/snapshot_file/children_count/" in prompt
+        assert "json_parse_verified/reopen_verified/exported_png_count" in prompt
+
     # --- 无 UX 目录 ---
 
     async def test_gate_fail_no_ux_dir(self, tmp_path: Path) -> None:
@@ -4103,8 +4157,7 @@ class TestBatchRestartWorkspaceBranches:
                 "WHERE task_id = 't-merge-stale'"
             )
             await db.execute(
-                "UPDATE stories SET current_phase = 'regression' "
-                "WHERE story_id = 's-merge-stale'"
+                "UPDATE stories SET current_phase = 'regression' WHERE story_id = 's-merge-stale'"
             )
             await db.commit()
         finally:
@@ -4307,9 +4360,7 @@ class TestBatchRestartWorkspaceBranches:
             role="fixer",
             cli_tool="claude",
             status="pending",
-            context_briefing=json.dumps(
-                {"fix_kind": "phase_resume", "resume_phase": "qa_testing"}
-            ),
+            context_briefing=json.dumps({"fix_kind": "phase_resume", "resume_phase": "qa_testing"}),
             started_at=datetime.now(tz=UTC),
         )
 
@@ -4340,6 +4391,128 @@ class TestBatchRestartWorkspaceBranches:
 
         mock_submit_transition.assert_awaited_once_with(
             story_id="s-fix-resume-qa",
+            event_name="qa_fix_done",
+        )
+        mock_continue.assert_not_awaited()
+
+    async def test_batch_restart_fixing_backfills_legacy_qa_resume_context(
+        self, initialized_db_path: Path, tmp_path: Path
+    ) -> None:
+        """空 context 的 legacy QA-origin fixing restart 也应提交 qa_fix_done。"""
+        from ato.config import ATOSettings
+        from ato.models.db import get_connection, insert_task, update_story_worktree_path
+        from ato.models.schemas import AdapterResult, TaskRecord
+
+        settings = ATOSettings(
+            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="pending",
+            task_id="t-fix-legacy-qa",
+            story_id="s-fix-legacy-qa",
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'qa_testing', role = 'qa', "
+                "cli_tool = 'codex', status = 'completed', "
+                "started_at = ?, completed_at = ? "
+                "WHERE task_id = 't-fix-legacy-qa'",
+                (
+                    datetime.now(tz=UTC).isoformat(),
+                    datetime.now(tz=UTC).isoformat(),
+                ),
+            )
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-review-placeholder-legacy",
+                    story_id="s-fix-legacy-qa",
+                    phase="reviewing",
+                    role="reviewer",
+                    cli_tool="codex",
+                    status="completed",
+                    expected_artifact="convergent_loop_review_placeholder",
+                    started_at=None,
+                    completed_at=datetime.now(tz=UTC),
+                ),
+            )
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-fix-legacy-qa-current",
+                    story_id="s-fix-legacy-qa",
+                    phase="fixing",
+                    role="fixer",
+                    cli_tool="claude",
+                    status="pending",
+                    expected_artifact="restart_requested",
+                    context_briefing=None,
+                    started_at=datetime.now(tz=UTC),
+                ),
+            )
+            await db.execute(
+                "UPDATE stories SET current_phase = 'fixing' WHERE story_id = 's-fix-legacy-qa'"
+            )
+            wt_dir = tmp_path / "wt-fix-legacy-qa"
+            wt_dir.mkdir()
+            await update_story_worktree_path(db, "s-fix-legacy-qa", str(wt_dir))
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        task = TaskRecord(
+            task_id="t-fix-legacy-qa-current",
+            story_id="s-fix-legacy-qa",
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            status="pending",
+            context_briefing=None,
+            started_at=datetime.now(tz=UTC),
+        )
+
+        with (
+            patch("ato.recovery._create_adapter", return_value=object()),
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(
+                    return_value=AdapterResult(
+                        status="success",
+                        exit_code=0,
+                        duration_ms=10,
+                        text_result="fixed",
+                    )
+                ),
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine.continue_after_fix_success",
+                new=AsyncMock(),
+            ) as mock_continue,
+            patch.object(
+                orchestrator,
+                "_submit_transition_event",
+                new=AsyncMock(),
+            ) as mock_submit_transition,
+        ):
+            await orchestrator._dispatch_batch_restart(task)
+
+        mock_submit_transition.assert_awaited_once_with(
+            story_id="s-fix-legacy-qa",
             event_name="qa_fix_done",
         )
         mock_continue.assert_not_awaited()

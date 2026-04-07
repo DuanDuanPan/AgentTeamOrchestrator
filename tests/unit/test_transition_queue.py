@@ -691,9 +691,10 @@ class TestConditionalPhaseSkip:
 
         # create_done → designing (skip_when triggers) → auto design_done → validating
         await tq.submit(_make_event("s-noui", "create_done"))
-        # 等足够时间让 auto-skip event 也被处理
-        await asyncio.sleep(0.1)
-        await tq._queue.join()
+        # Regression guard: auto-skip must not crash the consumer or hang join().
+        await asyncio.wait_for(tq._queue.join(), timeout=1.0)
+        assert tq._consumer_task is not None
+        assert not tq._consumer_task.done()
 
         story = await _read_story(initialized_db_path, "s-noui")
         assert story is not None

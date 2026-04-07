@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 11
+SCHEMA_VERSION: int = 12
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -260,6 +260,7 @@ class FindingRecord(_StrictBase):
 
     finding_id: str
     story_id: str
+    phase: str = "reviewing"
     round_num: int
     severity: FindingSeverity
     description: str

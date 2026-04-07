@@ -178,6 +178,32 @@ class BmadAdapter:
         # Stage 1: deterministic fast-path
         findings = _deterministic_parse(markdown_output, skill_type=skill_type)
         if findings is not None:
+            incomplete_reason = _detect_incomplete_review_output(
+                markdown_output,
+                skill_type=skill_type,
+                findings=findings,
+            )
+            if incomplete_reason is not None:
+                logger.warning(
+                    "bmad_parse_incomplete_output",
+                    story_id=story_id,
+                    skill_type=skill_type.value,
+                    parser_mode="deterministic",
+                    reason=incomplete_reason,
+                    raw_output_preview=preview,
+                )
+                return BmadParseResult.model_validate(
+                    {
+                        "skill_type": skill_type,
+                        "verdict": "parse_failed",
+                        "findings": [],
+                        "parser_mode": "failed",
+                        "raw_markdown_hash": raw_hash,
+                        "raw_output_preview": preview,
+                        "parse_error": incomplete_reason,
+                        "parsed_at": now,
+                    }
+                )
             verdict = _compute_effective_verdict(markdown_output, skill_type, findings)
             return BmadParseResult.model_validate(
                 {
@@ -201,6 +227,32 @@ class BmadAdapter:
                     story_id=story_id,
                 )
                 findings_objs = _normalize_raw_findings(raw_findings, skill_type)
+                incomplete_reason = _detect_incomplete_review_output(
+                    markdown_output,
+                    skill_type=skill_type,
+                    findings=findings_objs,
+                )
+                if incomplete_reason is not None:
+                    logger.warning(
+                        "bmad_parse_incomplete_output",
+                        story_id=story_id,
+                        skill_type=skill_type.value,
+                        parser_mode="semantic_fallback",
+                        reason=incomplete_reason,
+                        raw_output_preview=preview,
+                    )
+                    return BmadParseResult.model_validate(
+                        {
+                            "skill_type": skill_type,
+                            "verdict": "parse_failed",
+                            "findings": [],
+                            "parser_mode": "failed",
+                            "raw_markdown_hash": raw_hash,
+                            "raw_output_preview": preview,
+                            "parse_error": incomplete_reason,
+                            "parsed_at": now,
+                        }
+                    )
                 verdict = _compute_effective_verdict(markdown_output, skill_type, findings_objs)
                 return BmadParseResult.model_validate(
                     {
@@ -273,6 +325,40 @@ def _compute_effective_verdict(
     if explicit == "approved":
         return "changes_requested" if computed == "changes_requested" else "approved"
     return computed
+
+
+_INCOMPLETE_CODE_REVIEW_RE = re.compile(
+    r"("  # explicit request for follow-up/confirmation
+    r"请确认|确认继续|继续执行\s*step|continue\s+executing\s+step|"
+    r"confirm\s+to\s+continue|which\s+mode\s+should|"
+    r"还是改为|是否包含未提交|include\s+uncommitted|"
+    r"before\s+continuing|awaiting\s+confirmation"
+    r")",
+    re.IGNORECASE,
+)
+
+_CHECKPOINT_RE = re.compile(r"\bcheckpoint\b|检查点", re.IGNORECASE)
+
+
+def _detect_incomplete_review_output(
+    markdown_output: str,
+    *,
+    skill_type: BmadSkillType,
+    findings: list[BmadFinding],
+) -> str | None:
+    """Return a parse-failure reason when output is clearly not a final review result."""
+    if skill_type != BmadSkillType.CODE_REVIEW or findings:
+        return None
+    if _extract_explicit_verdict(markdown_output, skill_type) is not None:
+        return None
+
+    has_checkpoint = _CHECKPOINT_RE.search(markdown_output) is not None
+    asks_for_confirmation = _INCOMPLETE_CODE_REVIEW_RE.search(markdown_output) is not None
+    asks_question = "?" in markdown_output or "？" in markdown_output
+
+    if asks_for_confirmation and (has_checkpoint or asks_question):
+        return "Code review output is incomplete and asks for confirmation"
+    return None
 
 
 def _extract_explicit_verdict(

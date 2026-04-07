@@ -465,6 +465,20 @@ class TestInitialDispatchDelegation:
                     completed_at=datetime.now(tz=UTC),
                 ),
             )
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id=f"task-{uuid.uuid4().hex[:8]}",
+                    story_id="s-fix-qa",
+                    phase="reviewing",
+                    role="reviewer",
+                    cli_tool="codex",
+                    status="completed",
+                    expected_artifact="convergent_loop_review_placeholder",
+                    started_at=None,
+                    completed_at=datetime.now(tz=UTC),
+                ),
+            )
         finally:
             await db.close()
 

@@ -37,6 +37,7 @@ from ato.models.schemas import (
 )
 from ato.nudge import Nudge
 from ato.progress import build_agent_progress_callback
+from ato.task_artifacts import derive_phase_artifact_path
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
 
@@ -1318,6 +1319,18 @@ class Orchestrator:
             "SAVE_REPORT_MISSING": (
                 "- 步骤 5f/6: 生成落盘报告 prototype.save-report.json（含验证结果）"
             ),
+            "SAVE_REPORT_MISSING_KEYS": (
+                "- 步骤 5f/6: prototype.save-report.json 必须精确包含 "
+                "story_id/saved_at/pen_file/snapshot_file/children_count/"
+                "json_parse_verified/reopen_verified/exported_png_count"
+            ),
+            "SAVE_REPORT_INVALID_JSON": (
+                "- 步骤 5f/6: prototype.save-report.json 必须是合法 JSON 对象"
+            ),
+            "SAVE_REPORT_VERIFICATION_FAILED": (
+                "- 步骤 6: 将 json_parse_verified 与 reopen_verified 写成 true，"
+                "且 exported_png_count 与实际导出数一致"
+            ),
             "EXPORTS_PNG_MISSING": "- 步骤 7: export_nodes 导出至少 1 张 PNG 到 exports/ 目录",
             "MANIFEST_PATHS_MISSING": (
                 "- 生成 prototype.manifest.yaml（含 reference_exports 路径列表）"
@@ -1524,9 +1537,7 @@ class Orchestrator:
                 phase=story.current_phase,
             )
 
-    async def _dispatch_group_phase(
-        self, stories: list[StoryRecord], phase: str
-    ) -> None:
+    async def _dispatch_group_phase(self, stories: list[StoryRecord], phase: str) -> None:
         """单会话批量 dispatch：多个 story 共享一次 CLI 调用。
 
         1. 为每个 story 创建 pending task（共享 group_id）
@@ -1549,6 +1560,7 @@ class Orchestrator:
         cli_tool_raw = phase_cfg.get("cli_tool", "claude")
         cli_tool: Literal["claude", "codex"] = "codex" if cli_tool_raw == "codex" else "claude"
         role = phase_cfg.get("role", "developer")
+        project_root = derive_project_root(self._db_path)
 
         group_id = str(_uuid.uuid4())
 
@@ -1562,7 +1574,12 @@ class Orchestrator:
                 role=str(role),
                 cli_tool=cli_tool,
                 status="pending",
-                expected_artifact="group_dispatch_requested",
+                expected_artifact=(
+                    str(path)
+                    if (path := derive_phase_artifact_path(story.story_id, phase, project_root))
+                    is not None
+                    else "group_dispatch_requested"
+                ),
                 group_id=group_id,
             )
             db = await _gc(self._db_path)
@@ -1586,7 +1603,7 @@ class Orchestrator:
 
         # 3. 构建 options
         options: dict[str, object] = {
-            "cwd": str(derive_project_root(self._db_path)),
+            "cwd": str(project_root),
             "timeout": self._settings.timeout.structured_job,
             "idle_timeout": self._settings.timeout.idle_timeout,
             "post_result_timeout": self._settings.timeout.post_result_timeout,
@@ -1657,9 +1674,7 @@ class Orchestrator:
 
         for task in tasks:
             # 检查该 story 的产物是否存在
-            artifact_exists = self._check_story_artifact(
-                task.story_id, phase, project_root
-            )
+            artifact_exists = self._check_story_artifact(task.story_id, phase, project_root)
 
             if artifact_exists:
                 # designing phase 需要 design gate
@@ -1714,21 +1729,13 @@ class Orchestrator:
                 )
 
     @staticmethod
-    def _check_story_artifact(
-        story_id: str, phase: str, project_root: Path
-    ) -> bool:
+    def _check_story_artifact(story_id: str, phase: str, project_root: Path) -> bool:
         """检查 story 的 phase 产物文件是否存在。"""
-        from ato.design_artifacts import ARTIFACTS_REL, derive_design_artifact_paths_relative
-
-        if phase == "creating":
-            artifact_path = project_root / ARTIFACTS_REL / f"{story_id}.md"
-            return artifact_path.is_file()
-        elif phase == "designing":
-            rel = derive_design_artifact_paths_relative(story_id)
-            prototype_path = project_root / rel["prototype_pen"]
-            return prototype_path.is_file()
-        # 其他 batchable phase（如 validating）暂按成功处理
-        return True
+        artifact_path = derive_phase_artifact_path(story_id, phase, project_root)
+        if artifact_path is None:
+            # 其他 batchable phase（如 validating）暂按成功处理
+            return True
+        return artifact_path.is_file()
 
     async def _dispatch_initial_phase(self, story: StoryRecord) -> None:
         """为首次进入活跃阶段的 story 调度 agent 任务。
@@ -1817,8 +1824,8 @@ class Orchestrator:
                     story_tasks = await get_tasks_by_story(db, story.story_id)
                     resume_phase = RecoveryEngine._infer_fix_resume_phase(story_tasks)
                     if resume_phase is not None:
-                        fixing_context_briefing = (
-                            RecoveryEngine._build_fix_resume_phase_context(resume_phase)
+                        fixing_context_briefing = RecoveryEngine._build_fix_resume_phase_context(
+                            resume_phase
                         )
             finally:
                 await db.close()
@@ -1831,7 +1838,18 @@ class Orchestrator:
                 cli_tool=cli_tool,
                 status="pending",
                 context_briefing=fixing_context_briefing,
-                expected_artifact="initial_dispatch_requested",
+                expected_artifact=(
+                    str(path)
+                    if (
+                        path := derive_phase_artifact_path(
+                            story.story_id,
+                            story.current_phase,
+                            derive_project_root(self._db_path),
+                        )
+                    )
+                    is not None
+                    else "initial_dispatch_requested"
+                ),
             )
             db = await get_connection(self._db_path)
             try:
@@ -2158,6 +2176,25 @@ class Orchestrator:
                     )
                     return
 
+            if (
+                artifact_path := derive_phase_artifact_path(
+                    task.story_id,
+                    task.phase,
+                    derive_project_root(self._db_path),
+                )
+            ) is not None:
+                task.expected_artifact = str(artifact_path)
+                db = await _gc(self._db_path)
+                try:
+                    await update_task_status(
+                        db,
+                        task.task_id,
+                        "pending",
+                        expected_artifact=task.expected_artifact,
+                    )
+                finally:
+                    await db.close()
+
             # 创建 adapter + SubprocessManager
             from ato.recovery import _create_adapter
 
@@ -2267,8 +2304,12 @@ class Orchestrator:
                     from ato.recovery import _PHASE_SUCCESS_EVENT, RecoveryEngine
 
                     if task.phase == "fixing":
-                        event_name, continue_convergent = (
-                            RecoveryEngine._resolve_fixing_success_event(task)
+                        (
+                            event_name,
+                            continue_convergent,
+                        ) = await RecoveryEngine._resolve_fixing_success_event_with_backfill(
+                            task,
+                            self._db_path,
                         )
                         if continue_convergent:
                             # fixing 属于 convergent loop 控制流。提交 fix_done
@@ -2316,9 +2357,19 @@ class Orchestrator:
                             # Design gate: designing phase 需要验证 UX 产出物
                             if success_event == "design_done":
                                 project_root = derive_project_root(self._db_path)
-                                # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
-                                from ato.design_artifacts import write_prototype_manifest
+                                # Story 9.1d: 在 gate 前基于磁盘真相同步 save-report + manifest
+                                from ato.design_artifacts import (
+                                    write_prototype_manifest,
+                                    write_save_report_from_disk,
+                                )
 
+                                try:
+                                    write_save_report_from_disk(task.story_id, project_root)
+                                except Exception:
+                                    logger.exception(
+                                        "save_report_sync_failed",
+                                        story_id=task.story_id,
+                                    )
                                 try:
                                     write_prototype_manifest(task.story_id, project_root)
                                 except Exception:

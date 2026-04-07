@@ -107,9 +107,11 @@ async def count_blocking_findings(
     db: aiosqlite.Connection,
     story_id: str,
     round_num: int,
+    *,
+    phase: str | None = None,
 ) -> int:
     """统计当前轮次 blocking finding 数量。"""
-    counts = await count_findings_by_severity(db, story_id, round_num)
+    counts = await count_findings_by_severity(db, story_id, round_num, phase=phase)
     return counts.get("blocking", 0)
 
 
@@ -119,6 +121,7 @@ async def maybe_create_blocking_abnormal_approval(
     round_num: int,
     threshold: int,
     *,
+    phase: str | None = None,
     nudge: Any | None = None,
     orchestrator_pid: int | None = None,
     blocking_count: int | None = None,
@@ -140,12 +143,13 @@ async def maybe_create_blocking_abnormal_approval(
         True 表示创建了 approval（超阈值），False 表示未超。
     """
     if blocking_count is None:
-        blocking_count = await count_blocking_findings(db, story_id, round_num)
+        blocking_count = await count_blocking_findings(db, story_id, round_num, phase=phase)
 
     if blocking_count <= threshold:
         logger.info(
             "blocking_below_threshold",
             story_id=story_id,
+            phase=phase,
             round_num=round_num,
             blocking_count=blocking_count,
             threshold=threshold,
@@ -162,10 +166,14 @@ async def maybe_create_blocking_abnormal_approval(
             existing_payload = json.loads(row[0] or "{}")
         except (json.JSONDecodeError, TypeError):
             continue
-        if existing_payload.get("round_num") == round_num:
+        if (
+            existing_payload.get("round_num") == round_num
+            and existing_payload.get("phase") == phase
+        ):
             logger.info(
                 "blocking_abnormal_approval_exists",
                 story_id=story_id,
+                phase=phase,
                 round_num=round_num,
                 blocking_count=blocking_count,
             )
@@ -182,6 +190,7 @@ async def maybe_create_blocking_abnormal_approval(
             "blocking_count": blocking_count,
             "threshold": threshold,
             "round_num": round_num,
+            "phase": phase,
             "options": ["confirm_fix", "human_review"],
         },
         nudge=nudge,
@@ -190,6 +199,7 @@ async def maybe_create_blocking_abnormal_approval(
     logger.warning(
         "blocking_threshold_exceeded",
         story_id=story_id,
+        phase=phase,
         round_num=round_num,
         blocking_count=blocking_count,
         threshold=threshold,

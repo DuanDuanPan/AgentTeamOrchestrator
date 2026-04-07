@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ato.adapters.base import cleanup_process
-from ato.adapters.claude_cli import ClaudeAdapter, _classify_error, _normalize_claude_event
+from ato.adapters.claude_cli import ClaudeAdapter, _classify_error
 from ato.models.schemas import ClaudeOutput, CLIAdapterError, ErrorCategory, ProgressEvent
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -156,8 +156,13 @@ class TestBuildCommand:
         adapter = ClaudeAdapter()
         cmd = adapter._build_command("hello world")
         assert cmd == [
-            "claude", "--dangerously-skip-permissions",
-            "-p", "hello world", "--output-format", "stream-json", "--verbose",
+            "claude",
+            "--dangerously-skip-permissions",
+            "-p",
+            "hello world",
+            "--output-format",
+            "stream-json",
+            "--verbose",
         ]
 
     def test_with_max_turns(self) -> None:
@@ -199,7 +204,7 @@ def _mock_stream_process(
 
     # Mock stdout as StreamReader — readline returns lines then empty bytes
     stdout = MagicMock()
-    _lines = list(stdout_lines) + [b""]
+    _lines = [*list(stdout_lines), b""]
     _idx = 0
 
     async def _readline() -> bytes:
@@ -256,9 +261,7 @@ class TestClaudeAdapterStreaming:
         assert events_received[1].event_type == "text"
         assert events_received[2].event_type == "result"
 
-    async def test_stream_success_without_progress(
-        self, stream_success_lines: list[bytes]
-    ) -> None:
+    async def test_stream_success_without_progress(self, stream_success_lines: list[bytes]) -> None:
         """AC 3: 不传 on_progress，ClaudeOutput 字段与改造前一致。"""
         proc = _mock_stream_process(stream_success_lines)
         adapter = ClaudeAdapter()
@@ -320,6 +323,38 @@ class TestClaudeAdapterStreaming:
         error_events = [e for e in events_received if e.event_type == "error"]
         assert len(error_events) == 1
         assert "未收到 result 事件" in error_events[0].summary
+
+    async def test_consume_stream_returns_immediately_after_result(self) -> None:
+        """收到 result 后应进入 post-result 收尾，而不是继续卡在 stdout 读取。"""
+
+        class _ResultThenHangReader:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def readline(self) -> bytes:
+                self.calls += 1
+                if self.calls == 1:
+                    return json.dumps({"type": "result", "total_cost_usd": 0.0}).encode() + b"\n"
+                await asyncio.sleep(10)
+                return b""
+
+        reader = _ResultThenHangReader()
+        events_received: list[ProgressEvent] = []
+
+        async def on_progress(event: ProgressEvent) -> None:
+            events_received.append(event)
+
+        adapter = ClaudeAdapter()
+        result = await asyncio.wait_for(
+            adapter._consume_stream(
+                cast(asyncio.StreamReader, reader), on_progress, idle_timeout=0.01
+            ),
+            timeout=0.1,
+        )
+
+        assert result == {"type": "result", "total_cost_usd": 0.0}
+        assert reader.calls == 1
+        assert [event.event_type for event in events_received] == ["result"]
 
     async def test_stream_timeout_cleanup(self) -> None:
         """AC 9: 超时 → cleanup_process + stderr_task cancel + error event。"""

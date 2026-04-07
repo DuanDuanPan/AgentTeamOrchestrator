@@ -395,6 +395,51 @@ class TestWriteSaveReport:
         data = json.loads(report_path.read_text())
         assert data["exported_png_count"] == 0
 
+    def test_write_save_report_from_disk_normalizes_to_canonical_schema(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from ato.design_artifacts import (
+            SAVE_REPORT_REQUIRED_KEYS,
+            write_save_report_from_disk,
+        )
+
+        root = tmp_path / "proj"
+        ux = root / "_bmad-output" / "implementation-artifacts" / "s1-ux"
+        exports = ux / "exports"
+        exports.mkdir(parents=True)
+
+        (ux / "prototype.pen").write_text(
+            json.dumps({"version": "1.0.0", "children": [{"id": "frame-1"}], "variables": {}})
+        )
+        (ux / "prototype.snapshot.json").write_text('{"children": []}')
+        (ux / "prototype.save-report.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-07T10:15:02+0800",
+                    "penFile": "prototype.pen",
+                    "snapshotSaved": "prototype.snapshot.json",
+                    "saveSuccess": True,
+                }
+            )
+        )
+        (exports / "screen-1.png").write_bytes(b"PNG")
+        (exports / "screen-2.png").write_bytes(b"PNG")
+
+        report_path = write_save_report_from_disk("s1", root)
+
+        data = json.loads(report_path.read_text())
+        assert SAVE_REPORT_REQUIRED_KEYS.issubset(data.keys())
+        assert data["story_id"] == "s1"
+        assert data["pen_file"].endswith("s1-ux/prototype.pen")
+        assert data["snapshot_file"].endswith("s1-ux/prototype.snapshot.json")
+        assert data["children_count"] == 1
+        assert data["json_parse_verified"] is True
+        assert data["reopen_verified"] is True
+        assert data["exported_png_count"] == 2
+        assert "penFile" not in data
+        assert "timestamp" not in data
+
 
 class TestVerifyPenIntegrity:
     """验证保存后校验 (9.1b AC#4)。"""

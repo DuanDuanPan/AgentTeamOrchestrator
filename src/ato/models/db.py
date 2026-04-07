@@ -120,6 +120,7 @@ _FINDINGS_DDL = """\
 CREATE TABLE IF NOT EXISTS findings (
     finding_id  TEXT PRIMARY KEY,
     story_id    TEXT NOT NULL REFERENCES stories(story_id),
+    phase       TEXT NOT NULL DEFAULT 'reviewing',
     round_num   INTEGER NOT NULL,
     severity    TEXT NOT NULL,
     description TEXT NOT NULL,
@@ -135,6 +136,10 @@ CREATE TABLE IF NOT EXISTS findings (
 _FINDINGS_STORY_ROUND_IDX = """\
 CREATE INDEX IF NOT EXISTS idx_findings_story_round
 ON findings(story_id, round_num)"""
+
+_FINDINGS_STORY_PHASE_ROUND_IDX = """\
+CREATE INDEX IF NOT EXISTS idx_findings_story_phase_round
+ON findings(story_id, phase, round_num)"""
 
 _FINDINGS_DEDUP_IDX = """\
 CREATE INDEX IF NOT EXISTS idx_findings_dedup
@@ -403,19 +408,28 @@ async def rollback_story(
             ),
         )
 
-        finding_cursor = await db.execute(
-            """
-            UPDATE findings
-            SET status = ?
-            WHERE story_id = ?
-              AND status NOT IN (?, ?, ?)
-            """,
-            (
-                "closed",
-                story_id,
-                *_VALID_FINDING_STATUSES,
-            ),
-        )
+        if target_phase == "fixing":
+            finding_cursor = await db.execute(
+                """
+                UPDATE findings
+                SET status = ?
+                WHERE story_id = ?
+                  AND status NOT IN (?, ?, ?)
+                """,
+                (
+                    "closed",
+                    story_id,
+                    *_VALID_FINDING_STATUSES,
+                ),
+            )
+        else:
+            # Manual rollback should produce a clean re-run surface. Preserving
+            # historical findings would keep convergent-loop round counters alive
+            # and can immediately force escalated recovery after a rollback.
+            finding_cursor = await db.execute(
+                "DELETE FROM findings WHERE story_id = ?",
+                (story_id,),
+            )
 
         approval_cursor = await db.execute(
             """
@@ -1252,7 +1266,7 @@ def _row_to_cost_log(row: aiosqlite.Row) -> CostLogRecord:
 # ---------------------------------------------------------------------------
 
 _FINDING_COLUMNS = (
-    "finding_id, story_id, round_num, severity, description, status, "
+    "finding_id, story_id, phase, round_num, severity, description, status, "
     "file_path, rule_id, dedup_hash, line_number, fix_suggestion, created_at"
 )
 
@@ -1261,10 +1275,11 @@ async def insert_finding(db: aiosqlite.Connection, record: FindingRecord) -> Non
     """插入一条 finding 记录。写前通过 model_validate 校验。"""
     FindingRecord.model_validate(record.model_dump())
     await db.execute(
-        f"INSERT INTO findings ({_FINDING_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO findings ({_FINDING_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             record.finding_id,
             record.story_id,
+            record.phase,
             record.round_num,
             record.severity,
             record.description,
@@ -1296,11 +1311,12 @@ async def insert_findings_batch(
     try:
         await db.executemany(
             f"INSERT INTO findings ({_FINDING_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     r.finding_id,
                     r.story_id,
+                    r.phase,
                     r.round_num,
                     r.severity,
                     r.description,
@@ -1327,19 +1343,26 @@ async def get_findings_by_story(
     db: aiosqlite.Connection,
     story_id: str,
     *,
+    created_after: datetime | None = None,
+    phase: str | None = None,
     round_num: int | None = None,
 ) -> list[FindingRecord]:
-    """查询某个 story 的 findings，可按 round_num 过滤。"""
+    """查询某个 story 的 findings，可按 phase / round_num 过滤。"""
+    conditions = ["story_id = ?"]
+    params: list[str | int] = [story_id]
+    if phase is not None:
+        conditions.append("phase = ?")
+        params.append(phase)
+    if created_after is not None:
+        conditions.append("created_at > ?")
+        params.append(_dt_to_iso(created_after) or "")
     if round_num is not None:
-        cursor = await db.execute(
-            "SELECT * FROM findings WHERE story_id = ? AND round_num = ? ORDER BY rowid",
-            (story_id, round_num),
-        )
-    else:
-        cursor = await db.execute(
-            "SELECT * FROM findings WHERE story_id = ? ORDER BY rowid",
-            (story_id,),
-        )
+        conditions.append("round_num = ?")
+        params.append(round_num)
+    cursor = await db.execute(
+        f"SELECT * FROM findings WHERE {' AND '.join(conditions)} ORDER BY rowid",
+        tuple(params),
+    )
     rows = await cursor.fetchall()
     return [_row_to_finding(r) for r in rows]
 
@@ -1347,11 +1370,22 @@ async def get_findings_by_story(
 async def get_open_findings(
     db: aiosqlite.Connection,
     story_id: str,
+    *,
+    created_after: datetime | None = None,
+    phase: str | None = None,
 ) -> list[FindingRecord]:
-    """查询 status IN ('open', 'still_open') 的 findings。"""
+    """查询 status IN ('open', 'still_open') 的 findings，可按 phase 过滤。"""
+    conditions = ["story_id = ?", "status IN (?, ?)"]
+    params: list[str] = [story_id, "open", "still_open"]
+    if phase is not None:
+        conditions.append("phase = ?")
+        params.append(phase)
+    if created_after is not None:
+        conditions.append("created_at > ?")
+        params.append(_dt_to_iso(created_after) or "")
     cursor = await db.execute(
-        "SELECT * FROM findings WHERE story_id = ? AND status IN (?, ?) ORDER BY rowid",
-        (story_id, "open", "still_open"),
+        f"SELECT * FROM findings WHERE {' AND '.join(conditions)} ORDER BY rowid",
+        tuple(params),
     )
     rows = await cursor.fetchall()
     return [_row_to_finding(r) for r in rows]
@@ -1402,12 +1436,23 @@ async def count_findings_by_severity(
     db: aiosqlite.Connection,
     story_id: str,
     round_num: int,
+    *,
+    created_after: datetime | None = None,
+    phase: str | None = None,
 ) -> dict[str, int]:
     """按 severity 统计 findings 数量，返回 {"blocking": N, "suggestion": M}。"""
+    conditions = ["story_id = ?", "round_num = ?"]
+    params: list[str | int] = [story_id, round_num]
+    if phase is not None:
+        conditions.append("phase = ?")
+        params.append(phase)
+    if created_after is not None:
+        conditions.append("created_at > ?")
+        params.append(_dt_to_iso(created_after) or "")
     cursor = await db.execute(
         "SELECT severity, COUNT(*) FROM findings "
-        "WHERE story_id = ? AND round_num = ? GROUP BY severity",
-        (story_id, round_num),
+        f"WHERE {' AND '.join(conditions)} GROUP BY severity",
+        tuple(params),
     )
     rows = await cursor.fetchall()
     result: dict[str, int] = {"blocking": 0, "suggestion": 0}

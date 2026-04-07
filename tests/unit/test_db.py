@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -641,7 +641,7 @@ class TestRollbackStory:
         assert story.status == "planning"
         assert tasks[0].status == "failed"
         assert tasks[0].pid is None
-        assert findings[0].status == "closed"
+        assert findings == []
         assert approvals == []
         assert summary["normalized_tasks"] == 1
         assert summary["normalized_findings"] == 1
@@ -921,13 +921,16 @@ def _make_finding(
     finding_id: str,
     story_id: str,
     *,
+    phase: str = "reviewing",
     severity: FindingSeverity = "blocking",
     status: FindingStatus = "open",
     round_num: int = 1,
+    created_at: datetime = _NOW,
 ) -> FindingRecord:
     return FindingRecord(
         finding_id=finding_id,
         story_id=story_id,
+        phase=phase,
         round_num=round_num,
         severity=severity,
         description=f"Finding {finding_id}",
@@ -935,7 +938,7 @@ def _make_finding(
         file_path="src/ato/core.py",
         rule_id="E001",
         dedup_hash=compute_dedup_hash("src/ato/core.py", "E001", severity, f"Finding {finding_id}"),
-        created_at=_NOW,
+        created_at=created_at,
     )
 
 
@@ -1008,6 +1011,52 @@ class TestFindingCrud:
         finally:
             await db.close()
 
+    async def test_get_findings_by_story_supports_phase_and_created_after(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """phase + created_after 组合过滤应只返回当前 cycle 的 findings。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fscope"))
+            old_time = _NOW - timedelta(minutes=10)
+            new_time = _NOW - timedelta(minutes=1)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding(
+                        "f-old-review",
+                        "s-fscope",
+                        phase="reviewing",
+                        round_num=3,
+                        created_at=old_time,
+                    ),
+                    _make_finding(
+                        "f-new-review",
+                        "s-fscope",
+                        phase="reviewing",
+                        round_num=1,
+                        created_at=new_time,
+                    ),
+                    _make_finding(
+                        "f-qa",
+                        "s-fscope",
+                        phase="qa_testing",
+                        round_num=1,
+                        created_at=new_time,
+                    ),
+                ],
+            )
+            results = await get_findings_by_story(
+                db,
+                "s-fscope",
+                phase="reviewing",
+                created_after=old_time + timedelta(seconds=1),
+            )
+            assert [r.finding_id for r in results] == ["f-new-review"]
+        finally:
+            await db.close()
+
     async def test_get_open_findings(self, initialized_db_path: Path) -> None:
         """仅返回 open/still_open。"""
         db = await get_connection(initialized_db_path)
@@ -1020,6 +1069,29 @@ class TestFindingCrud:
             assert len(results) == 2
             ids = {r.finding_id for r in results}
             assert ids == {"f-o1", "f-o3"}
+        finally:
+            await db.close()
+
+    async def test_get_open_findings_supports_phase_filter(self, initialized_db_path: Path) -> None:
+        """phase 过滤应避免 reviewing / qa_testing 混用。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fophase"))
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding("f-review-open", "s-fophase", phase="reviewing", status="open"),
+                    _make_finding("f-qa-open", "s-fophase", phase="qa_testing", status="open"),
+                    _make_finding(
+                        "f-review-closed",
+                        "s-fophase",
+                        phase="reviewing",
+                        status="closed",
+                    ),
+                ],
+            )
+            results = await get_open_findings(db, "s-fophase", phase="reviewing")
+            assert [r.finding_id for r in results] == ["f-review-open"]
         finally:
             await db.close()
 
@@ -1057,6 +1129,32 @@ class TestFindingCrud:
             counts = await count_findings_by_severity(db, "s-fc", 1)
             assert counts["blocking"] == 3
             assert counts["suggestion"] == 2
+        finally:
+            await db.close()
+
+    async def test_count_findings_by_severity_supports_phase_filter(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """phase 过滤后不应把 QA findings 算进 reviewing 轮次。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fcphase"))
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding("f-r-b", "s-fcphase", phase="reviewing", severity="blocking"),
+                    _make_finding("f-r-s", "s-fcphase", phase="reviewing", severity="suggestion"),
+                    _make_finding("f-q-b", "s-fcphase", phase="qa_testing", severity="blocking"),
+                ],
+            )
+            counts = await count_findings_by_severity(
+                db,
+                "s-fcphase",
+                1,
+                phase="reviewing",
+            )
+            assert counts == {"blocking": 1, "suggestion": 1}
         finally:
             await db.close()
 

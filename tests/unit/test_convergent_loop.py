@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -1277,10 +1278,65 @@ class TestFixDispatchWithBlockingFindings:
         assert call_kwargs["task_id"] == "t-fix-placeholder"
         assert call_kwargs["is_retry"] is True
         assert json.loads(call_kwargs["context_briefing"]) == {
+            "cycle_anchor": None,
             "fix_kind": "fix_dispatch",
             "round_num": 1,
             "stage": "standard",
         }
+
+    @pytest.mark.asyncio
+    async def test_inserts_review_placeholder_before_fix_done(
+        self,
+        initialized_db_path: Any,
+    ) -> None:
+        """direct convergent-loop fix 成功后应先保留 review placeholder 再进入 reviewing。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+            await insert_findings_batch(
+                db,
+                [
+                    _make_finding_record(
+                        story_id=story.story_id,
+                        description="null pointer",
+                        file_path="src/a.py",
+                        rule_id="NP01",
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        loop, _, _, _ = _make_loop(initialized_db_path)
+
+        with patch.object(loop, "_get_worktree_head", side_effect=["aaa111", "bbb222"]):
+            await loop.run_fix_dispatch(
+                story_id=story.story_id,
+                round_num=1,
+                worktree_path="/tmp/wt",
+            )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                """
+                SELECT status, expected_artifact
+                FROM tasks
+                WHERE story_id = ?
+                  AND phase = 'reviewing'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (story.story_id,),
+            )
+            row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        assert row is not None
+        assert row[0] == "pending"
+        assert row[1] == "convergent_loop_review_placeholder"
 
 
 class TestFixDispatchPromptContainsFindingDetails:
@@ -2430,6 +2486,199 @@ class TestRereviewTransitionEventReviewPass:
         assert event.source == "agent"
         assert isinstance(event.submitted_at, datetime)
 
+    @pytest.mark.asyncio
+    async def test_pending_review_placeholder_survives_until_transition_commit(
+        self,
+        initialized_db_path: Any,
+    ) -> None:
+        """rereview parse/transition 期间必须保持 review placeholder 处于 pending。"""
+        story = _make_story()
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        await ConvergentLoop.insert_review_placeholder(
+            story_id=story.story_id,
+            db_path=initialized_db_path,
+        )
+
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        mock_sub = AsyncMock()
+        mock_sub.dispatch_with_retry = AsyncMock(return_value=_make_adapter_result())
+        mock_bmad = AsyncMock()
+        mock_bmad.parse = AsyncMock(return_value=parse_result)
+
+        class BlockingTransitionQueue:
+            def __init__(self) -> None:
+                self.called = asyncio.Event()
+                self.release = asyncio.Event()
+                self.event: TransitionEvent | None = None
+
+            async def submit_and_wait(self, event: TransitionEvent) -> None:
+                self.event = event
+                self.called.set()
+                await self.release.wait()
+
+        mock_tq = BlockingTransitionQueue()
+        loop = ConvergentLoop(
+            db_path=initialized_db_path,
+            subprocess_mgr=mock_sub,
+            bmad_adapter=mock_bmad,
+            transition_queue=cast(Any, mock_tq),
+            config=ConvergentLoopConfig(),
+            blocking_threshold=10,
+        )
+
+        rereview_task = asyncio.create_task(
+            loop.run_rereview(story.story_id, 2, worktree_path="/tmp/wt")
+        )
+
+        await asyncio.wait_for(mock_tq.called.wait(), timeout=1.0)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                """
+                SELECT status, completed_at
+                FROM tasks
+                WHERE story_id = ?
+                  AND phase = 'reviewing'
+                  AND expected_artifact = 'convergent_loop_review_placeholder'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (story.story_id,),
+            )
+            pending_row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        assert pending_row is not None
+        assert pending_row[0] == "pending"
+        assert pending_row[1] is None
+
+        mock_tq.release.set()
+        result = await rereview_task
+        assert result.converged is True
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                """
+                SELECT status, completed_at, error_message
+                FROM tasks
+                WHERE story_id = ?
+                  AND phase = 'reviewing'
+                  AND expected_artifact = 'convergent_loop_review_placeholder'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (story.story_id,),
+            )
+            completed_row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        assert completed_row is not None
+        assert completed_row[0] == "completed"
+        assert completed_row[1] is not None
+        assert completed_row[2] == "consumed_by_rereview_followup"
+
+    @pytest.mark.asyncio
+    async def test_first_review_placeholder_survives_until_transition_commit(
+        self,
+        initialized_db_path: Any,
+    ) -> None:
+        """first review parse/transition 期间必须保持 review placeholder 处于 pending。"""
+        story = _make_story("s-first-review-placeholder")
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        parse_result = _make_parse_result(verdict="approved", findings=[])
+        mock_sub = AsyncMock()
+        mock_sub.dispatch_with_retry = AsyncMock(return_value=_make_adapter_result())
+        mock_bmad = AsyncMock()
+        mock_bmad.parse = AsyncMock(return_value=parse_result)
+
+        class BlockingTransitionQueue:
+            def __init__(self) -> None:
+                self.called = asyncio.Event()
+                self.release = asyncio.Event()
+                self.event: TransitionEvent | None = None
+
+            async def submit_and_wait(self, event: TransitionEvent) -> None:
+                self.event = event
+                self.called.set()
+                await self.release.wait()
+
+        mock_tq = BlockingTransitionQueue()
+        loop = ConvergentLoop(
+            db_path=initialized_db_path,
+            subprocess_mgr=mock_sub,
+            bmad_adapter=mock_bmad,
+            transition_queue=cast(Any, mock_tq),
+            config=ConvergentLoopConfig(),
+            blocking_threshold=10,
+        )
+
+        review_task = asyncio.create_task(loop.run_first_review(story.story_id, "/tmp/wt"))
+
+        await asyncio.wait_for(mock_tq.called.wait(), timeout=1.0)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                """
+                SELECT status, completed_at
+                FROM tasks
+                WHERE story_id = ?
+                  AND phase = 'reviewing'
+                  AND expected_artifact = 'convergent_loop_review_placeholder'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (story.story_id,),
+            )
+            pending_row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        assert pending_row is not None
+        assert pending_row[0] == "pending"
+        assert pending_row[1] is None
+
+        mock_tq.release.set()
+        result = await review_task
+        assert result.converged is True
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                """
+                SELECT status, completed_at, error_message
+                FROM tasks
+                WHERE story_id = ?
+                  AND phase = 'reviewing'
+                  AND expected_artifact = 'convergent_loop_review_placeholder'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (story.story_id,),
+            )
+            completed_row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        assert completed_row is not None
+        assert completed_row[0] == "completed"
+        assert completed_row[1] is not None
+        assert completed_row[2] == "consumed_by_first_review_followup"
+
 
 class TestRereviewTransitionEventReviewFail:
     """未收敛时提交 review_fail。"""
@@ -3145,6 +3394,7 @@ class TestRunLoopConvergesFirstRound:
             story.story_id,
             "/tmp/wt",
             artifact_payload=None,
+            cycle_anchor=None,
             round_num_offset=0,
         )
         loop.run_fix_dispatch.assert_not_called()
@@ -3179,8 +3429,18 @@ class TestRunLoopConvergesAfterFix:
         assert result.converged is True
         assert result.round_num == 2
         loop.run_first_review.assert_called_once()
-        loop.run_fix_dispatch.assert_called_once_with(story.story_id, 1, "/tmp/wt")
-        loop.run_rereview.assert_called_once_with(story.story_id, 2, "/tmp/wt")
+        loop.run_fix_dispatch.assert_called_once_with(
+            story.story_id,
+            1,
+            "/tmp/wt",
+            cycle_anchor=None,
+        )
+        loop.run_rereview.assert_called_once_with(
+            story.story_id,
+            2,
+            "/tmp/wt",
+            cycle_anchor=None,
+        )
 
 
 class TestRunLoopMultipleRounds:
@@ -3215,10 +3475,30 @@ class TestRunLoopMultipleRounds:
         assert loop.run_fix_dispatch.call_count == 2
         assert loop.run_rereview.call_count == 2
         # fix_round = rereview_round - 1
-        loop.run_fix_dispatch.assert_any_call(story.story_id, 1, "/tmp/wt")
-        loop.run_fix_dispatch.assert_any_call(story.story_id, 2, "/tmp/wt")
-        loop.run_rereview.assert_any_call(story.story_id, 2, "/tmp/wt")
-        loop.run_rereview.assert_any_call(story.story_id, 3, "/tmp/wt")
+        loop.run_fix_dispatch.assert_any_call(
+            story.story_id,
+            1,
+            "/tmp/wt",
+            cycle_anchor=None,
+        )
+        loop.run_fix_dispatch.assert_any_call(
+            story.story_id,
+            2,
+            "/tmp/wt",
+            cycle_anchor=None,
+        )
+        loop.run_rereview.assert_any_call(
+            story.story_id,
+            2,
+            "/tmp/wt",
+            cycle_anchor=None,
+        )
+        loop.run_rereview.assert_any_call(
+            story.story_id,
+            3,
+            "/tmp/wt",
+            cycle_anchor=None,
+        )
 
 
 class TestRunLoopMaxRoundsEscalation:
@@ -4541,6 +4821,8 @@ class TestReviewPromptManifestInjection:
         prompt = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
         assert "UX Design Context" in prompt
         assert "prototype.manifest.yaml" in prompt
+        assert "Do not stop at a checkpoint" in prompt
+        assert "git diff main...HEAD" in prompt
 
     async def test_rereview_prompt_includes_ux_context(
         self, tmp_path: Path, initialized_db_path: Any

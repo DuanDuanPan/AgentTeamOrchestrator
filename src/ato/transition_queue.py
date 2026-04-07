@@ -36,6 +36,7 @@ class _QueuedTransition:
     event: TransitionEvent
     completion_future: asyncio.Future[str] | None = None
 
+
 # ---------------------------------------------------------------------------
 # Replay 辅助：phase → 到达该 phase 所需的事件序列
 # ---------------------------------------------------------------------------
@@ -357,7 +358,9 @@ class TransitionQueue:
             source=source,
             submitted_at=datetime.now(tz=UTC),
         )
-        await self._queue.put(skip_event)
+        # Route through the public submit path so internal queue items keep a
+        # consistent envelope shape for the consumer.
+        await self.submit(skip_event)
         logger.info(
             "phase_skipped",
             story_id=story_id,

@@ -521,6 +521,22 @@ class TestEdgeCases:
         assert result.verdict == "approved"
         assert result.findings == []
 
+    async def test_code_review_checkpoint_request_is_parse_failed(self) -> None:
+        md = """**Checkpoint**
+
+当前按 `git diff main...HEAD` 读取了分支差异。
+
+请确认继续执行 Step 2 代码审查：
+继续按 `main...HEAD` 审查，
+还是改为包含未提交改动的 `git diff main`？
+"""
+        runner = _FakeSemanticRunner([])
+        adapter = BmadAdapter(semantic_runner=runner)
+        result = await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
+        assert result.parser_mode == "failed"
+        assert result.verdict == "parse_failed"
+        assert result.parse_error == "Code review output is incomplete and asks for confirmation"
+
     async def test_missing_location_defaults_to_na(self) -> None:
         """Finding without file_path should default to 'N/A'."""
         runner = _FakeSemanticRunner(

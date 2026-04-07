@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -96,6 +96,9 @@ def _make_task(
     context_briefing: str | None = None,
     role: str = "reviewer",
     cli_tool: str = "codex",
+    group_id: str | None = None,
+    started_at: datetime | None = _NOW,
+    completed_at: datetime | None = None,
 ) -> TaskRecord:
     return TaskRecord(
         task_id=task_id,
@@ -107,7 +110,9 @@ def _make_task(
         pid=pid,
         expected_artifact=expected_artifact,
         context_briefing=context_briefing,
-        started_at=_NOW,
+        started_at=started_at,
+        completed_at=completed_at,
+        group_id=group_id,
     )
 
 
@@ -115,6 +120,7 @@ def _make_open_finding(
     *,
     finding_id: str,
     story_id: str,
+    phase: str = "reviewing",
     severity: str = "blocking",
     description: str = "existing issue",
     file_path: str = "src/existing.py",
@@ -125,6 +131,7 @@ def _make_open_finding(
     return FindingRecord(
         finding_id=finding_id,
         story_id=story_id,
+        phase=phase,
         round_num=round_num,
         severity=severity,  # type: ignore[arg-type]
         description=description,
@@ -188,6 +195,20 @@ class TestArtifactExists:
     def test_artifact_empty_string(self) -> None:
         task = _make_task("t1", "s1", expected_artifact="")
         assert _artifact_exists(task) is False
+
+    def test_creating_phase_uses_canonical_story_artifact_path(self, tmp_path: Path) -> None:
+        artifacts_dir = tmp_path / "_bmad-output" / "implementation-artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "s-canonical.md").write_text("# story\n")
+
+        task = _make_task(
+            "t-canonical",
+            "s-canonical",
+            phase="creating",
+            expected_artifact="group_dispatch_requested",
+        )
+
+        assert _artifact_exists(task, tmp_path) is True
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +319,73 @@ class TestNormalRecovery:
         assert len(result.classifications) == 2
         assert all(c.action == "reschedule" for c in result.classifications)
 
+    async def test_paused_review_placeholder_is_retired_not_rescheduled(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """Normal recovery must not dispatch the synthetic review placeholder as a real review."""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                _make_story("s-review", current_phase="reviewing", worktree_path="/tmp/wt"),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-review",
+                    "s-review",
+                    status="paused",
+                    pid=None,
+                    phase="reviewing",
+                    expected_artifact="initial_dispatch_requested",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-placeholder",
+                    "s-review",
+                    status="paused",
+                    pid=None,
+                    phase="reviewing",
+                    expected_artifact="convergent_loop_review_placeholder",
+                    started_at=None,
+                ),
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+        )
+
+        with patch(
+            "ato.convergent_loop.ConvergentLoop.run_first_review",
+            new=AsyncMock(),
+        ) as mock_run_first_review:
+            result = await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        assert result.recovery_mode == "normal"
+        assert result.dispatched_count == 1
+        assert [c.task_id for c in result.classifications] == ["t-review"]
+        mock_run_first_review.assert_awaited_once()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db, "s-review")
+        finally:
+            await db.close()
+
+        placeholder = next(task for task in tasks if task.task_id == "t-placeholder")
+        assert placeholder.status == "completed"
+        assert placeholder.completed_at is not None
+        assert placeholder.error_message == "retired_review_placeholder_by_recovery"
+
 
 # ---------------------------------------------------------------------------
 # 无恢复场景 (Task 6.5)
@@ -396,6 +484,25 @@ class TestMixedRecovery:
 
 class TestRecoveryActions:
     """验证各恢复动作的 DB 副作用。"""
+
+    @staticmethod
+    def _make_group_settings() -> object:
+        from ato.config import ATOSettings
+
+        return ATOSettings(
+            roles={"creator": {"cli": "claude"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "creating",
+                    "role": "creator",
+                    "type": "structured_job",
+                    "next_on_success": "designing",
+                    "workspace": "main",
+                    "parallel_safe": True,
+                    "batchable": True,
+                },
+            ],
+        )
 
     @patch("ato.recovery._is_pid_alive", return_value=True)
     async def test_reattach_registers_pid(
@@ -553,6 +660,357 @@ class TestRecoveryActions:
         assert event.story_id == "s1"
         assert event.event_name == "create_done"
 
+    @patch("ato.recovery._is_pid_alive", return_value=True)
+    async def test_grouped_running_tasks_reattach_once(
+        self,
+        mock_alive: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", current_phase="creating"))
+            await insert_story(db, _make_story("s2", current_phase="creating"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t1",
+                    "s1",
+                    status="running",
+                    pid=4242,
+                    phase="creating",
+                    group_id="g-create",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t2",
+                    "s2",
+                    status="running",
+                    pid=4242,
+                    phase="creating",
+                    group_id="g-create",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_subprocess_mgr = MagicMock()
+        mock_subprocess_mgr.running = {}
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=mock_subprocess_mgr,
+            transition_queue=AsyncMock(),
+            settings=self._make_group_settings(),
+        )
+
+        with (
+            patch.object(
+                engine,
+                "_monitor_reattached_group_pid",
+                new=AsyncMock(),
+            ) as mock_group_monitor,
+            patch.object(
+                engine,
+                "_monitor_reattached_pid",
+                new=AsyncMock(),
+            ) as mock_single_monitor,
+        ):
+            result = await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        assert result.auto_recovered_count == 2
+        assert [c.action for c in result.classifications] == ["reattach", "reattach"]
+        mock_group_monitor.assert_awaited_once()
+        mock_single_monitor.assert_not_called()
+        assert 4242 in mock_subprocess_mgr.running
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_grouped_running_tasks_reschedule_as_single_group_dispatch(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", current_phase="creating"))
+            await insert_story(db, _make_story("s2", current_phase="creating"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t1",
+                    "s1",
+                    status="running",
+                    pid=999,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t2",
+                    "s2",
+                    status="running",
+                    pid=999,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=self._make_group_settings(),
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_group",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_group_dispatch,
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_single_dispatch,
+        ):
+            result = await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        assert result.dispatched_count == 2
+        assert [c.action for c in result.classifications] == ["reschedule", "reschedule"]
+        mock_group_dispatch.assert_awaited_once()
+        assert mock_group_dispatch.await_args is not None
+        assert len(mock_group_dispatch.await_args.kwargs["tasks"]) == 2
+        mock_single_dispatch.assert_not_awaited()
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    async def test_grouped_paused_tasks_reschedule_as_single_group_dispatch(
+        self,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", current_phase="creating"))
+            await insert_story(db, _make_story("s2", current_phase="creating"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t1",
+                    "s1",
+                    status="paused",
+                    pid=None,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t2",
+                    "s2",
+                    status="paused",
+                    pid=None,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=self._make_group_settings(),
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_group",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_group_dispatch,
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_single_dispatch,
+        ):
+            result = await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        assert result.recovery_mode == "normal"
+        assert result.dispatched_count == 2
+        assert [c.action for c in result.classifications] == ["reschedule", "reschedule"]
+        mock_group_dispatch.assert_awaited_once()
+        assert mock_group_dispatch.await_args is not None
+        assert len(mock_group_dispatch.await_args.kwargs["tasks"]) == 2
+        mock_single_dispatch.assert_not_awaited()
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    async def test_grouped_paused_tasks_with_mixed_pid_auto_heal_and_regroup(
+        self,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", current_phase="creating"))
+            await insert_story(db, _make_story("s2", current_phase="creating"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t1",
+                    "s1",
+                    status="paused",
+                    pid=111,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t2",
+                    "s2",
+                    status="paused",
+                    pid=222,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=self._make_group_settings(),
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_group",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_group_dispatch,
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_single_dispatch,
+        ):
+            result = await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        assert result.recovery_mode == "normal"
+        assert result.dispatched_count == 2
+        assert [c.action for c in result.classifications] == ["reschedule", "reschedule"]
+        mock_group_dispatch.assert_awaited_once()
+        assert mock_group_dispatch.await_args is not None
+        assert len(mock_group_dispatch.await_args.kwargs["tasks"]) == 2
+        mock_single_dispatch.assert_not_awaited()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_paused_tasks(db)
+        finally:
+            await db.close()
+        assert tasks == []
+
+        db = await get_connection(initialized_db_path)
+        try:
+            recovered_tasks = [
+                *await get_tasks_by_story(db, "s1"),
+                *await get_tasks_by_story(db, "s2"),
+            ]
+        finally:
+            await db.close()
+        assert all(task.pid is None for task in recovered_tasks)
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_grouped_running_tasks_with_mixed_pid_stay_split(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s1", current_phase="creating"))
+            await insert_story(db, _make_story("s2", current_phase="creating"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t1",
+                    "s1",
+                    status="running",
+                    pid=111,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t2",
+                    "s2",
+                    status="running",
+                    pid=222,
+                    phase="creating",
+                    group_id="g-create",
+                    role="creator",
+                    cli_tool="claude",
+                ),
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=self._make_group_settings(),
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_group",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_group_dispatch,
+            patch(
+                "ato.subprocess_mgr.SubprocessManager.dispatch_with_retry",
+                new=AsyncMock(return_value=_MOCK_ADAPTER_RESULT),
+            ) as mock_single_dispatch,
+        ):
+            result = await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        assert result.recovery_mode == "crash"
+        assert result.dispatched_count == 2
+        assert [c.action for c in result.classifications] == ["reschedule", "reschedule"]
+        mock_group_dispatch.assert_not_awaited()
+        assert mock_single_dispatch.await_count == 2
+
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
     async def test_reschedule_dev_ready_phase_submits_start_dev(
@@ -643,7 +1101,9 @@ class TestRecoveryActions:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="reviewing"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="reviewing")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="reviewing"),
@@ -706,7 +1166,9 @@ class TestRecoveryActions:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -763,7 +1225,9 @@ class TestRecoveryActions:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="qa_testing"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="qa_testing")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="qa_testing"),
@@ -906,7 +1370,9 @@ class TestRecoveryProgressLogging:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s-validate", worktree_path="/tmp/wt", current_phase="validating"))
+            await insert_story(
+                db, _make_story("s-validate", worktree_path="/tmp/wt", current_phase="validating")
+            )
             await insert_task(
                 db,
                 _make_task(
@@ -1174,7 +1640,9 @@ class TestRecoveryDispatchRetry:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="reviewing"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="reviewing")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="reviewing"),
@@ -1607,7 +2075,9 @@ class TestConvergentLoopPromptFormat:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -1661,7 +2131,9 @@ class TestConvergentLoopPromptFormat:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="qa_testing"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="qa_testing")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="qa_testing"),
@@ -1989,6 +2461,256 @@ class TestConvergentLoopPromptFormat:
 
 
 class TestFixRecoveryContinuation:
+    def test_infer_fix_resume_phase_skips_completed_placeholder_without_timestamps(self) -> None:
+        """无时间戳 placeholder 不应遮蔽真实的 QA-origin resume phase。"""
+        tasks = [
+            _make_task(
+                "t-review-placeholder",
+                "s1",
+                status="completed",
+                pid=None,
+                phase="reviewing",
+                expected_artifact="convergent_loop_review_placeholder",
+                started_at=None,
+                completed_at=None,
+            ),
+            _make_task(
+                "t-qa",
+                "s1",
+                status="completed",
+                pid=None,
+                phase="qa_testing",
+                role="qa",
+                started_at=_NOW - timedelta(minutes=2),
+                completed_at=_NOW - timedelta(minutes=1),
+            ),
+        ]
+
+        assert RecoveryEngine._infer_fix_resume_phase(tasks) == "qa_testing"
+
+    def test_infer_fix_resume_phase_skips_completed_placeholder_with_completed_at(self) -> None:
+        """带 completed_at 的 placeholder 也不应遮蔽真实的 QA-origin resume phase。"""
+        tasks = [
+            _make_task(
+                "t-qa",
+                "s1",
+                status="completed",
+                pid=None,
+                phase="qa_testing",
+                role="qa",
+                started_at=_NOW - timedelta(minutes=3),
+                completed_at=_NOW - timedelta(minutes=2),
+            ),
+            _make_task(
+                "t-review-placeholder",
+                "s1",
+                status="completed",
+                pid=None,
+                phase="reviewing",
+                expected_artifact="convergent_loop_review_placeholder",
+                started_at=None,
+                completed_at=_NOW - timedelta(minutes=1),
+            ),
+        ]
+
+        assert RecoveryEngine._infer_fix_resume_phase(tasks) == "qa_testing"
+
+    async def test_resolve_fixing_success_event_backfills_legacy_qa_resume_context(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """空 context 的 legacy QA fix 成功时也应回到 qa_testing。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                _make_story(
+                    "s-legacy-qa-fix",
+                    worktree_path="/tmp/wt",
+                    current_phase="fixing",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-qa-prior",
+                    "s-legacy-qa-fix",
+                    status="completed",
+                    pid=None,
+                    phase="qa_testing",
+                    role="qa",
+                    started_at=_NOW - timedelta(minutes=3),
+                    completed_at=_NOW - timedelta(minutes=2),
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-review-placeholder",
+                    "s-legacy-qa-fix",
+                    status="completed",
+                    pid=None,
+                    phase="reviewing",
+                    expected_artifact="convergent_loop_review_placeholder",
+                    started_at=None,
+                    completed_at=_NOW - timedelta(minutes=1),
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-fix-legacy",
+                    "s-legacy-qa-fix",
+                    status="pending",
+                    pid=None,
+                    phase="fixing",
+                    role="fixer",
+                    cli_tool="claude",
+                    context_briefing=None,
+                    started_at=_NOW,
+                ),
+            )
+        finally:
+            await db.close()
+
+        task = _make_task(
+            "t-fix-legacy",
+            "s-legacy-qa-fix",
+            status="pending",
+            pid=None,
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            context_briefing=None,
+            started_at=_NOW,
+        )
+
+        (
+            event_name,
+            continue_convergent,
+        ) = await RecoveryEngine._resolve_fixing_success_event_with_backfill(
+            task,
+            initialized_db_path,
+        )
+
+        assert event_name == "qa_fix_done"
+        assert continue_convergent is False
+        assert task.context_briefing is not None
+        assert json.loads(task.context_briefing) == {
+            "fix_kind": "phase_resume",
+            "resume_phase": "qa_testing",
+        }
+
+        db = await get_connection(initialized_db_path)
+        try:
+            persisted = await db.execute(
+                "SELECT context_briefing FROM tasks WHERE task_id = 't-fix-legacy'"
+            )
+            row = await persisted.fetchone()
+        finally:
+            await db.close()
+
+        assert row is not None
+        assert json.loads(row[0]) == {
+            "fix_kind": "phase_resume",
+            "resume_phase": "qa_testing",
+        }
+
+    async def test_reviewing_after_qa_cycle_restarts_with_fresh_round_history(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """QA 后重新进入 reviewing 时，不应沿用旧 reviewing 轮次直接 escalated。"""
+        review_time = _NOW - timedelta(minutes=10)
+        qa_time = _NOW - timedelta(minutes=1)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-review-reset", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-old-review",
+                    "s-review-reset",
+                    status="completed",
+                    pid=None,
+                    phase="reviewing",
+                    started_at=review_time - timedelta(minutes=1),
+                    completed_at=review_time,
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-qa",
+                    "s-review-reset",
+                    status="completed",
+                    pid=None,
+                    phase="qa_testing",
+                    role="qa",
+                    started_at=qa_time - timedelta(minutes=1),
+                    completed_at=qa_time,
+                ),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    FindingRecord(
+                        finding_id="f-old-review",
+                        story_id="s-review-reset",
+                        phase="reviewing",
+                        round_num=3,
+                        severity="blocking",
+                        description="old review issue",
+                        status="open",
+                        file_path="src/legacy.py",
+                        rule_id="R-OLD",
+                        dedup_hash=compute_dedup_hash(
+                            "src/legacy.py",
+                            "R-OLD",
+                            "blocking",
+                            "old review issue",
+                        ),
+                        created_at=review_time,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            convergent_loop_phases={"reviewing", "qa_testing"},
+        )
+        task = _make_task(
+            "t-review-reset",
+            "s-review-reset",
+            status="pending",
+            pid=None,
+            phase="reviewing",
+            started_at=None,
+        )
+
+        with (
+            patch(
+                "ato.convergent_loop.ConvergentLoop.run_first_review", new=AsyncMock()
+            ) as mock_fr,
+            patch("ato.convergent_loop.ConvergentLoop.run_rereview", new=AsyncMock()),
+            patch("ato.convergent_loop.ConvergentLoop._run_escalated_phase", new=AsyncMock()),
+        ):
+            await engine._dispatch_reviewing_convergent_loop(
+                task,
+                worktree_path="/tmp/wt",
+                max_concurrent=1,
+            )
+
+        mock_fr.assert_awaited_once()
+        assert mock_fr.await_args is not None
+        assert mock_fr.await_args.kwargs.get("round_num_offset", 0) == 0
+        assert mock_fr.await_args.kwargs["cycle_anchor"] == qa_time
+
     async def test_continue_after_fix_success_runs_next_rereview(
         self,
         initialized_db_path: Path,
@@ -2070,7 +2792,90 @@ class TestFixRecoveryContinuation:
             3,
             worktree_path="/tmp/wt",
             stage="standard",
+            cycle_anchor=None,
         )
+
+    async def test_continue_after_fix_success_preserves_cycle_anchor(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """当前 review cycle 的 anchor 应传递给后续 rereview。"""
+        from ato.config import ATOSettings
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-fix-anchor", worktree_path="/tmp/wt"))
+        finally:
+            await db.close()
+
+        cycle_anchor = _NOW - timedelta(minutes=5)
+        settings = ATOSettings(
+            roles={
+                "fixer": {"cli": "claude"},  # type: ignore[dict-item, unused-ignore]
+                "reviewer": {"cli": "codex"},  # type: ignore[dict-item, unused-ignore]
+            },
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "reviewing",
+                    "role": "reviewer",
+                    "type": "convergent_loop",
+                    "next_on_success": "qa_testing",
+                },
+            ],
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=settings,
+        )
+        task = _make_task(
+            "t-fix-anchor",
+            "s-fix-anchor",
+            status="completed",
+            pid=None,
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            context_briefing=json.dumps(
+                {
+                    "fix_kind": "fix_dispatch",
+                    "round_num": 2,
+                    "stage": "standard",
+                    "cycle_anchor": cycle_anchor.isoformat(),
+                }
+            ),
+        )
+
+        mock_loop = MagicMock()
+        mock_loop.run_rereview = AsyncMock(
+            return_value=ConvergentLoopResult(
+                story_id="s-fix-anchor",
+                round_num=3,
+                converged=False,
+                findings_total=1,
+                blocking_count=1,
+                suggestion_count=0,
+                open_count=1,
+            )
+        )
+        mock_loop._is_abnormal_result.return_value = False
+        mock_loop._config = MagicMock(max_rounds=5, max_rounds_escalated=2)
+
+        with patch.object(engine, "_build_convergent_loop", return_value=mock_loop):
+            await engine.continue_after_fix_success(task, worktree_path="/tmp/wt")
+
+        mock_loop.run_rereview.assert_awaited_once()
+        assert mock_loop.run_rereview.await_args is not None
+        assert mock_loop.run_rereview.await_args.kwargs["cycle_anchor"] == cycle_anchor
 
     async def test_dispatch_structured_job_phase_resume_returns_to_qa_testing(
         self,
@@ -2119,9 +2924,7 @@ class TestFixRecoveryContinuation:
             phase="fixing",
             role="fixer",
             cli_tool="claude",
-            context_briefing=json.dumps(
-                {"fix_kind": "phase_resume", "resume_phase": "qa_testing"}
-            ),
+            context_briefing=json.dumps({"fix_kind": "phase_resume", "resume_phase": "qa_testing"}),
         )
 
         with (
@@ -2261,6 +3064,161 @@ class TestRecoveryRoundSummaryReconstruction:
         assert [entry["round"] for entry in summaries] == [4, 5, 6]
         assert mock_escalated.await_args.kwargs["global_round_offset"] == 6
 
+    async def test_restart_phase2_from_reviewing_submits_review_fail_before_fix(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """reviewing restart 进入 escalated_fix 时必须先推进到 fixing。"""
+        context = json.dumps(
+            {
+                "restart_target": "escalated_fix",
+                "stage": "escalated",
+            }
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-phase2-fix", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-phase2-fix",
+                    "s-phase2-fix",
+                    status="pending",
+                    pid=None,
+                    phase="reviewing",
+                    context_briefing=context,
+                    role="fixer_escalation",
+                    cli_tool="codex",
+                ),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    _make_open_finding(
+                        finding_id="f-phase2-fix",
+                        story_id="s-phase2-fix",
+                        description="still blocked",
+                        file_path="src/r4.py",
+                        rule_id="R004",
+                        round_num=4,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        transition_queue = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=transition_queue,
+            convergent_loop_phases={"reviewing"},
+        )
+        task = _make_task(
+            "t-phase2-fix",
+            "s-phase2-fix",
+            status="pending",
+            pid=None,
+            phase="reviewing",
+            context_briefing=context,
+            role="fixer_escalation",
+            cli_tool="codex",
+        )
+
+        with patch(
+            "ato.convergent_loop.ConvergentLoop._run_escalated_phase",
+            new=AsyncMock(),
+        ) as mock_escalated:
+            await engine._dispatch_reviewing_convergent_loop(
+                task,
+                worktree_path="/tmp/wt",
+                max_concurrent=1,
+            )
+
+        transition_queue.submit.assert_awaited_once()
+        submitted_event = transition_queue.submit.await_args.args[0]
+        assert submitted_event.event_name == "review_fail"
+        mock_escalated.assert_awaited_once()
+
+    async def test_reviewing_restart_with_only_suggestions_does_not_jump_to_escalated_fix(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """仅 suggestion 留存时，应继续 rereview，而不是直接 escalated fix。"""
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, _make_story("s-suggestion-only", worktree_path="/tmp/wt"))
+            await insert_task(
+                db,
+                _make_task(
+                    "t-suggestion-only",
+                    "s-suggestion-only",
+                    status="pending",
+                    pid=None,
+                    phase="reviewing",
+                ),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    FindingRecord(
+                        finding_id="f-suggestion-only",
+                        story_id="s-suggestion-only",
+                        phase="reviewing",
+                        round_num=4,
+                        severity="suggestion",
+                        description="ordering warning",
+                        status="open",
+                        file_path="src/r4.py",
+                        rule_id="R-SUG",
+                        dedup_hash=compute_dedup_hash(
+                            "src/r4.py",
+                            "R-SUG",
+                            "suggestion",
+                            "ordering warning",
+                        ),
+                        created_at=_NOW,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        transition_queue = AsyncMock()
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=transition_queue,
+            convergent_loop_phases={"reviewing"},
+        )
+        task = _make_task(
+            "t-suggestion-only",
+            "s-suggestion-only",
+            status="pending",
+            pid=None,
+            phase="reviewing",
+        )
+
+        with (
+            patch(
+                "ato.convergent_loop.ConvergentLoop.run_rereview",
+                new=AsyncMock(),
+            ) as mock_rereview,
+            patch(
+                "ato.convergent_loop.ConvergentLoop._run_escalated_phase",
+                new=AsyncMock(),
+            ) as mock_escalated,
+        ):
+            await engine._dispatch_reviewing_convergent_loop(
+                task,
+                worktree_path="/tmp/wt",
+                max_concurrent=1,
+            )
+
+        mock_rereview.assert_awaited_once()
+        mock_escalated.assert_not_awaited()
+        transition_queue.submit_and_wait.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Fix: 后台 dispatch 异常兜底
@@ -2343,7 +3301,9 @@ class TestRecoveryCostNoneFallback:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2412,7 +3372,9 @@ class TestRecoveryCostNoneFallback:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2510,7 +3472,9 @@ class TestConvergentLoopGenericBranchModelPassthrough:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2571,7 +3535,9 @@ class TestConvergentLoopGenericBranchModelPassthrough:
 
         db = await get_connection(initialized_db_path)
         try:
-            await insert_story(db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating"))
+            await insert_story(
+                db, _make_story("s1", worktree_path="/tmp/wt", current_phase="validating")
+            )
             await insert_task(
                 db,
                 _make_task("t1", "s1", status="running", pid=999, phase="validating"),
@@ -2748,6 +3714,24 @@ class TestDesigningPromptContract:
         assert "prototype-template.pen" in prompt
         assert "test-story-1-ux/prototype.pen" in prompt
         assert "save-report.json" in prompt
+
+    def test_single_prompt_requires_exact_save_report_keys(self) -> None:
+        """单 story designing prompt 明确 save-report 的精确 snake_case 合同。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        assert "story_id, saved_at, pen_file, snapshot_file, children_count" in prompt
+        assert "json_parse_verified, reopen_verified, exported_png_count" in prompt
+        assert "禁止使用 penFile/timestamp/snapshotSaved" in prompt
+
+    def test_group_prompt_requires_exact_save_report_keys(self) -> None:
+        """group designing prompt 也必须保留相同的 save-report 字段合同。"""
+        from ato.recovery import _build_designing_group_body
+
+        prompt = _build_designing_group_body(["story-a", "story-b"])
+        assert "story_id, saved_at, pen_file, snapshot_file, children_count" in prompt
+        assert "json_parse_verified, reopen_verified, exported_png_count" in prompt
+        assert "禁止 penFile/timestamp/snapshotSaved" in prompt
 
 
 class TestPenTemplateBaseline:
@@ -3953,7 +4937,9 @@ class TestWorkspaceAwareDispatch:
         db = await get_connection(initialized_db_path)
         try:
             # story 无 worktree_path
-            await insert_story(db, _make_story("s-ws", worktree_path=None, current_phase="creating"))
+            await insert_story(
+                db, _make_story("s-ws", worktree_path=None, current_phase="creating")
+            )
             await insert_task(
                 db,
                 _make_task(
@@ -4059,7 +5045,9 @@ class TestWorkspaceAwareDispatch:
         db = await get_connection(initialized_db_path)
         try:
             # story 有 worktree，但 dev_ready 是 workspace: main
-            await insert_story(db, _make_story("s-dr", worktree_path="/tmp/wt", current_phase="dev_ready"))
+            await insert_story(
+                db, _make_story("s-dr", worktree_path="/tmp/wt", current_phase="dev_ready")
+            )
             await insert_task(
                 db,
                 _make_task(

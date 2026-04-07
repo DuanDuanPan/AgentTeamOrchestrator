@@ -216,6 +216,8 @@ _STRUCTURED_JOB_PROMPTS: dict[str, str] = {
         "   f. 生成落盘报告 {save_report_json}，包含字段："
         "story_id, saved_at, pen_file, snapshot_file, children_count, "
         "json_parse_verified, reopen_verified, exported_png_count\n"
+        "      - 键名必须完全使用上述 snake_case；"
+        "禁止使用 penFile/timestamp/snapshotSaved 等替代键\n"
         "6. **落盘验证** — 必须通过以下两类验证，任一失败即中止：\n"
         "   a. 本地验证：对写回的 `{prototype_pen}` 执行 json.load，确认解析成功\n"
         '   b. MCP 回读验证：再次调用 batch_get(filePath="{prototype_pen}") '
@@ -368,9 +370,7 @@ async def build_group_prompt(
     return header + "\n\n---\n\n".join(blocks)
 
 
-async def _build_single_story_group_prompt(
-    phase: str, story_id: str, db_path: Path
-) -> str:
+async def _build_single_story_group_prompt(phase: str, story_id: str, db_path: Path) -> str:
     """单 story 时直接用原始模板，无 group 开销。"""
     template = _STRUCTURED_JOB_PROMPTS.get(phase)
     if template is None:
@@ -426,7 +426,10 @@ def _build_designing_group_body(story_ids: list[str]) -> str:
         "   c. 保留顶层字段，仅替换 children\n"
         "   d. 临时文件 + rename 原子写入回 `{prototype_pen}`\n"
         "   e. 保存内存树为 `{snapshot_json}`\n"
-        "   f. 生成落盘报告 `{save_report_json}`\n"
+        "   f. 生成落盘报告 `{save_report_json}`，且必须精确包含键：\n"
+        "      story_id, saved_at, pen_file, snapshot_file, children_count,\n"
+        "      json_parse_verified, reopen_verified, exported_png_count\n"
+        "      键名必须使用 snake_case；禁止 penFile/timestamp/snapshotSaved\n"
         "6. **落盘验证**\n"
         "   a. json.load `{prototype_pen}` 确认解析成功\n"
         '   b. batch_get(filePath="{prototype_pen}") 回读验证\n'
@@ -454,12 +457,7 @@ def _build_designing_group_body(story_ids: list[str]) -> str:
         "4. 完成一个 story 后再处理下一个"
     )
 
-    return (
-        shared_workflow
-        + "---\n\n"
-        + "\n\n---\n\n".join(story_sections)
-        + tail_reminder
-    )
+    return shared_workflow + "---\n\n" + "\n\n---\n\n".join(story_sections) + tail_reminder
 
 
 async def _build_developing_prompt_with_suggestion_findings(
@@ -575,8 +573,16 @@ def _is_pid_alive(pid: int) -> bool:
         raise
 
 
-def _artifact_exists(task: TaskRecord) -> bool:
-    """检测 task 的 expected_artifact 是否存在。"""
+def _artifact_exists(task: TaskRecord, project_root: Path | None = None) -> bool:
+    """检测 task 的规范 phase 产物是否存在。
+
+    creating/designing 等带固定文件合同的 phase，优先检查 story/phase 的规范路径，
+    不依赖 tasks.expected_artifact 中是否仍是旧占位符。
+    """
+    from ato.task_artifacts import task_artifact_exists
+
+    if project_root is not None:
+        return task_artifact_exists(task, project_root)
     if not task.expected_artifact:
         return False
     return Path(task.expected_artifact).exists()
@@ -683,6 +689,116 @@ class RecoveryEngine:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
 
+    @staticmethod
+    def _is_review_placeholder_task(task: TaskRecord) -> bool:
+        """Return whether task is the synthetic reviewing placeholder guard row."""
+        return (
+            task.phase == "reviewing"
+            and task.expected_artifact == "convergent_loop_review_placeholder"
+        )
+
+    def _is_group_dispatch_phase(self, phase: str) -> bool:
+        """Return whether a phase may run as one shared structured-job group session."""
+        if phase in self._interactive_phases or phase in self._convergent_loop_phases:
+            return False
+        return phase not in {"merging", "regression"}
+
+    def _is_group_dispatch_candidate(self, tasks: list[TaskRecord]) -> bool:
+        """Return whether tasks still represent one structured-job group session."""
+        if len(tasks) < 2:
+            return False
+        first = tasks[0]
+        if first.group_id is None:
+            return False
+        if any(task.group_id != first.group_id for task in tasks):
+            return False
+        if len({task.phase for task in tasks}) != 1:
+            logger.warning(
+                "recovery_group_mixed_phase",
+                group_id=first.group_id,
+                task_ids=[task.task_id for task in tasks],
+                phases=sorted({task.phase for task in tasks}),
+            )
+            return False
+        pid_set = {task.pid for task in tasks if task.pid is not None}
+        if len(pid_set) > 1:
+            logger.warning(
+                "recovery_group_mixed_pid",
+                group_id=first.group_id,
+                task_ids=[task.task_id for task in tasks],
+                pids=sorted(pid_set),
+            )
+            return False
+        return self._is_group_dispatch_phase(first.phase)
+
+    def _iter_grouped_recovery_batches(self, tasks: list[TaskRecord]) -> list[list[TaskRecord]]:
+        """Preserve task order while coalescing valid group-dispatch batches."""
+        by_group: dict[str, list[TaskRecord]] = {}
+        for task in tasks:
+            if task.group_id is not None:
+                by_group.setdefault(task.group_id, []).append(task)
+
+        grouped_ids = {
+            group_id
+            for group_id, group_tasks in by_group.items()
+            if self._is_group_dispatch_candidate(group_tasks)
+        }
+
+        batches: list[list[TaskRecord]] = []
+        emitted_groups: set[str] = set()
+        for task in tasks:
+            group_id = task.group_id
+            if group_id is not None and group_id in grouped_ids:
+                if group_id in emitted_groups:
+                    continue
+                batches.append(by_group[group_id])
+                emitted_groups.add(group_id)
+                continue
+            batches.append([task])
+        return batches
+
+    async def _auto_heal_paused_group_pids(self, tasks: list[TaskRecord]) -> None:
+        """Clear diverged paused group PIDs so recovery can regroup them safely."""
+        from ato.models.db import get_connection, update_task_status
+
+        grouped: dict[str, list[TaskRecord]] = {}
+        for task in tasks:
+            if task.group_id is not None:
+                grouped.setdefault(task.group_id, []).append(task)
+
+        for group_id, group_tasks in grouped.items():
+            if len(group_tasks) < 2:
+                continue
+            if any(task.status != "paused" for task in group_tasks):
+                continue
+            if len({task.phase for task in group_tasks}) != 1:
+                continue
+
+            phase = group_tasks[0].phase
+            if not self._is_group_dispatch_phase(phase):
+                continue
+
+            pid_set = {task.pid for task in group_tasks if task.pid is not None}
+            if len(pid_set) <= 1:
+                continue
+
+            logger.warning(
+                "recovery_group_mixed_pid_auto_heal",
+                group_id=group_id,
+                task_ids=[task.task_id for task in group_tasks],
+                story_ids=[task.story_id for task in group_tasks],
+                phase=phase,
+                pids=sorted(pid_set),
+            )
+
+            db = await get_connection(self._db_path)
+            try:
+                for task in group_tasks:
+                    await update_task_status(db, task.task_id, task.status, pid=None)
+                    task.pid = None
+            finally:
+                await db.close()
+
     # ------------------------------------------------------------------
     # 分类
     # ------------------------------------------------------------------
@@ -699,13 +815,18 @@ class RecoveryEngine:
 
     def classify_task(self, task: TaskRecord) -> RecoveryClassification:
         """对单个 running task 执行四路分类。"""
+        from ato.core import derive_project_root
+        from ato.task_artifacts import task_artifact_path
+
+        project_root = derive_project_root(self._db_path)
         action: RecoveryAction
         if task.pid is not None and _is_pid_alive(task.pid):
             action = "reattach"
             reason = f"PID {task.pid} still alive"
-        elif _artifact_exists(task):
+        elif _artifact_exists(task, project_root):
             action = "complete"
-            reason = f"Artifact exists: {task.expected_artifact}"
+            artifact_path = task_artifact_path(task, project_root)
+            reason = f"Artifact exists: {artifact_path or task.expected_artifact}"
         else:
             is_interactive = (
                 task.phase in self._interactive_phases
@@ -774,6 +895,8 @@ class RecoveryEngine:
 
     async def _monitor_reattached_pid(self, task: TaskRecord) -> None:
         """监控 reattach 的 PID，退出后自动执行后续恢复。"""
+        from ato.core import derive_project_root
+
         pid = task.pid
         if pid is None:
             return
@@ -781,7 +904,7 @@ class RecoveryEngine:
             while _is_pid_alive(pid):
                 await asyncio.sleep(_PID_MONITOR_INTERVAL)
             logger.info("reattached_pid_exited", task_id=task.task_id, pid=pid)
-            if _artifact_exists(task):
+            if _artifact_exists(task, derive_project_root(self._db_path)):
                 await self._complete_from_artifact(task)
             else:
                 is_interactive = (
@@ -797,6 +920,84 @@ class RecoveryEngine:
             raise
         except Exception:
             logger.exception("monitor_reattached_pid_error", task_id=task.task_id, pid=pid)
+
+    async def _reattach_group(self, tasks: list[TaskRecord]) -> None:
+        """Reattach a grouped structured-job session exactly once."""
+        if not tasks:
+            return
+        primary_task = tasks[0]
+        pid = primary_task.pid
+        if pid is None:
+            for task in tasks:
+                await self._reschedule(task)
+            return
+
+        if self._subprocess_mgr is not None:
+            from ato.subprocess_mgr import RunningTask
+
+            self._subprocess_mgr.running[pid] = RunningTask(
+                task_id=primary_task.task_id,
+                story_id=primary_task.story_id,
+                phase=primary_task.phase,
+                pid=pid,
+                started_at=primary_task.started_at or datetime.now(tz=UTC),
+            )
+
+        monitor = asyncio.create_task(
+            self._monitor_reattached_group_pid(tasks),
+            name=f"recovery-group-monitor-{primary_task.group_id or primary_task.task_id}",
+        )
+        self._background_tasks.append(monitor)
+
+        logger.info(
+            "recovery_action_reattach_group",
+            group_id=primary_task.group_id,
+            pid=pid,
+            task_ids=[task.task_id for task in tasks],
+            story_ids=[task.story_id for task in tasks],
+            phase=primary_task.phase,
+        )
+
+    async def _monitor_reattached_group_pid(self, tasks: list[TaskRecord]) -> None:
+        """Monitor a grouped session PID and preserve completed stories on exit."""
+        from ato.core import derive_project_root
+
+        if not tasks:
+            return
+        primary_task = tasks[0]
+        pid = primary_task.pid
+        if pid is None:
+            return
+        project_root = derive_project_root(self._db_path)
+        try:
+            while _is_pid_alive(pid):
+                await asyncio.sleep(_PID_MONITOR_INTERVAL)
+            logger.info(
+                "reattached_group_pid_exited",
+                group_id=primary_task.group_id,
+                pid=pid,
+                task_ids=[task.task_id for task in tasks],
+            )
+
+            completed_tasks = [task for task in tasks if _artifact_exists(task, project_root)]
+            reschedule_tasks = [task for task in tasks if task not in completed_tasks]
+
+            for task in completed_tasks:
+                await self._complete_from_artifact(task)
+
+            if len(reschedule_tasks) > 1 and self._is_group_dispatch_candidate(reschedule_tasks):
+                await self._reschedule_group(reschedule_tasks)
+            else:
+                for task in reschedule_tasks:
+                    await self._reschedule(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "monitor_reattached_group_pid_error",
+                group_id=primary_task.group_id,
+                pid=pid,
+            )
 
     async def _complete_from_artifact(self, task: TaskRecord) -> None:
         """标记 task 完成 + 提交 transition 推进 story。"""
@@ -814,7 +1015,13 @@ class RecoveryEngine:
             await db.close()
 
         if task.phase == "fixing":
-            event_name, continue_convergent = self._resolve_fixing_success_event(task)
+            (
+                event_name,
+                continue_convergent,
+            ) = await self._resolve_fixing_success_event_with_backfill(
+                task,
+                self._db_path,
+            )
             if continue_convergent:
                 from ato.convergent_loop import ConvergentLoop
 
@@ -848,6 +1055,7 @@ class RecoveryEngine:
         if success_event is not None:
             # Design gate: designing phase 需要验证 UX 产出物
             if success_event == "design_done":
+                self._synchronize_save_report_before_gate(task.story_id)
                 # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
                 self._generate_manifest_before_gate(task.story_id)
                 gate_ok = await self._check_design_gate(task)
@@ -921,6 +1129,8 @@ class RecoveryEngine:
             )
         finally:
             await db.close()
+        task.status = "pending"
+        task.pid = None
 
         is_convergent = task.phase in self._convergent_loop_phases
 
@@ -952,9 +1162,230 @@ class RecoveryEngine:
                 dispatch="structured_job",
             )
 
+    async def _reschedule_group(self, tasks: list[TaskRecord]) -> None:
+        """重新调度同一 group_id 的 structured-job group。"""
+        from ato.models.db import get_connection, get_story, update_task_status
+
+        if not tasks:
+            return
+        if len(tasks) == 1 or not self._is_group_dispatch_candidate(tasks):
+            for task in tasks:
+                await self._reschedule(task)
+            return
+
+        valid_tasks: list[TaskRecord] = []
+        for task in tasks:
+            db = await get_connection(self._db_path)
+            try:
+                story = await get_story(db, task.story_id)
+            finally:
+                await db.close()
+            if story is None or story.current_phase != task.phase:
+                logger.info(
+                    "recovery_reschedule_phase_mismatch",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    task_phase=task.phase,
+                    story_phase=story.current_phase if story else None,
+                )
+                db2 = await get_connection(self._db_path)
+                try:
+                    await update_task_status(
+                        db2,
+                        task.task_id,
+                        "failed",
+                        error_message="superseded_phase_mismatch",
+                    )
+                finally:
+                    await db2.close()
+                continue
+            valid_tasks.append(task)
+
+        if not valid_tasks:
+            return
+        if len(valid_tasks) == 1:
+            await self._reschedule(valid_tasks[0])
+            return
+
+        for task in valid_tasks:
+            await self._sync_expected_artifact_path(task)
+            db = await get_connection(self._db_path)
+            try:
+                await update_task_status(
+                    db,
+                    task.task_id,
+                    "pending",
+                    pid=None,
+                    started_at=None,
+                    completed_at=None,
+                    exit_code=None,
+                    error_message=None,
+                    expected_artifact=task.expected_artifact,
+                )
+            finally:
+                await db.close()
+            task.status = "pending"
+            task.pid = None
+
+        primary_task = valid_tasks[0]
+        dispatch_task = asyncio.create_task(
+            self._dispatch_structured_job_group(valid_tasks),
+            name=f"recovery-dispatch-group-{primary_task.group_id or primary_task.task_id}",
+        )
+        self._background_tasks.append(dispatch_task)
+        logger.info(
+            "recovery_action_reschedule_group",
+            group_id=primary_task.group_id,
+            task_ids=[task.task_id for task in valid_tasks],
+            story_ids=[task.story_id for task in valid_tasks],
+            phase=primary_task.phase,
+            dispatch="structured_job_group",
+        )
+
+    async def _retire_paused_review_placeholders(
+        self,
+        tasks: list[TaskRecord],
+    ) -> list[TaskRecord]:
+        """Retire paused review placeholders so normal recovery never dispatches them.
+
+        Review placeholders are synthetic guard rows inserted to block poll-cycle races
+        between subprocess exit and transition commit. After a clean shutdown they become
+        ``paused`` like any other task, but they must never be rescheduled as a real review.
+        """
+        from ato.models.db import get_connection, update_task_status
+
+        placeholders = [task for task in tasks if self._is_review_placeholder_task(task)]
+        if not placeholders:
+            return tasks
+
+        completed_at = datetime.now(tz=UTC)
+        db = await get_connection(self._db_path)
+        try:
+            for task in placeholders:
+                await update_task_status(
+                    db,
+                    task.task_id,
+                    "completed",
+                    pid=None,
+                    completed_at=completed_at,
+                    error_message="retired_review_placeholder_by_recovery",
+                )
+                logger.info(
+                    "recovery_retired_review_placeholder",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                )
+        finally:
+            await db.close()
+
+        return [task for task in tasks if task not in placeholders]
+
     # ------------------------------------------------------------------
     # Dispatch 策略
     # ------------------------------------------------------------------
+
+    async def _sync_expected_artifact_path(self, task: TaskRecord) -> None:
+        """Normalize expected_artifact to the canonical phase file path when available."""
+        from ato.core import derive_project_root
+        from ato.task_artifacts import derive_phase_artifact_path
+
+        artifact_path = derive_phase_artifact_path(
+            task.story_id,
+            task.phase,
+            derive_project_root(self._db_path),
+        )
+        if artifact_path is None:
+            return
+        task.expected_artifact = str(artifact_path)
+
+    async def _dispatch_structured_job_group(self, tasks: list[TaskRecord]) -> None:
+        """Re-dispatch grouped structured-job tasks in one shared CLI session."""
+        from ato.core import derive_project_root, get_main_path_gate
+
+        if not tasks:
+            return
+        primary_task = tasks[0]
+        phase = primary_task.phase
+        phase_cfg = self._resolve_phase_config(phase)
+
+        project_root = derive_project_root(self._db_path)
+        gate = get_main_path_gate()
+        await gate.acquire_shared()
+        try:
+            for task in tasks:
+                await self._sync_expected_artifact_path(task)
+
+            story_ids = [task.story_id for task in tasks]
+            prompt = await build_group_prompt(phase, story_ids, self._db_path)
+            assert self._settings is not None
+            options: dict[str, object] = {
+                "cwd": str(project_root),
+                "timeout": self._settings.timeout.structured_job,
+                "idle_timeout": self._settings.timeout.idle_timeout,
+                "post_result_timeout": self._settings.timeout.post_result_timeout,
+            }
+            if phase_model := phase_cfg.get("model"):
+                options["model"] = phase_model
+            if effort := phase_cfg.get("effort"):
+                options["effort"] = effort
+
+            adapter = _create_adapter(primary_task.cli_tool)
+            mgr = SubprocessManager(
+                max_concurrent=phase_cfg.get(
+                    "max_concurrent",
+                    getattr(self._settings, "max_concurrent_agents", 4),
+                ),
+                adapter=adapter,
+                db_path=self._db_path,
+            )
+            result = await mgr.dispatch_group(
+                tasks=tasks,
+                prompt=prompt,
+                cli_tool=primary_task.cli_tool,
+                options=options,
+                on_progress=self._build_progress_callback(
+                    task_id=primary_task.task_id,
+                    story_id=primary_task.story_id,
+                    phase=primary_task.phase,
+                    role=primary_task.role,
+                    cli_tool=primary_task.cli_tool,
+                ),
+            )
+            if result.status != "success":
+                logger.warning(
+                    "recovery_group_dispatch_failed",
+                    group_id=primary_task.group_id,
+                    phase=phase,
+                    story_ids=story_ids,
+                    result_status=result.status,
+                    error=result.error_message,
+                )
+                return
+
+            for task in tasks:
+                if _artifact_exists(task, project_root):
+                    await self._complete_from_artifact(task)
+                else:
+                    logger.warning(
+                        "recovery_group_story_artifact_missing",
+                        group_id=primary_task.group_id,
+                        story_id=task.story_id,
+                        phase=phase,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "recovery_group_dispatch_error",
+                group_id=primary_task.group_id,
+                phase=phase,
+                story_ids=[task.story_id for task in tasks],
+            )
+            for task in tasks:
+                await self._mark_dispatch_failed(task)
+        finally:
+            await gate.release_shared()
 
     def _resolve_phase_config(self, phase: str) -> dict[str, Any]:
         """从 settings 读取 phase 级别的 model / timeout / sandbox / cli。"""
@@ -1210,6 +1641,81 @@ class RecoveryEngine:
         return round_num, stage
 
     @staticmethod
+    def _parse_cycle_anchor(task: TaskRecord) -> datetime | None:
+        """Extract an optional review-cycle anchor timestamp from task context."""
+        if not task.context_briefing:
+            return None
+        try:
+            ctx = json.loads(task.context_briefing)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        raw = ctx.get("cycle_anchor")
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _infer_review_cycle_anchor(tasks: list[TaskRecord]) -> datetime | None:
+        """Infer the reset boundary for a fresh reviewing cycle after later gates."""
+        for prior_task in reversed(tasks):
+            if prior_task.status != "completed":
+                continue
+            if prior_task.phase not in {"qa_testing", "uat", "regression"}:
+                continue
+            if prior_task.completed_at is not None:
+                return prior_task.completed_at
+            if prior_task.started_at is not None:
+                return prior_task.started_at
+        return None
+
+    async def _submit_story_transition_and_wait(self, story_id: str, event_name: str) -> None:
+        """Submit a transition through the shared queue and wait for commit when possible."""
+        if self._transition_queue is None:
+            msg = f"Transition queue unavailable for story '{story_id}' event '{event_name}'"
+            raise RuntimeError(msg)
+        event = TransitionEvent(
+            story_id=story_id,
+            event_name=event_name,
+            source="agent",
+            submitted_at=datetime.now(tz=UTC),
+        )
+        submit_and_wait = getattr(type(self._transition_queue), "submit_and_wait", None)
+        if callable(submit_and_wait):
+            await self._transition_queue.submit_and_wait(event)
+            return
+        await self._transition_queue.submit(event)
+
+    async def _complete_restart_task(
+        self,
+        task: TaskRecord,
+        *,
+        restart_target: str,
+    ) -> None:
+        """Mark a synthetic restart task as consumed before branching the loop."""
+        from ato.models.db import get_connection, update_task_status
+
+        db = await get_connection(self._db_path)
+        try:
+            await update_task_status(
+                db,
+                task.task_id,
+                "completed",
+                completed_at=datetime.now(tz=UTC),
+                expected_artifact=f"convergent_restart_{restart_target}_consumed",
+            )
+        finally:
+            await db.close()
+
+    @staticmethod
+    def _count_open_blocking_findings(findings: list[Any]) -> int:
+        """Count unresolved blocking findings from the current loop slice."""
+        return sum(1 for finding in findings if getattr(finding, "severity", None) == "blocking")
+
+    @staticmethod
     def _build_fix_resume_phase_context(
         resume_phase: Literal["qa_testing", "uat", "regression"],
     ) -> str:
@@ -1258,6 +1764,55 @@ class RecoveryEngine:
 
         return "fix_done", False
 
+    @classmethod
+    async def _resolve_fixing_success_event_with_backfill(
+        cls,
+        task: TaskRecord,
+        db_path: Path,
+    ) -> tuple[str, bool]:
+        """Resolve fixing success event and backfill missing phase-resume context.
+
+        Legacy fixing tasks may have been created before resume metadata was written.
+        If a non-review fixing task arrives here with empty ``context_briefing``,
+        infer the resume phase from prior completed tasks and persist the recovered
+        context so the task can correctly return to QA/UAT/regression.
+        """
+        event_name, continue_convergent = cls._resolve_fixing_success_event(task)
+        if continue_convergent or task.context_briefing or event_name != "fix_done":
+            return event_name, continue_convergent
+
+        from ato.models.db import get_connection, get_tasks_by_story
+
+        db = await get_connection(db_path)
+        try:
+            story_tasks = await get_tasks_by_story(db, task.story_id)
+            prior_tasks: list[TaskRecord] = []
+            for prior_task in story_tasks:
+                if prior_task.task_id == task.task_id:
+                    break
+                prior_tasks.append(prior_task)
+            resume_phase = cls._infer_fix_resume_phase(prior_tasks)
+            if resume_phase is None:
+                return event_name, continue_convergent
+
+            context = cls._build_fix_resume_phase_context(resume_phase)
+            await db.execute(
+                "UPDATE tasks SET context_briefing = ? WHERE task_id = ?",
+                (context, task.task_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        task.context_briefing = context
+        logger.info(
+            "fixing_success_event_backfilled_resume_phase",
+            task_id=task.task_id,
+            story_id=task.story_id,
+            resume_phase=resume_phase,
+        )
+        return _FIXING_RESUME_PHASE_EVENT[resume_phase], False
+
     @staticmethod
     def _infer_fix_resume_phase(
         tasks: list[TaskRecord],
@@ -1265,6 +1820,15 @@ class RecoveryEngine:
         """Infer whether fixing should resume QA/UAT/regression instead of review."""
         for prior_task in reversed(tasks):
             if prior_task.status != "completed" or prior_task.phase == "fixing":
+                continue
+            # Synthetic review placeholders are guard rows, not real prior phases.
+            # They may be completed with or without timestamps depending on which
+            # path consumed/retired them; never let them mask the real phase that
+            # led into fixing.
+            if prior_task.expected_artifact == "convergent_loop_review_placeholder":
+                continue
+            # Historical placeholder rows may also lack both timestamps.
+            if prior_task.started_at is None and prior_task.completed_at is None:
                 continue
             if prior_task.phase == "qa_testing":
                 return "qa_testing"
@@ -1397,6 +1961,7 @@ class RecoveryEngine:
         fix_round, stage = self._parse_fix_resume_context(task)
         if fix_round is None or stage is None:
             return
+        cycle_anchor = self._parse_cycle_anchor(task)
 
         resolved_worktree = worktree_path or await self._get_story_worktree(task.story_id)
         if resolved_worktree is None:
@@ -1414,20 +1979,13 @@ class RecoveryEngine:
             不能提前清理——BMAD parse 期间 placeholder 是防止 poll cycle
             抢先 dispatch 的唯一屏障。
             """
-            db_clean = await get_connection(self._db_path)
-            try:
-                cursor = await db_clean.execute(
-                    "UPDATE tasks SET status = 'completed', "
-                    "error_message = 'consumed_by_continue_after_fix' "
-                    "WHERE story_id = ? AND phase = 'reviewing' "
-                    "AND status = 'pending' "
-                    "AND expected_artifact = 'convergent_loop_review_placeholder'",
-                    (task.story_id,),
-                )
-                if cursor.rowcount > 0:
-                    await db_clean.commit()
-            finally:
-                await db_clean.close()
+            from ato.convergent_loop import ConvergentLoop
+
+            await ConvergentLoop.consume_review_placeholder(
+                story_id=task.story_id,
+                db_path=self._db_path,
+                reason="consumed_by_continue_after_fix",
+            )
 
         max_concurrent, reviewer_options = self._resolve_reviewing_dispatch_options()
         loop = self._build_convergent_loop(
@@ -1443,6 +2001,7 @@ class RecoveryEngine:
                 rereview_round,
                 worktree_path=resolved_worktree,
                 stage=stage,
+                cycle_anchor=cycle_anchor,
             )
         finally:
             # 无论 rereview 成功/失败/异常，都要清理 placeholder
@@ -1464,7 +2023,12 @@ class RecoveryEngine:
 
             db = await get_connection(self._db_path)
             try:
-                all_findings = await get_findings_by_story(db, task.story_id)
+                all_findings = await get_findings_by_story(
+                    db,
+                    task.story_id,
+                    created_after=cycle_anchor,
+                    phase="reviewing",
+                )
             finally:
                 await db.close()
 
@@ -1480,6 +2044,7 @@ class RecoveryEngine:
                 task.story_id,
                 resolved_worktree,
                 standard_round_summaries=standard_summaries,
+                cycle_anchor=cycle_anchor,
                 global_round_offset=result.round_num,
             )
             return
@@ -1497,7 +2062,12 @@ class RecoveryEngine:
 
         db = await get_connection(self._db_path)
         try:
-            all_findings = await get_findings_by_story(db, task.story_id)
+            all_findings = await get_findings_by_story(
+                db,
+                task.story_id,
+                created_after=cycle_anchor,
+                phase="reviewing",
+            )
         finally:
             await db.close()
 
@@ -1543,12 +2113,32 @@ class RecoveryEngine:
         reviewer_options: dict[str, Any] | None = None,
     ) -> None:
         """reviewing phase 恢复：stage-aware，区分 full review / scoped re-review / escalated。"""
-        from ato.models.db import get_connection, get_findings_by_story, get_open_findings
+        from ato.models.db import (
+            get_connection,
+            get_findings_by_story,
+            get_open_findings,
+            get_tasks_by_story,
+        )
+
+        cycle_anchor = self._parse_cycle_anchor(task)
 
         db = await get_connection(self._db_path)
         try:
-            previous_findings = await get_open_findings(db, task.story_id)
-            all_findings = await get_findings_by_story(db, task.story_id)
+            story_tasks = await get_tasks_by_story(db, task.story_id)
+            if cycle_anchor is None and not task.context_briefing:
+                cycle_anchor = self._infer_review_cycle_anchor(story_tasks)
+            previous_findings = await get_open_findings(
+                db,
+                task.story_id,
+                created_after=cycle_anchor,
+                phase="reviewing",
+            )
+            all_findings = await get_findings_by_story(
+                db,
+                task.story_id,
+                created_after=cycle_anchor,
+                phase="reviewing",
+            )
         finally:
             await db.close()
 
@@ -1573,19 +2163,18 @@ class RecoveryEngine:
         # --- restart_target="standard_review": offset-aware fresh run_loop ---
         if restart_target == "standard_review":
             # F1: Mark synthetic restart task as completed before entering restart flow
-            from ato.models.db import get_findings_by_story, update_task_status
+            from ato.models.db import get_findings_by_story
 
+            await self._complete_restart_task(task, restart_target=restart_target)
             db = await get_connection(self._db_path)
             try:
-                await update_task_status(
+                # F2: Compute round_num_offset from all reviewing findings (not just open)
+                all_findings = await get_findings_by_story(
                     db,
-                    task.task_id,
-                    "completed",
-                    completed_at=datetime.now(tz=UTC),
-                    expected_artifact=f"convergent_restart_{restart_target}_consumed",
+                    task.story_id,
+                    created_after=cycle_anchor,
+                    phase="reviewing",
                 )
-                # F2: Compute round_num_offset from ALL findings (not just open)
-                all_findings = await get_findings_by_story(db, task.story_id)
             finally:
                 await db.close()
             offset = max((f.round_num for f in all_findings), default=0)
@@ -1596,25 +2185,29 @@ class RecoveryEngine:
                 previous_findings_count=len(previous_findings),
             )
             # Full restart from Phase 1 with monotonic round_num offset
-            await loop.run_loop(task.story_id, worktree_path, round_num_offset=offset)
+            await loop.run_loop(
+                task.story_id,
+                worktree_path,
+                cycle_anchor=cycle_anchor,
+                round_num_offset=offset,
+            )
             return
 
         # --- restart_target="escalated_fix": re-enter Phase 2 from fix ---
         if restart_target == "escalated_fix":
             # F1: Mark synthetic restart task as completed before entering restart flow
-            from ato.models.db import get_findings_by_story, update_task_status
+            from ato.models.db import get_findings_by_story
 
+            await self._complete_restart_task(task, restart_target=restart_target)
             db = await get_connection(self._db_path)
             try:
-                await update_task_status(
+                # F3+F4: Use all reviewing findings (not just open) for offset and summaries
+                all_findings = await get_findings_by_story(
                     db,
-                    task.task_id,
-                    "completed",
-                    completed_at=datetime.now(tz=UTC),
-                    expected_artifact=f"convergent_restart_{restart_target}_consumed",
+                    task.story_id,
+                    created_after=cycle_anchor,
+                    phase="reviewing",
                 )
-                # F3+F4: Use ALL findings (not just open) for offset and summaries
-                all_findings = await get_findings_by_story(db, task.story_id)
             finally:
                 await db.close()
             global_offset = max((f.round_num for f in all_findings), default=0)
@@ -1628,12 +2221,26 @@ class RecoveryEngine:
                 all_findings,
                 round_numbers=latest_standard_rounds,
             )
-            await loop._run_escalated_phase(
-                task.story_id,
-                worktree_path,
-                standard_round_summaries=standard_summaries,
-                global_round_offset=global_offset,
-            )
+            open_blocking = self._count_open_blocking_findings(previous_findings)
+            if open_blocking > 0:
+                await self._submit_story_transition_and_wait(task.story_id, "review_fail")
+                await loop._run_escalated_phase(
+                    task.story_id,
+                    worktree_path,
+                    cycle_anchor=cycle_anchor,
+                    standard_round_summaries=standard_summaries,
+                    global_round_offset=global_offset,
+                )
+            else:
+                await loop.run_rereview(
+                    task.story_id,
+                    global_offset + 1,
+                    worktree_path=worktree_path,
+                    cycle_anchor=cycle_anchor,
+                    task_id=task.task_id,
+                    is_retry=True,
+                    stage="escalated",
+                )
             return
 
         review_kind, resume_round = self._parse_review_resume_context(task)
@@ -1641,6 +2248,7 @@ class RecoveryEngine:
             await loop.run_first_review(
                 task.story_id,
                 worktree_path,
+                cycle_anchor=cycle_anchor,
                 task_id=task.task_id,
                 is_retry=True,
                 round_num_offset=resume_round - 1,
@@ -1651,6 +2259,7 @@ class RecoveryEngine:
                 task.story_id,
                 resume_round,
                 worktree_path=worktree_path,
+                cycle_anchor=cycle_anchor,
                 task_id=task.task_id,
                 is_retry=True,
                 stage="escalated" if stage == "escalated" else "standard",
@@ -1664,6 +2273,7 @@ class RecoveryEngine:
                 task.story_id,
                 round_num,
                 worktree_path=worktree_path,
+                cycle_anchor=cycle_anchor,
                 task_id=task.task_id,
                 is_retry=True,
                 stage="escalated",
@@ -1679,18 +2289,33 @@ class RecoveryEngine:
                 standard_summaries_list = self._reconstruct_round_summaries(
                     all_findings, max_round=max_rounds
                 )
-                await loop._run_escalated_phase(
-                    task.story_id,
-                    worktree_path,
-                    standard_round_summaries=standard_summaries_list,
-                    global_round_offset=round_num - 1,
-                )
+                open_blocking = self._count_open_blocking_findings(previous_findings)
+                if open_blocking > 0:
+                    await self._complete_restart_task(task, restart_target="escalated_fix")
+                    await self._submit_story_transition_and_wait(task.story_id, "review_fail")
+                    await loop._run_escalated_phase(
+                        task.story_id,
+                        worktree_path,
+                        cycle_anchor=cycle_anchor,
+                        standard_round_summaries=standard_summaries_list,
+                        global_round_offset=round_num - 1,
+                    )
+                else:
+                    await loop.run_rereview(
+                        task.story_id,
+                        round_num,
+                        worktree_path=worktree_path,
+                        cycle_anchor=cycle_anchor,
+                        task_id=task.task_id,
+                        is_retry=True,
+                    )
                 return
 
             await loop.run_rereview(
                 task.story_id,
                 round_num,
                 worktree_path=worktree_path,
+                cycle_anchor=cycle_anchor,
                 task_id=task.task_id,
                 is_retry=True,
             )
@@ -1699,6 +2324,7 @@ class RecoveryEngine:
         await loop.run_first_review(
             task.story_id,
             worktree_path,
+            cycle_anchor=cycle_anchor,
             task_id=task.task_id,
             is_retry=True,
         )
@@ -1944,6 +2570,7 @@ class RecoveryEngine:
                 FindingRecord(
                     finding_id=str(uuid.uuid4()),
                     story_id=task.story_id,
+                    phase=task.phase,
                     round_num=1,
                     severity=f.severity,
                     description=f.description,
@@ -1972,6 +2599,7 @@ class RecoveryEngine:
                     task.story_id,
                     1,
                     threshold=blocking_threshold,
+                    phase=task.phase,
                     nudge=self._nudge,
                 )
             finally:
@@ -2045,6 +2673,8 @@ class RecoveryEngine:
             )
             return
 
+        from ato.models.db import get_connection, update_task_status
+
         phase_cfg = self._resolve_phase_config(task.phase)
         worktree_path = await self._get_story_worktree(task.story_id)
         workspace = self._resolve_dispatch_workspace(phase_cfg, worktree_path)
@@ -2071,6 +2701,18 @@ class RecoveryEngine:
                     )
                     await self._mark_dispatch_failed(task)
                     return
+
+            await self._sync_expected_artifact_path(task)
+            db = await get_connection(self._db_path)
+            try:
+                await update_task_status(
+                    db,
+                    task.task_id,
+                    "pending",
+                    expected_artifact=task.expected_artifact,
+                )
+            finally:
+                await db.close()
 
             max_concurrent = phase_cfg.get("max_concurrent", 4)
             options = self._build_dispatch_options(task, worktree_path, phase_cfg)
@@ -2134,7 +2776,13 @@ class RecoveryEngine:
 
             if result.status == "success":
                 if task.phase == "fixing":
-                    event_name, continue_convergent = self._resolve_fixing_success_event(task)
+                    (
+                        event_name,
+                        continue_convergent,
+                    ) = await self._resolve_fixing_success_event_with_backfill(
+                        task,
+                        self._db_path,
+                    )
                     if continue_convergent:
                         from ato.convergent_loop import ConvergentLoop
 
@@ -2166,6 +2814,7 @@ class RecoveryEngine:
                     if success_event is not None:
                         # Design gate: designing phase 需要验证 UX 产出物
                         if success_event == "design_done":
+                            self._synchronize_save_report_before_gate(task.story_id)
                             # Story 9.1d: 在 gate 前基于磁盘真相生成 manifest
                             self._generate_manifest_before_gate(task.story_id)
                             gate_ok = await self._check_design_gate(task)
@@ -2215,6 +2864,17 @@ class RecoveryEngine:
             write_prototype_manifest(story_id, project_root)
         except Exception:
             logger.exception("manifest_generation_failed", story_id=story_id)
+
+    def _synchronize_save_report_before_gate(self, story_id: str) -> None:
+        """Rewrite save-report.json from disk truth before running design gate."""
+        from ato.core import derive_project_root
+        from ato.design_artifacts import write_save_report_from_disk
+
+        project_root = derive_project_root(self._db_path)
+        try:
+            write_save_report_from_disk(story_id, project_root)
+        except Exception:
+            logger.exception("save_report_sync_failed", story_id=story_id)
 
     async def _check_design_gate(self, task: TaskRecord) -> bool:
         """Designing artifact gate V2：严格验证 UX 产出物存在性与内容完整性。
@@ -2347,6 +3007,8 @@ class RecoveryEngine:
         finally:
             await db.close()
 
+        paused_tasks = await self._retire_paused_review_placeholders(paused_tasks)
+
         recovery_mode: RecoveryMode
         if running_tasks:
             recovery_mode = "crash"
@@ -2376,7 +3038,49 @@ class RecoveryEngine:
         needs_human = 0
 
         if recovery_mode == "crash":
-            for task in running_tasks:
+            for batch in self._iter_grouped_recovery_batches(running_tasks):
+                if len(batch) > 1 and self._is_group_dispatch_candidate(batch):
+                    primary = batch[0]
+                    if primary.pid is not None and _is_pid_alive(primary.pid):
+                        classifications.extend(
+                            RecoveryClassification(
+                                task_id=task.task_id,
+                                story_id=task.story_id,
+                                action="reattach",
+                                reason=f"Group PID {primary.pid} still alive",
+                            )
+                            for task in batch
+                        )
+                        await self._reattach_group(batch)
+                        auto_recovered += len(batch)
+                        continue
+
+                    reschedule_tasks: list[TaskRecord] = []
+                    for task in batch:
+                        c = self.classify_task(task)
+                        classifications.append(c)
+                        if c.action == "complete":
+                            await self._complete_from_artifact(task)
+                            auto_recovered += 1
+                        elif c.action == "reschedule":
+                            reschedule_tasks.append(task)
+                        elif c.action == "needs_human":
+                            await self._mark_needs_human(task)
+                            needs_human += 1
+                        elif c.action == "reattach":
+                            await self._reattach(task)
+                            auto_recovered += 1
+
+                    if len(reschedule_tasks) > 1:
+                        await self._reschedule_group(reschedule_tasks)
+                        dispatched += len(reschedule_tasks)
+                    else:
+                        for task in reschedule_tasks:
+                            await self._reschedule(task)
+                            dispatched += 1
+                    continue
+
+                task = batch[0]
                 c = self.classify_task(task)
                 classifications.append(c)
                 if c.action == "reattach":
@@ -2393,7 +3097,11 @@ class RecoveryEngine:
                     needs_human += 1
 
         elif recovery_mode == "normal":
+            from ato.core import derive_project_root
+
             protected = await self._get_crash_recovery_story_ids()
+            project_root = derive_project_root(self._db_path)
+            resumable_paused: list[TaskRecord] = []
             for task in paused_tasks:
                 if task.story_id in protected:
                     logger.info(
@@ -2411,6 +3119,56 @@ class RecoveryEngine:
                         )
                     )
                     continue
+                resumable_paused.append(task)
+
+            await self._auto_heal_paused_group_pids(resumable_paused)
+
+            for batch in self._iter_grouped_recovery_batches(resumable_paused):
+                if len(batch) > 1 and self._is_group_dispatch_candidate(batch):
+                    completed_tasks = [
+                        task for task in batch if _artifact_exists(task, project_root)
+                    ]
+                    reschedule_tasks = [task for task in batch if task not in completed_tasks]
+
+                    for task in completed_tasks:
+                        classifications.append(
+                            RecoveryClassification(
+                                task_id=task.task_id,
+                                story_id=task.story_id,
+                                action="complete",
+                                reason="Normal restart: artifact already persisted before shutdown",
+                            )
+                        )
+                        await self._complete_from_artifact(task)
+                        auto_recovered += 1
+
+                    if len(reschedule_tasks) > 1:
+                        for task in reschedule_tasks:
+                            classifications.append(
+                                RecoveryClassification(
+                                    task_id=task.task_id,
+                                    story_id=task.story_id,
+                                    action="reschedule",
+                                    reason="Normal restart: grouped task was paused by ato stop",
+                                )
+                            )
+                        await self._reschedule_group(reschedule_tasks)
+                        dispatched += len(reschedule_tasks)
+                    else:
+                        for task in reschedule_tasks:
+                            classifications.append(
+                                RecoveryClassification(
+                                    task_id=task.task_id,
+                                    story_id=task.story_id,
+                                    action="reschedule",
+                                    reason="Normal restart: task was paused by ato stop",
+                                )
+                            )
+                            await self._reschedule(task)
+                            dispatched += 1
+                    continue
+
+                task = batch[0]
                 classifications.append(
                     RecoveryClassification(
                         task_id=task.task_id,

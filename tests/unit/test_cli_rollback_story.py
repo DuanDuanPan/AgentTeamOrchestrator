@@ -126,7 +126,7 @@ class TestRollbackStoryCli:
             assert story.current_phase == "creating"
             assert story.status == "planning"
             assert tasks[0].status == "failed"
-            assert findings[0].status == "closed"
+            assert findings == []
             assert approvals == []
 
         asyncio.run(_verify())

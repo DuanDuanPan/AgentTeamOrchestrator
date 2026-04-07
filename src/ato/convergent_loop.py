@@ -67,6 +67,7 @@ class ConvergentLoop:
     _DEFAULT_ESCALATED_FIX = DispatchProfile(
         role="fixer_escalation", cli_tool="codex", sandbox="workspace-write"
     )
+    _FINDINGS_PHASE = "reviewing"
 
     def __init__(
         self,
@@ -146,6 +147,7 @@ class ConvergentLoop:
         review_kind: Literal["first_review", "rereview"],
         round_num: int,
         stage: LoopStage,
+        cycle_anchor: datetime | None = None,
     ) -> str:
         """Persist review round metadata for crash recovery."""
         return json.dumps(
@@ -153,6 +155,7 @@ class ConvergentLoop:
                 "review_kind": review_kind,
                 "round_num": round_num,
                 "stage": stage,
+                "cycle_anchor": cycle_anchor.isoformat() if cycle_anchor is not None else None,
             }
         )
 
@@ -161,6 +164,7 @@ class ConvergentLoop:
         *,
         round_num: int,
         stage: LoopStage,
+        cycle_anchor: datetime | None = None,
     ) -> str:
         """Persist fix round metadata for restart/recovery continuation."""
         return json.dumps(
@@ -168,8 +172,15 @@ class ConvergentLoop:
                 "fix_kind": "fix_dispatch",
                 "round_num": round_num,
                 "stage": stage,
+                "cycle_anchor": cycle_anchor.isoformat() if cycle_anchor is not None else None,
             }
         )
+
+    def _findings_scope(self, *, cycle_anchor: datetime | None = None) -> dict[str, Any]:
+        scope: dict[str, Any] = {"phase": self._FINDINGS_PHASE}
+        if cycle_anchor is not None:
+            scope["created_after"] = cycle_anchor
+        return scope
 
     async def _get_pending_fix_placeholder_task_id(
         self,
@@ -246,6 +257,7 @@ class ConvergentLoop:
         worktree_path: str | None = None,
         *,
         artifact_payload: dict[str, Any] | None = None,
+        cycle_anchor: datetime | None = None,
         round_num_offset: int = 0,
     ) -> ConvergentLoopResult:
         """编排完整的 review→fix→rereview 多轮循环。
@@ -290,6 +302,7 @@ class ConvergentLoop:
             story_id,
             worktree_path,
             artifact_payload=artifact_payload,
+            cycle_anchor=cycle_anchor,
             round_num_offset=round_num_offset,
         )
         _append_summary(result)
@@ -324,8 +337,15 @@ class ConvergentLoop:
                 fix_round = rereview_round - 1
                 fix_num = fix_round + round_num_offset
                 rereview_num = rereview_round + round_num_offset
-                await self.run_fix_dispatch(story_id, fix_num, worktree_path)
-                result = await self.run_rereview(story_id, rereview_num, worktree_path)
+                await self.run_fix_dispatch(
+                    story_id, fix_num, worktree_path, cycle_anchor=cycle_anchor
+                )
+                result = await self.run_rereview(
+                    story_id,
+                    rereview_num,
+                    worktree_path,
+                    cycle_anchor=cycle_anchor,
+                )
                 _append_summary(result)
 
                 if result.converged:
@@ -356,6 +376,7 @@ class ConvergentLoop:
         return await self._run_escalated_phase(
             story_id,
             worktree_path,
+            cycle_anchor=cycle_anchor,
             standard_round_summaries=round_summaries,
             global_round_offset=len(round_summaries) + round_num_offset,
         )
@@ -369,6 +390,7 @@ class ConvergentLoop:
         story_id: str,
         worktree_path: str | None = None,
         *,
+        cycle_anchor: datetime | None = None,
         standard_round_summaries: list[dict[str, Any]],
         global_round_offset: int,
     ) -> ConvergentLoopResult:
@@ -417,6 +439,7 @@ class ConvergentLoop:
                 story_id,
                 round_num=fix_round,
                 stage="escalated",
+                cycle_anchor=cycle_anchor,
             )
             logger.info(
                 "convergent_loop_escalated_fix_start",
@@ -426,7 +449,13 @@ class ConvergentLoop:
                 fix_round=fix_round,
                 degradation_stage="escalated",
             )
-            await self.run_fix_dispatch(story_id, fix_round, worktree_path, stage="escalated")
+            await self.run_fix_dispatch(
+                story_id,
+                fix_round,
+                worktree_path,
+                stage="escalated",
+                cycle_anchor=cycle_anchor,
+            )
 
             # Step 2: Escalated scoped re-review (Claude reviewer_escalated)
             result = await self.run_rereview(
@@ -434,6 +463,7 @@ class ConvergentLoop:
                 global_round,
                 worktree_path,
                 stage="escalated",
+                cycle_anchor=cycle_anchor,
             )
             # Override stage in result
             result = ConvergentLoopResult(
@@ -473,12 +503,16 @@ class ConvergentLoop:
 
         # Escalated phase 用尽 → escalation approval
         assert result is not None  # At least 1 round executed
-        remaining = await self._get_remaining_blocking_count(story_id)
+        remaining = await self._get_remaining_blocking_count(
+            story_id,
+            cycle_anchor=cycle_anchor,
+        )
         total_rounds = global_round_offset + max_escalated_rounds
         await self._create_escalation_approval(
             story_id,
             total_rounds,
             remaining,
+            cycle_anchor=cycle_anchor,
             round_summaries=all_summaries,
             stage="escalated",
             standard_round_summaries=standard_round_summaries,
@@ -532,7 +566,12 @@ class ConvergentLoop:
         closed = sum(1 for is_closed in by_hash.values() if is_closed)
         return closed / total
 
-    async def _get_remaining_blocking_count(self, story_id: str) -> int:
+    async def _get_remaining_blocking_count(
+        self,
+        story_id: str,
+        *,
+        cycle_anchor: datetime | None = None,
+    ) -> int:
         """从 DB 查询当前实际 open blocking findings 数量。
 
         比 ConvergentLoopResult.blocking_count（raw parser count）更准确，
@@ -542,7 +581,12 @@ class ConvergentLoop:
 
         db = await get_connection(self._db_path)
         try:
-            open_findings = await get_open_findings(db, story_id)
+            open_findings = await get_open_findings(
+                db,
+                story_id,
+                created_after=cycle_anchor,
+                phase=self._FINDINGS_PHASE,
+            )
             return sum(1 for f in open_findings if f.severity == "blocking")
         finally:
             await db.close()
@@ -554,6 +598,7 @@ class ConvergentLoop:
         story_id: str,
         rounds_completed: int,
         remaining_blocking: int,
+        cycle_anchor: datetime | None = None,
         round_summaries: list[dict[str, Any]],
         stage: LoopStage = "standard",
         standard_round_summaries: list[dict[str, Any]] | None = None,
@@ -562,8 +607,18 @@ class ConvergentLoop:
         """组装 escalation payload：round_summaries + unresolved_findings + options。"""
         from ato.models.db import get_findings_by_story, get_open_findings
 
-        all_findings = await get_findings_by_story(db, story_id)
-        unresolved = await get_open_findings(db, story_id)
+        all_findings = await get_findings_by_story(
+            db,
+            story_id,
+            created_after=cycle_anchor,
+            phase=self._FINDINGS_PHASE,
+        )
+        unresolved = await get_open_findings(
+            db,
+            story_id,
+            created_after=cycle_anchor,
+            phase=self._FINDINGS_PHASE,
+        )
         convergence_rate = self._calculate_convergence_rate(all_findings)
         unresolved_findings = [
             {
@@ -599,6 +654,7 @@ class ConvergentLoop:
         rounds_completed: int,
         remaining_blocking: int,
         *,
+        cycle_anchor: datetime | None = None,
         round_summaries: list[dict[str, Any]] | None = None,
         stage: LoopStage = "standard",
         standard_round_summaries: list[dict[str, Any]] | None = None,
@@ -634,6 +690,7 @@ class ConvergentLoop:
                 story_id=story_id,
                 rounds_completed=rounds_completed,
                 remaining_blocking=remaining_blocking,
+                cycle_anchor=cycle_anchor,
                 round_summaries=round_summaries or [],
                 stage=stage,
                 standard_round_summaries=standard_round_summaries,
@@ -701,6 +758,7 @@ class ConvergentLoop:
         worktree_path: str | None = None,
         *,
         artifact_payload: dict[str, Any] | None = None,
+        cycle_anchor: datetime | None = None,
         task_id: str | None = None,
         is_retry: bool = False,
         round_num_offset: int = 0,
@@ -724,203 +782,217 @@ class ConvergentLoop:
         from ato.validation import maybe_create_blocking_abnormal_approval
 
         round_num = 1 + round_num_offset
+        await self.insert_review_placeholder(story_id=story_id, db_path=self._db_path)
+        try:
+            # --- Deterministic Validation Gate (Task 3) ---
+            if artifact_payload is not None:
+                validation_result = await self._run_validation_gate(
+                    story_id=story_id,
+                    artifact_payload=artifact_payload,
+                )
+                if validation_result is not None:
+                    return validation_result
 
-        # --- Deterministic Validation Gate (Task 3) ---
-        if artifact_payload is not None:
-            validation_result = await self._run_validation_gate(
+            # --- Resolve worktree path ---
+            resolved_path = await self._resolve_worktree_path(story_id, worktree_path)
+
+            # --- structlog: round start (Task 4.1) ---
+            logger.info(
+                "convergent_loop_round_start",
                 story_id=story_id,
-                artifact_payload=artifact_payload,
-            )
-            if validation_result is not None:
-                return validation_result
-
-        # --- Resolve worktree path ---
-        resolved_path = await self._resolve_worktree_path(story_id, worktree_path)
-
-        # --- structlog: round start (Task 4.1) ---
-        logger.info(
-            "convergent_loop_round_start",
-            story_id=story_id,
-            round_num=round_num,
-            phase="reviewing",
-        )
-
-        # --- Dispatch review agent (使用 bmad-code-review skill) ---
-        review_prompt = (
-            f"Use the bmad-code-review skill to review all code changes "
-            f"in the worktree at {resolved_path}. "
-            f"Story: {story_id}. Review mode: branch diff against main."
-        )
-        # Story 9.1d: 附加 UX 上下文（manifest 存在时）
-        review_prompt = self._append_ux_context(story_id, review_prompt)
-        review_task_id = task_id or str(uuid.uuid4())
-        review_profile = self._get_review_profile("standard")
-        review_opts: dict[str, Any] = {"cwd": resolved_path}
-        self._apply_profile_options(review_opts, review_profile)
-        review_opts.update(self._reviewer_options)
-        result = await self._subprocess_mgr.dispatch_with_retry(
-            story_id=story_id,
-            phase="reviewing",
-            role=review_profile.role,
-            cli_tool=review_profile.cli_tool,
-            prompt=review_prompt,
-            options=review_opts,
-            context_briefing=self._build_review_context(
-                review_kind="first_review",
                 round_num=round_num,
-                stage="standard",
-            ),
-            task_id=review_task_id,
-            is_retry=is_retry,
-            on_progress=self._build_progress_callback(
-                task_id=review_task_id,
+                phase="reviewing",
+            )
+
+            # --- Dispatch review agent (使用 bmad-code-review skill) ---
+            review_prompt = (
+                f"Use the bmad-code-review skill to review all code changes "
+                f"in the worktree at {resolved_path}. "
+                f"Story: {story_id}. Review mode: branch diff against main.\n\n"
+                "Do not stop at a checkpoint or ask for confirmation.\n"
+                "Do not ask whether to include uncommitted worktree changes.\n"
+                "Use only `git diff main...HEAD` as the review scope, ignore unrelated "
+                "uncommitted files outside that scope, and finish with a final review verdict "
+                "in this single response."
+            )
+            review_prompt = self._append_ux_context(story_id, review_prompt)
+            review_task_id = task_id or str(uuid.uuid4())
+            review_profile = self._get_review_profile("standard")
+            review_opts: dict[str, Any] = {"cwd": resolved_path}
+            self._apply_profile_options(review_opts, review_profile)
+            review_opts.update(self._reviewer_options)
+            result = await self._subprocess_mgr.dispatch_with_retry(
                 story_id=story_id,
                 phase="reviewing",
                 role=review_profile.role,
                 cli_tool=review_profile.cli_tool,
-            ),
-        )
+                prompt=review_prompt,
+                options=review_opts,
+                context_briefing=self._build_review_context(
+                    review_kind="first_review",
+                    round_num=round_num,
+                    stage="standard",
+                    cycle_anchor=cycle_anchor,
+                ),
+                task_id=review_task_id,
+                is_retry=is_retry,
+                on_progress=self._build_progress_callback(
+                    task_id=review_task_id,
+                    story_id=story_id,
+                    phase="reviewing",
+                    role=review_profile.role,
+                    cli_tool=review_profile.cli_tool,
+                ),
+            )
 
-        # --- Parse review output via BMAD adapter ---
-        parse_result = await self._bmad_adapter.parse(
-            markdown_output=result.text_result,
-            skill_type=BmadSkillType.CODE_REVIEW,
-            story_id=story_id,
-        )
+            parse_result = await self._bmad_adapter.parse(
+                markdown_output=result.text_result,
+                skill_type=BmadSkillType.CODE_REVIEW,
+                story_id=story_id,
+            )
 
-        # --- Handle parse failure ---
-        if parse_result.verdict == "parse_failed":
+            if parse_result.verdict == "parse_failed":
+                db = await get_connection(self._db_path)
+                try:
+                    await record_parse_failure(
+                        parse_result=parse_result,
+                        story_id=story_id,
+                        skill_type=BmadSkillType.CODE_REVIEW,
+                        db=db,
+                        task_id=review_task_id,
+                        notifier=self._nudge.notify if self._nudge else None,
+                    )
+                finally:
+                    await db.close()
+
+                return ConvergentLoopResult(
+                    story_id=story_id,
+                    round_num=round_num,
+                    converged=False,
+                    findings_total=0,
+                    blocking_count=0,
+                    suggestion_count=0,
+                    open_count=0,
+                )
+
+            from ato.models.db import get_open_findings, update_finding_status
+
             db = await get_connection(self._db_path)
             try:
-                await record_parse_failure(
-                    parse_result=parse_result,
-                    story_id=story_id,
-                    skill_type=BmadSkillType.CODE_REVIEW,
-                    db=db,
-                    task_id=review_task_id,
-                    notifier=self._nudge.notify if self._nudge else None,
+                previous_findings = (
+                    await get_open_findings(
+                        db,
+                        story_id,
+                        created_after=cycle_anchor,
+                        phase=self._FINDINGS_PHASE,
+                    )
+                    if round_num_offset > 0
+                    else []
+                )
+                match_result = self._match_findings_across_rounds(
+                    previous_findings,
+                    parse_result.findings,
+                    story_id,
+                    round_num,
+                )
+                for fid in match_result.still_open_ids:
+                    await update_finding_status(db, fid, "still_open")
+                for fid in match_result.closed_ids:
+                    await update_finding_status(db, fid, "closed")
+                if match_result.new_findings:
+                    await insert_findings_batch(db, match_result.new_findings)
+
+                still_open_ids = set(match_result.still_open_ids)
+                open_blocking_count = sum(
+                    1
+                    for f in previous_findings
+                    if f.finding_id in still_open_ids and f.severity == "blocking"
+                ) + sum(1 for f in match_result.new_findings if f.severity == "blocking")
+
+                await maybe_create_blocking_abnormal_approval(
+                    db,
+                    story_id,
+                    round_num,
+                    threshold=self._blocking_threshold,
+                    phase=self._FINDINGS_PHASE,
+                    nudge=self._nudge,
+                    blocking_count=open_blocking_count,
                 )
             finally:
                 await db.close()
 
-            # Parse failed → return non-converged with zero findings
-            return ConvergentLoopResult(
-                story_id=story_id,
-                round_num=round_num,
-                converged=False,
-                findings_total=0,
-                blocking_count=0,
-                suggestion_count=0,
-                open_count=0,
-            )
+            if previous_findings:
+                findings_total = len(parse_result.findings)
+                blocking_count = sum(1 for f in parse_result.findings if f.severity == "blocking")
+                suggestion_count = sum(
+                    1 for f in parse_result.findings if f.severity == "suggestion"
+                )
+            else:
+                findings_total = len(match_result.new_findings)
+                blocking_count = sum(
+                    1 for f in match_result.new_findings if f.severity == "blocking"
+                )
+                suggestion_count = sum(
+                    1 for f in match_result.new_findings if f.severity == "suggestion"
+                )
+            current_open_count = len(match_result.still_open_ids) + len(match_result.new_findings)
+            closed_count = len(match_result.closed_ids)
+            new_count = len(match_result.new_findings)
 
-        from ato.models.db import get_open_findings, update_finding_status
-
-        db = await get_connection(self._db_path)
-        try:
-            previous_findings = (
-                await get_open_findings(db, story_id) if round_num_offset > 0 else []
-            )
-            match_result = self._match_findings_across_rounds(
-                previous_findings,
-                parse_result.findings,
-                story_id,
-                round_num,
-            )
-            for fid in match_result.still_open_ids:
-                await update_finding_status(db, fid, "still_open")
-            for fid in match_result.closed_ids:
-                await update_finding_status(db, fid, "closed")
-            if match_result.new_findings:
-                await insert_findings_batch(db, match_result.new_findings)
-
-            still_open_ids = set(match_result.still_open_ids)
-            open_blocking_count = sum(
-                1
-                for f in previous_findings
-                if f.finding_id in still_open_ids and f.severity == "blocking"
-            ) + sum(1 for f in match_result.new_findings if f.severity == "blocking")
-
-            await maybe_create_blocking_abnormal_approval(
-                db,
-                story_id,
-                round_num,
-                threshold=self._blocking_threshold,
-                nudge=self._nudge,
-                blocking_count=open_blocking_count,
-            )
-        finally:
-            await db.close()
-
-        if previous_findings:
-            findings_total = len(parse_result.findings)
-            blocking_count = sum(1 for f in parse_result.findings if f.severity == "blocking")
-            suggestion_count = sum(1 for f in parse_result.findings if f.severity == "suggestion")
-        else:
-            findings_total = len(match_result.new_findings)
-            blocking_count = sum(1 for f in match_result.new_findings if f.severity == "blocking")
-            suggestion_count = sum(
-                1 for f in match_result.new_findings if f.severity == "suggestion"
-            )
-        current_open_count = len(match_result.still_open_ids) + len(match_result.new_findings)
-        closed_count = len(match_result.closed_ids)
-        new_count = len(match_result.new_findings)
-
-        # --- structlog: round complete (Task 4.2) ---
-        logger.info(
-            "convergent_loop_round_complete",
-            story_id=story_id,
-            round_num=round_num,
-            findings_total=findings_total,
-            open_count=current_open_count,
-            closed_count=closed_count,
-            new_count=new_count,
-            blocking_count=blocking_count,
-            suggestion_count=suggestion_count,
-        )
-
-        # --- Convergence evaluation (first round) ---
-        converged = open_blocking_count == 0
-
-        if converged:
-            # --- structlog: converged (Task 4.3) ---
             logger.info(
-                "convergent_loop_converged",
+                "convergent_loop_round_complete",
                 story_id=story_id,
                 round_num=round_num,
+                findings_total=findings_total,
+                open_count=current_open_count,
+                closed_count=closed_count,
+                new_count=new_count,
                 blocking_count=blocking_count,
                 suggestion_count=suggestion_count,
             )
-            await self._submit_transition(story_id, "review_pass")
-        else:
-            # --- structlog: needs fix (Task 4.3) ---
-            logger.info(
-                "convergent_loop_needs_fix",
+
+            converged = open_blocking_count == 0
+
+            if converged:
+                logger.info(
+                    "convergent_loop_converged",
+                    story_id=story_id,
+                    round_num=round_num,
+                    blocking_count=blocking_count,
+                    suggestion_count=suggestion_count,
+                )
+                await self._submit_transition(story_id, "review_pass")
+            else:
+                logger.info(
+                    "convergent_loop_needs_fix",
+                    story_id=story_id,
+                    round_num=round_num,
+                    blocking_count=blocking_count,
+                )
+                await self._insert_fix_placeholder(
+                    story_id,
+                    round_num=round_num,
+                    cycle_anchor=cycle_anchor,
+                )
+                await self._submit_transition(story_id, "review_fail")
+
+            return ConvergentLoopResult(
                 story_id=story_id,
                 round_num=round_num,
+                converged=converged,
+                findings_total=findings_total,
                 blocking_count=blocking_count,
+                suggestion_count=suggestion_count,
+                open_count=current_open_count,
+                closed_count=closed_count,
+                new_count=new_count,
             )
-            # --- Insert pending fixing task BEFORE submitting review_fail ---
-            # 防止 orchestrator 主循环的 _dispatch_undispatched_stories 在
-            # convergent loop 的 run_fix_dispatch 之前抢先 dispatch fixing，
-            # 导致 fix prompt 丢失 findings JSON。
-            await self._insert_fix_placeholder(
-                story_id,
-                round_num=round_num,
+        finally:
+            await self.consume_review_placeholder(
+                story_id=story_id,
+                db_path=self._db_path,
+                reason="consumed_by_first_review_followup",
             )
-            await self._submit_transition(story_id, "review_fail")
-
-        return ConvergentLoopResult(
-            story_id=story_id,
-            round_num=round_num,
-            converged=converged,
-            findings_total=findings_total,
-            blocking_count=blocking_count,
-            suggestion_count=suggestion_count,
-            open_count=current_open_count,
-            closed_count=closed_count,
-            new_count=new_count,
-        )
 
     async def _resolve_worktree_path(
         self,
@@ -1015,6 +1087,7 @@ class ConvergentLoop:
         worktree_path: str | None = None,
         *,
         stage: LoopStage = "standard",
+        cycle_anchor: datetime | None = None,
     ) -> ConvergentLoopResult:
         """调度 Claude fix agent 修复 open blocking findings。
 
@@ -1035,12 +1108,21 @@ class ConvergentLoop:
         # --- Query open blocking findings (before worktree resolution) ---
         db = await get_connection(self._db_path)
         try:
-            all_open = await get_open_findings(db, story_id)
+            all_open = await get_open_findings(
+                db,
+                story_id,
+                created_after=cycle_anchor,
+                phase=self._FINDINGS_PHASE,
+            )
         finally:
             await db.close()
 
         blocking_findings = [f for f in all_open if f.severity == "blocking"]
-        fix_context = self._build_fix_context(round_num=round_num, stage=stage)
+        fix_context = self._build_fix_context(
+            round_num=round_num,
+            stage=stage,
+            cycle_anchor=cycle_anchor,
+        )
         placeholder_task_id = await self._get_pending_fix_placeholder_task_id(
             story_id,
             round_num=round_num,
@@ -1056,6 +1138,7 @@ class ConvergentLoop:
                 stage=stage,
                 expected_artifact="convergent_loop_fix_skipped_no_blocking",
             )
+            await self.insert_review_placeholder(story_id=story_id, db_path=self._db_path)
             await self._submit_transition(story_id, "fix_done")
             # findings_total 仅计 blocking（fix 阶段不涉及 suggestion）
             return ConvergentLoopResult(
@@ -1152,6 +1235,7 @@ class ConvergentLoop:
         )
 
         # --- Submit fix_done event ---
+        await self.insert_review_placeholder(story_id=story_id, db_path=self._db_path)
         await self._submit_transition(story_id, "fix_done")
 
         return ConvergentLoopResult(
@@ -1184,7 +1268,7 @@ class ConvergentLoop:
         story_id: str,
         db_path: Path,
     ) -> str:
-        """Insert a pending reviewing task to prevent poll-cycle race.
+        """Ensure a pending reviewing placeholder exists to prevent poll-cycle races.
 
         Used by ``_dispatch_batch_restart`` before submitting ``fix_done``
         transition, so ``_dispatch_undispatched_stories`` sees the pending
@@ -1193,9 +1277,25 @@ class ConvergentLoop:
         from ato.models.db import get_connection, insert_task
         from ato.models.schemas import TaskRecord
 
-        task_id = str(uuid.uuid4())
         db = await get_connection(db_path)
         try:
+            cursor = await db.execute(
+                """
+                SELECT task_id FROM tasks
+                WHERE story_id = ?
+                  AND phase = 'reviewing'
+                  AND status = 'pending'
+                  AND expected_artifact = 'convergent_loop_review_placeholder'
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (story_id,),
+            )
+            row = await cursor.fetchone()
+            if row is not None and row[0]:
+                return str(row[0])
+
+            task_id = str(uuid.uuid4())
             await insert_task(
                 db,
                 TaskRecord(
@@ -1212,12 +1312,38 @@ class ConvergentLoop:
             await db.close()
         return task_id
 
+    @staticmethod
+    async def consume_review_placeholder(
+        *,
+        story_id: str,
+        db_path: Path,
+        reason: str,
+    ) -> None:
+        """Mark any pending reviewing placeholder as consumed with a real completion time."""
+        from ato.models.db import get_connection
+
+        completed_at = datetime.now(tz=UTC).isoformat()
+        db = await get_connection(db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET status = 'completed', "
+                "completed_at = ?, error_message = ? "
+                "WHERE story_id = ? AND phase = 'reviewing' "
+                "AND status = 'pending' "
+                "AND expected_artifact = 'convergent_loop_review_placeholder'",
+                (completed_at, reason, story_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
     async def _insert_fix_placeholder(
         self,
         story_id: str,
         *,
         round_num: int,
         stage: LoopStage = "standard",
+        cycle_anchor: datetime | None = None,
     ) -> str:
         """Insert a pending fixing task to prevent orchestrator main loop race.
 
@@ -1247,6 +1373,7 @@ class ConvergentLoop:
                     context_briefing=self._build_fix_context(
                         round_num=round_num,
                         stage=stage,
+                        cycle_anchor=cycle_anchor,
                     ),
                 ),
             )
@@ -1333,6 +1460,7 @@ class ConvergentLoop:
         round_num: int,
         worktree_path: str | None = None,
         *,
+        cycle_anchor: datetime | None = None,
         task_id: str | None = None,
         is_retry: bool = False,
         stage: LoopStage = "standard",
@@ -1359,218 +1487,238 @@ class ConvergentLoop:
         )
         from ato.validation import maybe_create_blocking_abnormal_approval
 
-        # --- Resolve worktree path ---
-        resolved_path = await self._resolve_worktree_path(story_id, worktree_path)
-
-        # --- Query current unresolved findings ---
-        db = await get_connection(self._db_path)
         try:
-            previous_findings = await get_open_findings(db, story_id)
-        finally:
-            await db.close()
+            # --- Resolve worktree path ---
+            resolved_path = await self._resolve_worktree_path(story_id, worktree_path)
 
-        # Re-review prompt 只传 blocking findings 给 reviewer，减少无效 token 开销。
-        # suggestion 不阻塞收敛、fixer 也不修 suggestion，无需 reviewer 报告。
-        # 但 matching 仍使用完整 previous_findings，让 suggestion 正常进入 closed 状态。
-        blocking_for_prompt = [f for f in previous_findings if f.severity == "blocking"]
-
-        # --- structlog: round start ---
-        logger.info(
-            "convergent_loop_round_start",
-            story_id=story_id,
-            round_num=round_num,
-            phase="reviewing",
-            scope="narrowed",
-            previous_open_count=len(previous_findings),
-            blocking_in_prompt=len(blocking_for_prompt),
-            skipped_suggestions=len(previous_findings) - len(blocking_for_prompt),
-        )
-
-        # --- Build scoped re-review prompt ---
-        rereview_prompt = self._build_rereview_prompt(blocking_for_prompt, resolved_path)
-        # Story 9.1d: 附加 UX 上下文（manifest 存在时）
-        rereview_prompt = self._append_ux_context(story_id, rereview_prompt)
-
-        # --- Dispatch review agent (profile-aware) ---
-        rereview_task_id = task_id or str(uuid.uuid4())
-        review_profile = self._get_review_profile(stage)
-        rereview_opts: dict[str, Any] = {"cwd": resolved_path}
-        self._apply_profile_options(rereview_opts, review_profile)
-        # timeout/idle_timeout/post_result_timeout 始终从 reviewer_options 继承
-        for _tk in ("timeout", "idle_timeout", "post_result_timeout"):
-            if _tk in self._reviewer_options:
-                rereview_opts.setdefault(_tk, self._reviewer_options[_tk])
-        if stage == "standard":
-            rereview_opts.update(self._reviewer_options)
-        result = await self._subprocess_mgr.dispatch_with_retry(
-            story_id=story_id,
-            phase="reviewing",
-            role=review_profile.role,
-            cli_tool=review_profile.cli_tool,
-            prompt=rereview_prompt,
-            options=rereview_opts,
-            context_briefing=self._build_review_context(
-                review_kind="rereview",
-                round_num=round_num,
-                stage=stage,
-            ),
-            task_id=rereview_task_id,
-            is_retry=is_retry,
-            on_progress=self._build_progress_callback(
-                task_id=rereview_task_id,
-                story_id=story_id,
-                phase="reviewing",
-                role=review_profile.role,
-                cli_tool=review_profile.cli_tool,
-            ),
-        )
-
-        # --- Parse re-review output via BMAD adapter ---
-        parse_result = await self._bmad_adapter.parse(
-            markdown_output=result.text_result,
-            skill_type=BmadSkillType.CODE_REVIEW,
-            story_id=story_id,
-        )
-
-        # --- Handle parse failure ---
-        if parse_result.verdict == "parse_failed":
+            # --- Query current unresolved findings ---
             db = await get_connection(self._db_path)
             try:
-                await record_parse_failure(
-                    parse_result=parse_result,
+                previous_findings = await get_open_findings(
+                    db,
                     story_id=story_id,
-                    skill_type=BmadSkillType.CODE_REVIEW,
-                    db=db,
-                    task_id=rereview_task_id,
-                    notifier=self._nudge.notify if self._nudge else None,
+                    created_after=cycle_anchor,
+                    phase=self._FINDINGS_PHASE,
                 )
             finally:
                 await db.close()
 
+            # Re-review prompt 只传 blocking findings 给 reviewer，减少无效 token 开销。
+            # suggestion 不阻塞收敛、fixer 也不修 suggestion，无需 reviewer 报告。
+            # 但 matching 仍使用完整 previous_findings，让 suggestion 正常进入 closed 状态。
+            blocking_for_prompt = [f for f in previous_findings if f.severity == "blocking"]
+
+            # --- structlog: round start ---
+            logger.info(
+                "convergent_loop_round_start",
+                story_id=story_id,
+                round_num=round_num,
+                phase="reviewing",
+                scope="narrowed",
+                previous_open_count=len(previous_findings),
+                blocking_in_prompt=len(blocking_for_prompt),
+                skipped_suggestions=len(previous_findings) - len(blocking_for_prompt),
+            )
+
+            # --- Build scoped re-review prompt ---
+            rereview_prompt = self._build_rereview_prompt(blocking_for_prompt, resolved_path)
+            # Story 9.1d: 附加 UX 上下文（manifest 存在时）
+            rereview_prompt = self._append_ux_context(story_id, rereview_prompt)
+
+            # --- Dispatch review agent (profile-aware) ---
+            rereview_task_id = task_id or str(uuid.uuid4())
+            review_profile = self._get_review_profile(stage)
+            rereview_opts: dict[str, Any] = {"cwd": resolved_path}
+            self._apply_profile_options(rereview_opts, review_profile)
+            # timeout/idle_timeout/post_result_timeout 始终从 reviewer_options 继承
+            for _tk in ("timeout", "idle_timeout", "post_result_timeout"):
+                if _tk in self._reviewer_options:
+                    rereview_opts.setdefault(_tk, self._reviewer_options[_tk])
+            if stage == "standard":
+                rereview_opts.update(self._reviewer_options)
+            result = await self._subprocess_mgr.dispatch_with_retry(
+                story_id=story_id,
+                phase="reviewing",
+                role=review_profile.role,
+                cli_tool=review_profile.cli_tool,
+                prompt=rereview_prompt,
+                options=rereview_opts,
+                context_briefing=self._build_review_context(
+                    review_kind="rereview",
+                    round_num=round_num,
+                    stage=stage,
+                    cycle_anchor=cycle_anchor,
+                ),
+                task_id=rereview_task_id,
+                is_retry=is_retry,
+                on_progress=self._build_progress_callback(
+                    task_id=rereview_task_id,
+                    story_id=story_id,
+                    phase="reviewing",
+                    role=review_profile.role,
+                    cli_tool=review_profile.cli_tool,
+                ),
+            )
+
+            # --- Parse re-review output via BMAD adapter ---
+            parse_result = await self._bmad_adapter.parse(
+                markdown_output=result.text_result,
+                skill_type=BmadSkillType.CODE_REVIEW,
+                story_id=story_id,
+            )
+
+            # --- Handle parse failure ---
+            if parse_result.verdict == "parse_failed":
+                db = await get_connection(self._db_path)
+                try:
+                    await record_parse_failure(
+                        parse_result=parse_result,
+                        story_id=story_id,
+                        skill_type=BmadSkillType.CODE_REVIEW,
+                        db=db,
+                        task_id=rereview_task_id,
+                        notifier=self._nudge.notify if self._nudge else None,
+                    )
+                finally:
+                    await db.close()
+
+                return ConvergentLoopResult(
+                    story_id=story_id,
+                    round_num=round_num,
+                    converged=False,
+                    findings_total=0,
+                    blocking_count=0,
+                    suggestion_count=0,
+                    open_count=len(previous_findings),
+                )
+
+            # --- Cross-round finding matching ---
+            match_result = self._match_findings_across_rounds(
+                previous_findings, parse_result.findings, story_id, round_num
+            )
+
+            # --- Compute actual open blocking count (still_open blocking + new blocking) ---
+            still_open_id_set = set(match_result.still_open_ids)
+            open_blocking_count = sum(
+                1
+                for f in previous_findings
+                if f.finding_id in still_open_id_set and f.severity == "blocking"
+            ) + sum(1 for f in match_result.new_findings if f.severity == "blocking")
+
+            # --- Persist matching results to SQLite ---
+            db = await get_connection(self._db_path)
+            try:
+                for fid in match_result.still_open_ids:
+                    await update_finding_status(db, fid, "still_open")
+                for fid in match_result.closed_ids:
+                    await update_finding_status(db, fid, "closed")
+                if match_result.new_findings:
+                    await insert_findings_batch(db, match_result.new_findings)
+
+                # --- Story 3.3: 收敛率计算（在本轮写入后） ---
+                all_findings = await get_findings_by_story(
+                    db,
+                    story_id,
+                    created_after=cycle_anchor,
+                    phase=self._FINDINGS_PHASE,
+                )
+                convergence_rate = self._calculate_convergence_rate(all_findings)
+
+                # --- Blocking threshold escalation ---
+                # 传入实际 open blocking 总数，因为 still_open findings
+                # 保留原 round_num，按当前轮次查 DB 会漏算它们。
+                await maybe_create_blocking_abnormal_approval(
+                    db,
+                    story_id,
+                    round_num,
+                    threshold=self._blocking_threshold,
+                    phase=self._FINDINGS_PHASE,
+                    nudge=self._nudge,
+                    blocking_count=open_blocking_count,
+                )
+            finally:
+                await db.close()
+
+            # --- Count findings from this round's parse (raw parser output) ---
+            # 这些统计反映 reviewer 实际报告的数量，不受去重影响。
+            # 去重仅影响持久化（new_findings）和阈值检查（open_blocking_count）。
+            findings_total = len(parse_result.findings)
+            blocking_count = sum(1 for f in parse_result.findings if f.severity == "blocking")
+            suggestion_count = sum(1 for f in parse_result.findings if f.severity == "suggestion")
+
+            # Current open = still_open + new
+            current_open_count = len(match_result.still_open_ids) + len(match_result.new_findings)
+
+            # --- structlog: round complete (Story 3.3: +convergence_rate) ---
+            logger.info(
+                "convergent_loop_round_complete",
+                story_id=story_id,
+                round_num=round_num,
+                findings_total=findings_total,
+                open_count=current_open_count,
+                closed_count=len(match_result.closed_ids),
+                new_count=len(match_result.new_findings),
+                still_open_count=len(match_result.still_open_ids),
+                blocking_count=blocking_count,
+                suggestion_count=suggestion_count,
+                convergence_rate=convergence_rate,
+            )
+
+            # --- Convergence evaluation (Story 3.3: +convergence_threshold) ---
+            # Converged when: no open/still_open blocking findings remain
+            # AND convergence_rate >= threshold
+            has_blocking_still_open = any(
+                f.severity == "blocking"
+                for f in previous_findings
+                if f.finding_id in match_result.still_open_ids
+            )
+            has_blocking_new = any(f.severity == "blocking" for f in match_result.new_findings)
+            no_open_blocking = not has_blocking_still_open and not has_blocking_new
+            converged = no_open_blocking and convergence_rate >= self._config.convergence_threshold
+
+            if converged:
+                logger.info(
+                    "convergent_loop_converged",
+                    story_id=story_id,
+                    round_num=round_num,
+                    blocking_count=blocking_count,
+                    suggestion_count=suggestion_count,
+                )
+                await self._submit_transition(story_id, "review_pass")
+            else:
+                logger.info(
+                    "convergent_loop_needs_fix",
+                    story_id=story_id,
+                    round_num=round_num,
+                    blocking_count=blocking_count,
+                )
+                # --- Insert pending fixing task BEFORE submitting review_fail ---
+                # (same race-prevention as in run_first_review)
+                await self._insert_fix_placeholder(
+                    story_id,
+                    round_num=round_num,
+                    stage=stage,
+                    cycle_anchor=cycle_anchor,
+                )
+                await self._submit_transition(story_id, "review_fail")
+
             return ConvergentLoopResult(
                 story_id=story_id,
                 round_num=round_num,
-                converged=False,
-                findings_total=0,
-                blocking_count=0,
-                suggestion_count=0,
-                open_count=len(previous_findings),
-            )
-
-        # --- Cross-round finding matching ---
-        match_result = self._match_findings_across_rounds(
-            previous_findings, parse_result.findings, story_id, round_num
-        )
-
-        # --- Compute actual open blocking count (still_open blocking + new blocking) ---
-        still_open_id_set = set(match_result.still_open_ids)
-        open_blocking_count = sum(
-            1
-            for f in previous_findings
-            if f.finding_id in still_open_id_set and f.severity == "blocking"
-        ) + sum(1 for f in match_result.new_findings if f.severity == "blocking")
-
-        # --- Persist matching results to SQLite ---
-        db = await get_connection(self._db_path)
-        try:
-            for fid in match_result.still_open_ids:
-                await update_finding_status(db, fid, "still_open")
-            for fid in match_result.closed_ids:
-                await update_finding_status(db, fid, "closed")
-            if match_result.new_findings:
-                await insert_findings_batch(db, match_result.new_findings)
-
-            # --- Story 3.3: 收敛率计算（在本轮写入后） ---
-            all_findings = await get_findings_by_story(db, story_id)
-            convergence_rate = self._calculate_convergence_rate(all_findings)
-
-            # --- Blocking threshold escalation ---
-            # 传入实际 open blocking 总数，因为 still_open findings
-            # 保留原 round_num，按当前轮次查 DB 会漏算它们。
-            await maybe_create_blocking_abnormal_approval(
-                db,
-                story_id,
-                round_num,
-                threshold=self._blocking_threshold,
-                nudge=self._nudge,
-                blocking_count=open_blocking_count,
-            )
-        finally:
-            await db.close()
-
-        # --- Count findings from this round's parse (raw parser output) ---
-        # 这些统计反映 reviewer 实际报告的数量，不受去重影响。
-        # 去重仅影响持久化（new_findings）和阈值检查（open_blocking_count）。
-        findings_total = len(parse_result.findings)
-        blocking_count = sum(1 for f in parse_result.findings if f.severity == "blocking")
-        suggestion_count = sum(1 for f in parse_result.findings if f.severity == "suggestion")
-
-        # Current open = still_open + new
-        current_open_count = len(match_result.still_open_ids) + len(match_result.new_findings)
-
-        # --- structlog: round complete (Story 3.3: +convergence_rate) ---
-        logger.info(
-            "convergent_loop_round_complete",
-            story_id=story_id,
-            round_num=round_num,
-            findings_total=findings_total,
-            open_count=current_open_count,
-            closed_count=len(match_result.closed_ids),
-            new_count=len(match_result.new_findings),
-            still_open_count=len(match_result.still_open_ids),
-            blocking_count=blocking_count,
-            suggestion_count=suggestion_count,
-            convergence_rate=convergence_rate,
-        )
-
-        # --- Convergence evaluation (Story 3.3: +convergence_threshold) ---
-        # Converged when: no open/still_open blocking findings remain
-        # AND convergence_rate >= threshold
-        has_blocking_still_open = any(
-            f.severity == "blocking"
-            for f in previous_findings
-            if f.finding_id in match_result.still_open_ids
-        )
-        has_blocking_new = any(f.severity == "blocking" for f in match_result.new_findings)
-        no_open_blocking = not has_blocking_still_open and not has_blocking_new
-        converged = no_open_blocking and convergence_rate >= self._config.convergence_threshold
-
-        if converged:
-            logger.info(
-                "convergent_loop_converged",
-                story_id=story_id,
-                round_num=round_num,
+                converged=converged,
+                findings_total=findings_total,
                 blocking_count=blocking_count,
                 suggestion_count=suggestion_count,
+                open_count=current_open_count,
+                closed_count=len(match_result.closed_ids),
+                new_count=len(match_result.new_findings),
             )
-            await self._submit_transition(story_id, "review_pass")
-        else:
-            logger.info(
-                "convergent_loop_needs_fix",
+        finally:
+            await self.consume_review_placeholder(
                 story_id=story_id,
-                round_num=round_num,
-                blocking_count=blocking_count,
+                db_path=self._db_path,
+                reason="consumed_by_rereview_followup",
             )
-            # --- Insert pending fixing task BEFORE submitting review_fail ---
-            # (same race-prevention as in run_first_review)
-            await self._insert_fix_placeholder(
-                story_id,
-                round_num=round_num,
-                stage=stage,
-            )
-            await self._submit_transition(story_id, "review_fail")
-
-        return ConvergentLoopResult(
-            story_id=story_id,
-            round_num=round_num,
-            converged=converged,
-            findings_total=findings_total,
-            blocking_count=blocking_count,
-            suggestion_count=suggestion_count,
-            open_count=current_open_count,
-            closed_count=len(match_result.closed_ids),
-            new_count=len(match_result.new_findings),
-        )
 
     def _append_ux_context(self, story_id: str, prompt: str) -> str:
         """Story 9.1d: 有 manifest 时附加 UX 上下文到 prompt，否则 passthrough。"""
@@ -1674,6 +1822,7 @@ class ConvergentLoop:
                     FindingRecord(
                         finding_id=str(uuid.uuid4()),
                         story_id=story_id,
+                        phase=self._FINDINGS_PHASE,
                         round_num=round_num,
                         severity=cf.severity,
                         description=cf.description,

@@ -281,6 +281,42 @@ async def _migrate_v10_to_v11(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE tasks ADD COLUMN group_id TEXT")
 
 
+@_register(12)
+async def _migrate_v11_to_v12(db: aiosqlite.Connection) -> None:
+    """v11 → v12: findings 表新增 phase 列并回填 phase-aware 历史。"""
+    if not await _column_exists(db, "findings", "phase"):
+        await db.execute("ALTER TABLE findings ADD COLUMN phase TEXT")
+
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_findings_story_phase_round "
+        "ON findings(story_id, phase, round_num)"
+    )
+
+    # Backfill legacy findings by inferring the most recent convergent-loop phase
+    # task for the same story at or before the finding timestamp.
+    await db.execute(
+        """
+        UPDATE findings
+        SET phase = COALESCE(
+            (
+                SELECT t.phase
+                FROM tasks AS t
+                WHERE t.story_id = findings.story_id
+                  AND t.phase IN ('reviewing', 'qa_testing', 'validating')
+                  AND COALESCE(t.completed_at, t.started_at) IS NOT NULL
+                  AND COALESCE(t.completed_at, t.started_at) <= findings.created_at
+                ORDER BY COALESCE(t.completed_at, t.started_at) DESC, t.rowid DESC
+                LIMIT 1
+            ),
+            'reviewing'
+        )
+        WHERE phase IS NULL OR phase = ''
+        """
+    )
+
+    await db.execute("UPDATE findings SET phase = 'reviewing' WHERE phase IS NULL OR phase = ''")
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

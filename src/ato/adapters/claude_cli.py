@@ -217,6 +217,7 @@ class ClaudeAdapter(BaseAdapter):
 
         Returns:
             result 事件 dict，或 None（如果未收到 result 事件）。
+            一旦收到 result 事件即返回，调用方进入 post-result 收尾阶段；
             调用方根据 exit_code 决定如何处理 None。
         """
         result_data: dict[str, Any] | None = None
@@ -260,6 +261,8 @@ class ClaudeAdapter(BaseAdapter):
                     await on_progress(_normalize_claude_event(event))
                 except Exception:
                     logger.warning("progress_callback_error", exc_info=True)
+            if result_data is not None:
+                return result_data
         return result_data
 
     async def execute(
