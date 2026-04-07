@@ -89,9 +89,13 @@ _REGRESSION_PROMPT_TEMPLATE = """\
 You are a regression test runner for the repository at {repo_root}.
 
 ## CRITICAL CONSTRAINTS
-- Do NOT modify any files, git index, branches, or commits.
-- Do NOT create, delete, or rename any files.
-- You are in read-only observation mode.
+- You MUST NOT intentionally edit tracked source files, change the git index,
+  create commits, or switch branches.
+- You MAY execute baseline commands that rebuild native dependencies or write
+  temporary/ignored build artifacts when required to run regression.
+- The repository must be git-clean relative to the starting snapshot when you
+  finish. If a command leaves behind non-ignored changes, clean them up before
+  reporting results.
 
 ## YOUR TASK
 Run the project's regression tests and report results.
@@ -116,6 +120,8 @@ The operator has provided these baseline regression commands. You MUST execute t
 
 If you determine that a command is clearly inapplicable (e.g., references a nonexistent \
 test directory), you MAY skip it, but you MUST explain the reason in skipped_command_reason.
+Do NOT skip a baseline command solely because it rebuilds native modules, reinstalls ignored \
+artifacts, or writes normal build/test outputs that do not leave the repo git-dirty at the end.
 After running the baseline commands, you may optionally run additional tests you discover."""
 
 _BASELINE_WITHOUT_COMMANDS = """\

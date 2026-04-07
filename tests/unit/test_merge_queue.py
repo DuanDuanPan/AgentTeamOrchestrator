@@ -1617,6 +1617,9 @@ class TestCodexRegressionRunner:
         prompt = _build_regression_prompt(Path("/repo"), settings)
         assert "uv run pytest tests/unit/" in prompt
         assert "MUST execute them first" in prompt
+        assert "read-only observation mode" not in prompt
+        assert "git-clean relative to the starting snapshot" in prompt
+        assert "Do NOT skip a baseline command solely because it rebuilds native modules" in prompt
 
     async def test_build_regression_prompt_with_explicit_singular_command(
         self,
@@ -1632,6 +1635,8 @@ class TestCodexRegressionRunner:
         prompt = _build_regression_prompt(Path("/repo"), settings)
         assert "make test" in prompt
         assert "MUST execute them first" in prompt
+        assert "read-only observation mode" not in prompt
+        assert "git-clean relative to the starting snapshot" in prompt
 
     async def test_build_regression_prompt_defaults_use_autonomous_discovery(
         self,
@@ -1646,6 +1651,8 @@ class TestCodexRegressionRunner:
 
         prompt = _build_regression_prompt(Path("/repo"), settings)
         assert "Discover the project" in prompt
+        assert "read-only observation mode" not in prompt
+        assert "git-clean relative to the starting snapshot" in prompt
 
     async def test_dispatch_regression_preserves_single_task_contract(
         self, initialized_db_path: Path
