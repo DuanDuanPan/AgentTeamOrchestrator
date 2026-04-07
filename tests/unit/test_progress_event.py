@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from ato.adapters.claude_cli import _normalize_claude_event
 from ato.adapters.codex_cli import _normalize_codex_event
 from ato.models.schemas import ProgressEvent
+from ato.progress import PROGRESS_SUMMARY_MAX_CHARS
 
 # ---------------------------------------------------------------------------
 # ProgressEvent 模型测试
@@ -126,14 +127,14 @@ class TestNormalizeClaudeEvent:
         assert result.event_type == "other"
         assert result.summary == "something_new"
 
-    def test_text_truncated_at_100(self) -> None:
-        long_text = "x" * 200
+    def test_text_truncated_at_progress_summary_limit(self) -> None:
+        long_text = "x" * 400
         raw = {
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": long_text}]},
         }
         result = _normalize_claude_event(raw)
-        assert len(result.summary) == 100
+        assert len(result.summary) == PROGRESS_SUMMARY_MAX_CHARS
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +164,15 @@ class TestNormalizeCodexEvent:
         result = _normalize_codex_event(raw)
         assert result.event_type == "text"
         assert result.summary == "All good"
+
+    def test_item_completed_agent_message_truncated_at_progress_summary_limit(self) -> None:
+        raw = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "x" * 400},
+        }
+        result = _normalize_codex_event(raw)
+        assert result.event_type == "text"
+        assert len(result.summary) == PROGRESS_SUMMARY_MAX_CHARS
 
     def test_item_completed_function_call(self) -> None:
         raw = {

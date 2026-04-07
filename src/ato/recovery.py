@@ -26,6 +26,7 @@ from ato.adapters.base import BaseAdapter
 if TYPE_CHECKING:
     from ato.adapters.bmad_adapter import BmadAdapter
 from ato.models.schemas import (
+    BmadFinding,
     ProgressCallback,
     RecoveryAction,
     RecoveryClassification,
@@ -1716,6 +1717,66 @@ class RecoveryEngine:
         return sum(1 for finding in findings if getattr(finding, "severity", None) == "blocking")
 
     @staticmethod
+    def _match_convergent_findings_across_rounds(
+        previous_findings: list[Any],
+        current_findings: list[BmadFinding],
+        *,
+        story_id: str,
+        phase: str,
+        round_num: int,
+    ) -> tuple[list[str], list[str], list[Any]]:
+        """Match current convergent-loop findings against prior unresolved findings."""
+        from ato.models.schemas import FindingRecord, compute_dedup_hash
+
+        prev_by_hash: dict[str, list[Any]] = {}
+        for finding in previous_findings:
+            prev_by_hash.setdefault(finding.dedup_hash, []).append(finding)
+
+        new_hashes: set[str] = set()
+        matched_prev_hashes: set[str] = set()
+        seen_new_hashes: set[str] = set()
+        still_open_ids: list[str] = []
+        new_findings: list[FindingRecord] = []
+        now = datetime.now(tz=UTC)
+
+        for finding in current_findings:
+            dedup_hash = finding.dedup_hash or compute_dedup_hash(
+                finding.file_path,
+                finding.rule_id,
+                finding.severity,
+                finding.description,
+            )
+            new_hashes.add(dedup_hash)
+            if dedup_hash in prev_by_hash and dedup_hash not in matched_prev_hashes:
+                matched_prev_hashes.add(dedup_hash)
+                still_open_ids.extend(prev.finding_id for prev in prev_by_hash[dedup_hash])
+            elif dedup_hash not in prev_by_hash and dedup_hash not in seen_new_hashes:
+                seen_new_hashes.add(dedup_hash)
+                new_findings.append(
+                    FindingRecord(
+                        finding_id=str(uuid.uuid4()),
+                        story_id=story_id,
+                        phase=phase,
+                        round_num=round_num,
+                        severity=finding.severity,
+                        description=finding.description,
+                        status="open",
+                        file_path=finding.file_path,
+                        rule_id=finding.rule_id,
+                        dedup_hash=dedup_hash,
+                        line_number=finding.line,
+                        created_at=now,
+                    )
+                )
+
+        closed_ids: list[str] = []
+        for dedup_hash, prev_list in prev_by_hash.items():
+            if dedup_hash not in new_hashes:
+                closed_ids.extend(prev.finding_id for prev in prev_list)
+
+        return still_open_ids, closed_ids, new_findings
+
+    @staticmethod
     def _build_fix_resume_phase_context(
         resume_phase: Literal["qa_testing", "uat", "regression"],
     ) -> str:
@@ -2342,12 +2403,14 @@ class RecoveryEngine:
         """
         try:
             from ato.adapters.bmad_adapter import record_parse_failure
-            from ato.models.db import get_connection, insert_findings_batch
-            from ato.models.schemas import (
-                BmadSkillType,
-                FindingRecord,
-                compute_dedup_hash,
+            from ato.models.db import (
+                get_connection,
+                get_findings_by_story,
+                get_open_findings,
+                insert_findings_batch,
+                update_finding_status,
             )
+            from ato.models.schemas import BmadSkillType
             from ato.validation import maybe_create_blocking_abnormal_approval
 
             worktree_path = await self._get_story_worktree(task.story_id)
@@ -2564,27 +2627,6 @@ class RecoveryEngine:
                     )
                     return True  # dispatch 已执行，parse 失败已记录
 
-            # Findings → DB
-            now = datetime.now(tz=UTC)
-            records = [
-                FindingRecord(
-                    finding_id=str(uuid.uuid4()),
-                    story_id=task.story_id,
-                    phase=task.phase,
-                    round_num=1,
-                    severity=f.severity,
-                    description=f.description,
-                    status="open",
-                    file_path=f.file_path,
-                    rule_id=f.rule_id,
-                    dedup_hash=f.dedup_hash
-                    or compute_dedup_hash(f.file_path, f.rule_id, f.severity, f.description),
-                    line_number=f.line,
-                    created_at=now,
-                )
-                for f in parse_result.findings
-            ]
-
             blocking_threshold = (
                 self._settings.cost.blocking_threshold
                 if self._settings is not None and self._settings.cost is not None
@@ -2593,22 +2635,53 @@ class RecoveryEngine:
 
             db = await get_connection(self._db_path)
             try:
-                await insert_findings_batch(db, records)
+                previous_findings = await get_open_findings(
+                    db,
+                    task.story_id,
+                    phase=task.phase,
+                )
+                phase_findings = await get_findings_by_story(
+                    db,
+                    task.story_id,
+                    phase=task.phase,
+                )
+                round_num = max((finding.round_num for finding in phase_findings), default=0) + 1
+                still_open_ids, closed_ids, records = self._match_convergent_findings_across_rounds(
+                    previous_findings,
+                    parse_result.findings,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                    round_num=round_num,
+                )
+                for finding_id in still_open_ids:
+                    await update_finding_status(db, finding_id, "still_open")
+                for finding_id in closed_ids:
+                    await update_finding_status(db, finding_id, "closed")
+                if records:
+                    await insert_findings_batch(db, records)
+                open_blocking_count = sum(
+                    1
+                    for finding in previous_findings
+                    if finding.finding_id in set(still_open_ids) and finding.severity == "blocking"
+                ) + sum(1 for finding in records if finding.severity == "blocking")
                 await maybe_create_blocking_abnormal_approval(
                     db,
                     task.story_id,
-                    1,
+                    round_num,
                     threshold=blocking_threshold,
                     phase=task.phase,
                     nudge=self._nudge,
+                    blocking_count=open_blocking_count,
                 )
             finally:
                 await db.close()
 
             # validating/reviewing/qa_testing 的收敛判定既看 findings，也看 agent
             # 的显式 verdict，避免 "FAIL + 0 blocking" 被错误放行。
-            blocking_count = sum(1 for r in records if r.severity == "blocking")
-            converged = parse_result.verdict == "approved" and blocking_count == 0
+            blocking_count = sum(
+                1 for finding in parse_result.findings if finding.severity == "blocking"
+            )
+            converged = parse_result.verdict == "approved" and open_blocking_count == 0
 
             event_name = success_event if converged else fail_event
             if event_name is not None:
@@ -2625,6 +2698,10 @@ class RecoveryEngine:
                 converged=converged,
                 parse_verdict=parse_result.verdict,
                 blocking_count=blocking_count,
+                open_blocking_count=open_blocking_count,
+                closed_count=len(closed_ids),
+                still_open_count=len(still_open_ids),
+                new_count=len(records),
                 transition_event=event_name,
             )
             return True

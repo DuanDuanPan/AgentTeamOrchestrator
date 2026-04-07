@@ -30,6 +30,7 @@ from ato.models.schemas import (
     ProgressCallback,
     ProgressEvent,
 )
+from ato.progress import PROGRESS_SUMMARY_MAX_CHARS
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
@@ -208,7 +209,7 @@ def _normalize_codex_event(raw: dict[str, Any]) -> ProgressEvent:
                 text = "".join(parts)
             return ProgressEvent(
                 event_type="text",
-                summary=text[:100],
+                summary=text[:PROGRESS_SUMMARY_MAX_CHARS],
                 cli_tool="codex",
                 timestamp=now,
                 raw=raw,

@@ -3708,6 +3708,24 @@ class TestUatInteractivePrompt:
         prompt = _build_interactive_prompt(task, "/worktree")
         assert "ato uat story-uat-1 --result pass/fail" in prompt
 
+    def test_uat_prompt_contains_detailed_execution_guidance(self) -> None:
+        """UAT prompt 应要求输出逐步执行说明和预期结果。"""
+        from ato.core import _build_interactive_prompt
+        from ato.models.schemas import TaskRecord
+
+        task = TaskRecord(
+            task_id="t1",
+            story_id="story-uat-1",
+            phase="uat",
+            role="qa",
+            cli_tool="claude",
+            status="running",
+        )
+        prompt = _build_interactive_prompt(task, "/worktree")
+        assert "详细操作手册" in prompt
+        assert "每一步都要包含“操作”和“预期结果”" in prompt
+        assert "边界/异常检查" in prompt
+
     def test_uat_prompt_not_generic_fallback(self) -> None:
         """UAT 阶段不应使用通用 fallback prompt。"""
         from ato.core import _build_interactive_prompt

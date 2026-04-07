@@ -8,6 +8,8 @@ import structlog
 
 from ato.models.schemas import ProgressCallback, ProgressEvent
 
+PROGRESS_SUMMARY_MAX_CHARS = 300
+
 
 def build_agent_progress_callback(
     *,

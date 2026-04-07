@@ -22,6 +22,7 @@ from ato.models.schemas import (
     ProgressCallback,
     ProgressEvent,
 )
+from ato.progress import PROGRESS_SUMMARY_MAX_CHARS
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
@@ -82,7 +83,7 @@ def _normalize_claude_event(raw: dict[str, Any]) -> ProgressEvent:
                 tool_name = item.get("name", "unknown")
             elif item.get("type") == "text" and not has_text:
                 has_text = True
-                text_preview = str(item.get("text", ""))[:100]
+                text_preview = str(item.get("text", ""))[:PROGRESS_SUMMARY_MAX_CHARS]
 
         if has_tool_use:
             return ProgressEvent(

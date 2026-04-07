@@ -1277,6 +1277,116 @@ class TestRecoveryActions:
 
         assert mock_bmad.parse.call_args.kwargs["skill_type"] == BmadSkillType.QA_REPORT
 
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_qa_testing_reconciles_prior_open_blocking_before_qa_pass(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """QA recovery 必须先关闭旧 blocker，再决定是否 qa_pass。"""
+        from ato.models.schemas import (
+            BmadFinding,
+            BmadParseResult,
+            BmadSkillType,
+            FindingRecord,
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                _make_story(
+                    "s-qa-reconcile",
+                    worktree_path="/tmp/wt",
+                    current_phase="qa_testing",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-qa-reconcile",
+                    "s-qa-reconcile",
+                    status="running",
+                    pid=999,
+                    phase="qa_testing",
+                ),
+            )
+            await insert_findings_batch(
+                db,
+                [
+                    FindingRecord(
+                        finding_id="f-old-blocking",
+                        story_id="s-qa-reconcile",
+                        phase="qa_testing",
+                        round_num=1,
+                        severity="blocking",
+                        description="old blocking finding",
+                        status="open",
+                        file_path="ato.yaml",
+                        rule_id="QA-OLD",
+                        dedup_hash="old-blocking-hash",
+                        created_at=_NOW,
+                    )
+                ],
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.QA_REPORT,
+            verdict="approved",
+            findings=[
+                BmadFinding(
+                    severity="suggestion",
+                    category="test",
+                    description="new suggestion only",
+                    file_path="src/foo.py",
+                    rule_id="QA-SUG",
+                ),
+            ],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="approve",
+            parsed_at=_NOW,
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        mock_tq.submit.assert_called_once()
+        event = mock_tq.submit.call_args[0][0]
+        assert event.event_name == "qa_pass"
+
+        db = await get_connection(initialized_db_path)
+        try:
+            findings = await get_findings_by_story(db, "s-qa-reconcile", phase="qa_testing")
+        finally:
+            await db.close()
+
+        status_by_id = {finding.finding_id: finding.status for finding in findings}
+        assert status_by_id["f-old-blocking"] == "closed"
+        new_rounds = [
+            finding.round_num for finding in findings if finding.finding_id != "f-old-blocking"
+        ]
+        assert new_rounds == [2]
+
 
 # ---------------------------------------------------------------------------
 # Fix: dispatch 传递 worktree_path 和 sandbox
