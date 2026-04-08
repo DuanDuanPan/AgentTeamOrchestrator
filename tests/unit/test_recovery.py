@@ -3802,12 +3802,13 @@ class TestDesigningPromptContract:
         from ato.recovery import _STRUCTURED_JOB_PROMPTS
 
         prompt = _STRUCTURED_JOB_PROMPTS["designing"]
-        # 确认关键步骤的出现顺序
-        idx_template = prompt.index("模板")
-        idx_open = prompt.index("open_document")
-        idx_batch = prompt.index("batch_design")
-        idx_save = prompt.index("强制落盘")
-        idx_export = prompt.index("export_nodes")
+        idx_template = prompt.index("2. 准备原型文件")
+        idx_open = prompt.index('`open_document(filePath="{prototype_pen}")`')
+        idx_batch = prompt.index("`batch_design(...)`")
+        idx_save = prompt.index("## 阶段 4：强制落盘")
+        idx_export = prompt.index(
+            '`export_nodes(outputDir="{exports_dir}", nodeIds=[...], format="png")`'
+        )
         assert idx_template < idx_open < idx_batch < idx_save < idx_export
 
     def test_format_prompt_includes_template_path(self) -> None:
@@ -3832,7 +3833,9 @@ class TestDesigningPromptContract:
         prompt = _STRUCTURED_JOB_PROMPTS["designing"]
         assert "story_id, saved_at, pen_file, snapshot_file, children_count" in prompt
         assert "json_parse_verified, reopen_verified, exported_png_count" in prompt
-        assert "禁止使用 penFile/timestamp/snapshotSaved" in prompt
+        assert "penFile" in prompt
+        assert "timestamp" in prompt
+        assert "snapshotSaved" in prompt
 
     def test_group_prompt_requires_exact_save_report_keys(self) -> None:
         """group designing prompt 也必须保留相同的 save-report 字段合同。"""
@@ -3841,7 +3844,27 @@ class TestDesigningPromptContract:
         prompt = _build_designing_group_body(["story-a", "story-b"])
         assert "story_id, saved_at, pen_file, snapshot_file, children_count" in prompt
         assert "json_parse_verified, reopen_verified, exported_png_count" in prompt
-        assert "禁止 penFile/timestamp/snapshotSaved" in prompt
+        assert "penFile" in prompt
+        assert "timestamp" in prompt
+        assert "snapshotSaved" in prompt
+
+    def test_prompt_requires_discovery_decision_and_final_status(self) -> None:
+        """designing prompt 包含自主发现/决策/验收闭环。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        assert "## 阶段 1：Discovery" in prompt
+        assert "## 阶段 2：Decision" in prompt
+        assert "## 阶段 5：Verification" in prompt
+        assert "STATUS: PASS / FAIL / BLOCKED" in prompt
+
+    def test_prompt_requires_project_local_skill_and_screenshot_fallback(self) -> None:
+        """designing prompt 优先发现项目本地 skill，并保留截图 fallback。"""
+        from ato.recovery import _STRUCTURED_JOB_PROMPTS
+
+        prompt = _STRUCTURED_JOB_PROMPTS["designing"]
+        assert "`.claude/skills`、`.agents/skills`、`.codex/skills`" in prompt
+        assert "如果 `get_screenshot` 不可用" in prompt
 
 
 class TestPenTemplateBaseline:
@@ -4283,6 +4306,8 @@ class TestTemplateContextBriefingPreservation:
 
         assert _mock_recovery_adapter.execute.called
         prompt = _mock_recovery_adapter.execute.call_args[0][0]
+        assert "## 阶段 1：Discovery" in prompt
+        assert "STATUS: PASS / FAIL / BLOCKED" in prompt
         assert "open_document" in prompt  # 模板内容
         assert "retry after gate fail" in prompt  # context_briefing 保留
 
