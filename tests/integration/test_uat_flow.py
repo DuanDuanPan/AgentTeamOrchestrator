@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from ato.models.db import (
     get_connection,
@@ -12,7 +13,7 @@ from ato.models.db import (
     insert_task,
     update_task_status,
 )
-from ato.models.schemas import StoryRecord, TaskRecord, TransitionEvent
+from ato.models.schemas import StoryRecord, TaskRecord, TransitionEvent, WorktreePreflightResult
 from ato.nudge import Nudge
 from ato.transition_queue import TransitionQueue
 
@@ -30,6 +31,23 @@ def _evt(story_id: str, event_name: str) -> TransitionEvent:
         event_name=event_name,
         source="cli",
         submitted_at=datetime.now(UTC),
+    )
+
+
+def _preflight_pass(story_id: str, gate_type: str) -> WorktreePreflightResult:
+    return WorktreePreflightResult.model_validate(
+        {
+            "story_id": story_id,
+            "gate_type": gate_type,
+            "passed": True,
+            "base_ref": "main",
+            "base_sha": "base",
+            "head_sha": "head",
+            "porcelain_output": "",
+            "diffstat": " file.py | 1 +\n",
+            "changed_files": ["file.py"],
+            "checked_at": datetime.now(UTC),
+        }
     )
 
 
@@ -162,8 +180,12 @@ class TestUatFailConvergentLoopReentry:
         assert story.current_phase == "fixing"
 
         # fix_done → reviewing
-        await tq.submit(_evt(sid, "fix_done"))
-        await tq._queue.join()
+        with patch(
+            "ato.worktree_mgr.WorktreeManager.preflight_check",
+            new=AsyncMock(side_effect=_preflight_pass),
+        ):
+            await tq.submit(_evt(sid, "fix_done"))
+            await tq._queue.join()
         story = await _read_story(initialized_db_path, sid)
         assert story is not None
         assert story.current_phase == "reviewing"
@@ -335,8 +357,12 @@ class TestOrchestratorTQCacheConsistency:
         assert story.current_phase == "fixing"
 
         # 5. 关键验证：同一个 TQ 实例处理后续 fix_done 不会被拒绝
-        await tq.submit(_evt(sid, "fix_done"))
-        await tq._queue.join()
+        with patch(
+            "ato.worktree_mgr.WorktreeManager.preflight_check",
+            new=AsyncMock(side_effect=_preflight_pass),
+        ):
+            await tq.submit(_evt(sid, "fix_done"))
+            await tq._queue.join()
 
         story = await _read_story(initialized_db_path, sid)
         assert story is not None

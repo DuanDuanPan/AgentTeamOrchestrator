@@ -1573,6 +1573,7 @@ _EXCEPTION_APPROVAL_TYPES = {
     "timeout",
     "precommit_failure",
     "rebase_conflict",
+    "preflight_failure",
 }
 
 
@@ -1600,6 +1601,13 @@ def _extract_impact(approval_type: str, payload_dict: dict[str, object]) -> str:
         return "代码质量检查未通过，需修复后重试"
     if approval_type == "rebase_conflict":
         return "分支冲突需人工解决"
+    if approval_type == "preflight_failure":
+        parts: list[str] = []
+        for key in ("gate_type", "failure_reason", "worktree_path"):
+            value = payload_dict.get(key)
+            if value:
+                parts.append(f"{key}: {value}")
+        return "\n".join(parts) or "worktree 边界门控失败，等待人工提交后重试"
     return "请查看 payload 详情"
 
 

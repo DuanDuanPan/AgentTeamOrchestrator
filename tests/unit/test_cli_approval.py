@@ -8,6 +8,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from typer.testing import CliRunner
 
@@ -29,9 +30,9 @@ def _setup_story_and_approval_sync(
     story_id: str = "test-story-1",
     approval_id: str = "aaaa1111-2222-3333-4444-555566667777",
     approval_type: str = "session_timeout",
-    status: str = "pending",
+    status: Literal["pending", "approved", "rejected"] = "pending",
     recommended_action: str | None = "restart",
-    risk_level: str | None = "medium",
+    risk_level: Literal["high", "medium", "low"] | None = "medium",
 ) -> None:
     """同步创建 story + approval 的 helper。"""
 
@@ -108,6 +109,62 @@ class TestAtoApprovalsList:
         assert "approvals" in data
         assert len(data["approvals"]) == 1
         assert data["approvals"][0]["approval_type"] == "session_timeout"
+
+
+class TestAtoApprovalDetail:
+    def test_preflight_failure_detail_renders_exception_context(self, tmp_path: Path) -> None:
+        """preflight_failure 使用异常详情面板展示门控字段。"""
+        db_path = tmp_path / ".ato" / "state.db"
+        _init_db_sync(db_path)
+
+        async def _inner() -> None:
+            db = await get_connection(db_path)
+            try:
+                await insert_story(
+                    db,
+                    StoryRecord(
+                        story_id="story-preflight",
+                        title="Preflight Story",
+                        status="in_progress",
+                        current_phase="merging",
+                        created_at=_NOW,
+                        updated_at=_NOW,
+                    ),
+                )
+                await insert_approval(
+                    db,
+                    ApprovalRecord(
+                        approval_id="bbbb1111-2222-3333-4444-555566667777",
+                        story_id="story-preflight",
+                        approval_type="preflight_failure",
+                        status="pending",
+                        payload=json.dumps(
+                            {
+                                "gate_type": "pre_merge",
+                                "failure_reason": "EMPTY_DIFF",
+                                "worktree_path": "/tmp/worktree",
+                                "options": ["manual_commit_and_retry", "escalate"],
+                            }
+                        ),
+                        created_at=_NOW,
+                        recommended_action="manual_commit_and_retry",
+                        risk_level="medium",
+                    ),
+                )
+            finally:
+                await db.close()
+
+        asyncio.run(_inner())
+
+        result = runner.invoke(
+            app,
+            ["approval-detail", "bbbb1111", "--db-path", str(db_path)],
+        )
+
+        assert result.exit_code == 0
+        assert "Worktree 边界门控失败" in result.stdout
+        assert "failure_reason: EMPTY_DIFF" in result.stdout
+        assert "worktree_path: /tmp/worktree" in result.stdout
 
 
 class TestAtoApproveSuccess:
@@ -279,25 +336,25 @@ class TestApprovalMetadataStory42:
         assert "Rebase" in summary
 
     def test_regression_failure_default_options_align_story_4_2(self) -> None:
-        from ato.cli import _DEFAULT_VALID_OPTIONS
+        from ato.models.schemas import APPROVAL_DEFAULT_VALID_OPTIONS
 
-        options = _DEFAULT_VALID_OPTIONS["regression_failure"]
+        options = APPROVAL_DEFAULT_VALID_OPTIONS["regression_failure"]
         assert "revert" in options
         assert "fix_forward" in options
         assert "pause" in options
 
     def test_rebase_conflict_default_options(self) -> None:
-        from ato.cli import _DEFAULT_VALID_OPTIONS
+        from ato.models.schemas import APPROVAL_DEFAULT_VALID_OPTIONS
 
-        options = _DEFAULT_VALID_OPTIONS["rebase_conflict"]
+        options = APPROVAL_DEFAULT_VALID_OPTIONS["rebase_conflict"]
         assert "manual_resolve" in options
         assert "skip" in options
         assert "abandon" in options
 
     def test_precommit_failure_default_options(self) -> None:
-        from ato.cli import _DEFAULT_VALID_OPTIONS
+        from ato.models.schemas import APPROVAL_DEFAULT_VALID_OPTIONS
 
-        options = _DEFAULT_VALID_OPTIONS["precommit_failure"]
+        options = APPROVAL_DEFAULT_VALID_OPTIONS["precommit_failure"]
         assert "retry" in options
         assert "manual_fix" in options
         assert "skip" in options

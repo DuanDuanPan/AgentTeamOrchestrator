@@ -41,6 +41,24 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # 实际类型是 ato.adapters.bmad_adapter.BmadAdapter
 _BmadAdapter = Any
 
+_REVIEW_PREFLIGHT_BLOCK = """\
+## Review Preflight (mandatory before code review)
+
+1. Run `git status --porcelain=v1 -uall` in the story worktree.
+2. Run `git diff --stat main...HEAD`.
+3. If status output is non-empty:
+   - Stop before reviewing.
+   - Report verdict: BLOCK.
+   - Reason: UNCOMMITTED_WORKTREE_CHANGES.
+   - List the dirty files.
+4. If `git diff --stat main...HEAD` is empty:
+   - Stop before reviewing.
+   - Report verdict: BLOCK.
+   - Reason: EMPTY_COMMITTED_DIFF.
+5. Only when the worktree is clean and committed diff is non-empty,
+   review `git diff main...HEAD`.
+"""
+
 
 class MatchResult(NamedTuple):
     """跨轮次 finding 匹配结果（纯内部数据结构）。"""
@@ -809,11 +827,12 @@ class ConvergentLoop:
                 f"Use the bmad-code-review skill to review all code changes "
                 f"in the worktree at {resolved_path}. "
                 f"Story: {story_id}. Review mode: branch diff against main.\n\n"
+                f"{_REVIEW_PREFLIGHT_BLOCK}\n\n"
                 "Do not stop at a checkpoint or ask for confirmation.\n"
                 "Do not ask whether to include uncommitted worktree changes.\n"
-                "Use only `git diff main...HEAD` as the review scope, ignore unrelated "
-                "uncommitted files outside that scope, and finish with a final review verdict "
-                "in this single response."
+                "After the mandatory preflight passes, use only `git diff main...HEAD` "
+                "as the review scope and finish with a final review verdict in this "
+                "single response."
             )
             review_prompt = self._append_ux_context(story_id, review_prompt)
             review_task_id = task_id or str(uuid.uuid4())
@@ -1763,6 +1782,7 @@ class ConvergentLoop:
             f"of code changes in the worktree at {worktree_path}. "
             f"Do NOT perform a full review.\n"
             "\n"
+            f"{_REVIEW_PREFLIGHT_BLOCK}\n"
             "Your task:\n"
             "1. Verify whether each of the previous findings listed below has been fixed.\n"
             "2. Report any NEW issues introduced by the fix.\n"

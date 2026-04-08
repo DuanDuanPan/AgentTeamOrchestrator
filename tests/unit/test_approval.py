@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from unittest.mock import patch
 
 import pytest
@@ -30,19 +31,19 @@ def _make_approval(
     approval_id: str = "aaaa1111-2222-3333-4444-555566667777",
     story_id: str = "test-story-1",
     approval_type: str = "session_timeout",
-    status: str = "pending",
+    status: Literal["pending", "approved", "rejected"] = "pending",
     recommended_action: str | None = "restart",
-    risk_level: str | None = None,
+    risk_level: Literal["high", "medium", "low"] | None = None,
 ) -> ApprovalRecord:
     return ApprovalRecord(
         approval_id=approval_id,
         story_id=story_id,
         approval_type=approval_type,
-        status=status,  # type: ignore[arg-type]
+        status=status,
         payload='{"task_id": "t1", "options": ["restart", "resume"]}',
         created_at=_NOW,
         recommended_action=recommended_action,
-        risk_level=risk_level,  # type: ignore[arg-type]
+        risk_level=risk_level,
     )
 
 
@@ -357,6 +358,9 @@ class TestNotificationLevelMapping:
         assert "session_timeout" in APPROVAL_TYPE_TO_NOTIFICATION
         assert APPROVAL_TYPE_TO_NOTIFICATION["session_timeout"] == "normal"
 
+        assert "preflight_failure" in APPROVAL_TYPE_TO_NOTIFICATION
+        assert APPROVAL_TYPE_TO_NOTIFICATION["preflight_failure"] == "normal"
+
     def test_all_types_mapped(self) -> None:
         """所有定义的 approval 类型都有通知级别映射。"""
         from typing import get_args
@@ -464,3 +468,32 @@ class TestApprovalNotificationContent:
             assert recommended in valid, (
                 f"DRIFT: {atype} recommended='{recommended}' not in valid options {valid}"
             )
+
+    def test_preflight_failure_summary_and_options(self) -> None:
+        import json
+
+        from ato.approval_helpers import (
+            format_approval_summary,
+            get_exception_context,
+            get_options_for_approval,
+        )
+
+        payload: dict[str, object] = {
+            "gate_type": "pre_review",
+            "retry_event": "dev_done",
+            "worktree_path": "/tmp/wt",
+            "failure_reason": "UNCOMMITTED_CHANGES",
+            "options": ["manual_commit_and_retry", "escalate"],
+        }
+        payload_json = json.dumps(payload)
+
+        assert format_approval_summary("preflight_failure", payload_json) == (
+            "Worktree 边界门控失败"
+        )
+        assert get_options_for_approval("preflight_failure", payload_json) == [
+            "manual_commit_and_retry",
+            "escalate",
+        ]
+        what, impact = get_exception_context("preflight_failure", payload)
+        assert "Worktree 边界门控失败" in what
+        assert "failure_reason: UNCOMMITTED_CHANGES" in impact

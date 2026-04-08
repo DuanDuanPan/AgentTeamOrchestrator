@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
@@ -30,6 +31,7 @@ from ato.models.schemas import (
     StoryStatus,
     TaskRecord,
     TaskStatus,
+    WorktreePreflightResult,
 )
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
@@ -165,6 +167,31 @@ CREATE TABLE IF NOT EXISTS merge_queue_state (
     frozen_at               TEXT,
     current_merge_story_id  TEXT
 )"""
+
+_WORKTREE_PREFLIGHT_RESULTS_DDL = """\
+CREATE TABLE IF NOT EXISTS worktree_preflight_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    story_id TEXT NOT NULL,
+    gate_type TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    base_ref TEXT NOT NULL,
+    base_sha TEXT,
+    head_sha TEXT,
+    porcelain_output TEXT NOT NULL DEFAULT '',
+    diffstat TEXT NOT NULL DEFAULT '',
+    changed_files TEXT NOT NULL DEFAULT '[]',
+    failure_reason TEXT,
+    error_output TEXT,
+    checked_at TEXT NOT NULL
+)"""
+
+_WORKTREE_PREFLIGHT_STORY_IDX = """\
+CREATE INDEX IF NOT EXISTS idx_worktree_preflight_story
+ON worktree_preflight_results(story_id)"""
+
+_WORKTREE_PREFLIGHT_GATE_IDX = """\
+CREATE INDEX IF NOT EXISTS idx_worktree_preflight_gate
+ON worktree_preflight_results(story_id, gate_type, checked_at)"""
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +754,7 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
               AND a.approval_type IN (
                 'crash_recovery', 'needs_human_review',
                 'merge_authorization', 'convergent_loop_escalation',
-                'regression_failure'
+                'regression_failure', 'preflight_failure'
               )
               AND a.status = 'pending'
           )
@@ -1543,6 +1570,46 @@ async def insert_preflight_results(
         [(run_id, r.layer, r.check_item, r.status, r.message) for r in results],
     )
     await db.commit()
+
+
+async def save_worktree_preflight_result(
+    db: aiosqlite.Connection,
+    result: WorktreePreflightResult,
+    *,
+    commit: bool = False,
+) -> int:
+    """插入一条 worktree 边界 preflight 审计结果。
+
+    ``commit=False`` 是默认值，让 TransitionQueue / MergeQueue 控制事务边界。
+    """
+    validated = WorktreePreflightResult.model_validate(result.model_dump())
+    cursor = await db.execute(
+        "INSERT INTO worktree_preflight_results ("
+        "story_id, gate_type, passed, base_ref, base_sha, head_sha, "
+        "porcelain_output, diffstat, changed_files, failure_reason, error_output, checked_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            validated.story_id,
+            validated.gate_type,
+            int(validated.passed),
+            validated.base_ref,
+            validated.base_sha,
+            validated.head_sha,
+            validated.porcelain_output,
+            validated.diffstat,
+            json.dumps(validated.changed_files),
+            validated.failure_reason,
+            validated.error_output,
+            _dt_to_iso(validated.checked_at),
+        ),
+    )
+    if commit:
+        await db.commit()
+    row_id = cursor.lastrowid
+    if row_id is None:
+        msg = "SQLite did not return a row id for worktree_preflight_results insert"
+        raise RuntimeError(msg)
+    return row_id
 
 
 # ---------------------------------------------------------------------------

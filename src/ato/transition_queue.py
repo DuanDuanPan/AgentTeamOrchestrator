@@ -12,6 +12,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiosqlite
 import structlog
@@ -19,7 +20,13 @@ from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from ato.config import PhaseDefinition, evaluate_skip_condition
 from ato.models.db import get_connection, get_story
-from ato.models.schemas import StateTransitionError, TransitionEvent, TransitionSource
+from ato.models.schemas import (
+    StateTransitionError,
+    TransitionEvent,
+    TransitionSource,
+    WorktreeGateType,
+    WorktreePreflightResult,
+)
 from ato.nudge import Nudge, send_user_notification
 from ato.state_machine import (
     StoryLifecycle,
@@ -27,6 +34,9 @@ from ato.state_machine import (
 )
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
+
+if TYPE_CHECKING:
+    from ato.worktree_mgr import WorktreeManager
 
 
 @dataclass(slots=True)
@@ -89,6 +99,27 @@ _SPECIAL_REPLAY: dict[str, list[str]] = {
     # start_create 现在直接到 creating，replay 后 machine 停在 creating（语义等价）。
     "planning": ["start_create"],
 }
+
+
+def _gate_type_for_transition(event_name: str) -> WorktreeGateType | None:
+    """Return the worktree boundary gate type for a state-machine event."""
+    if event_name in {"dev_done", "fix_done"}:
+        return "pre_review"
+    return None
+
+
+def _dirty_files_from_porcelain(porcelain_output: str) -> list[str]:
+    """Extract file paths from git status --porcelain=v1 output for finalize context."""
+    files: list[str] = []
+    for line in porcelain_output.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path:
+            files.append(path)
+    return files
 
 
 async def _replay_to_phase(sm: StoryLifecycle, target_phase: str) -> None:
@@ -273,6 +304,16 @@ class TransitionQueue:
                 logger.info("transition_processing_start", queue_depth=queue_depth)
 
                 sm = await self._get_or_create_machine(event.story_id, db)
+                preflight_blocked = await self._run_pre_review_gate_if_needed(db, event)
+                if preflight_blocked:
+                    if queued.completion_future is not None and not queued.completion_future.done():
+                        queued.completion_future.set_exception(
+                            StateTransitionError(
+                                "Worktree preflight blocked transition "
+                                f"'{event.event_name}' for story '{event.story_id}'"
+                            )
+                        )
+                    continue
                 await sm.send(event.event_name)
                 new_state = sm.current_state_value
                 await save_story_state(db, event.story_id, new_state)
@@ -313,6 +354,137 @@ class TransitionQueue:
             finally:
                 self._queue.task_done()
                 clear_contextvars()
+
+    async def _run_pre_review_gate_if_needed(
+        self,
+        db: aiosqlite.Connection,
+        event: TransitionEvent,
+    ) -> bool:
+        """Run pre-review worktree gate for dev_done/fix_done events.
+
+        Returns True when the transition must not be sent to the state machine.
+        """
+        gate_type = _gate_type_for_transition(event.event_name)
+        if gate_type is None:
+            return False
+
+        from ato.core import derive_project_root
+        from ato.models.db import save_worktree_preflight_result
+        from ato.worktree_mgr import WorktreeManager
+
+        project_root = derive_project_root(self._db_path)
+        mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+
+        first_result = await mgr.preflight_check(event.story_id, gate_type)
+        await save_worktree_preflight_result(db, first_result, commit=True)
+        if first_result.passed:
+            return False
+
+        await self._dispatch_finalize_for_preflight_failure(mgr, event.story_id, first_result)
+
+        second_result = await mgr.preflight_check(event.story_id, gate_type)
+        await save_worktree_preflight_result(db, second_result, commit=True)
+        if second_result.passed:
+            logger.info(
+                "worktree_preflight_passed_after_finalize",
+                story_id=event.story_id,
+                event_name=event.event_name,
+            )
+            return False
+
+        await self._create_preflight_failure_approval(
+            db,
+            event=event,
+            result=second_result,
+            retry_event=event.event_name,
+        )
+        return True
+
+    async def _dispatch_finalize_for_preflight_failure(
+        self,
+        mgr: WorktreeManager,
+        story_id: str,
+        result: WorktreePreflightResult,
+    ) -> None:
+        """Run one finalize attempt when a worktree boundary gate fails."""
+        worktree_path = await mgr.get_path(story_id)
+        if worktree_path is None:
+            return
+
+        story = None
+        db = await get_connection(self._db_path)
+        try:
+            story = await get_story(db, story_id)
+        finally:
+            await db.close()
+
+        from ato.adapters.claude_cli import ClaudeAdapter
+        from ato.subprocess_mgr import SubprocessManager
+
+        finalize_mgr = SubprocessManager(
+            max_concurrent=1,
+            adapter=ClaudeAdapter(),
+            db_path=self._db_path,
+        )
+        dirty_files = _dirty_files_from_porcelain(result.porcelain_output)
+        try:
+            finalize_result = await finalize_mgr.dispatch_finalize(
+                story_id=story_id,
+                worktree_path=str(worktree_path),
+                story_summary=story.title if story is not None else story_id,
+                dirty_files=dirty_files,
+            )
+        except Exception:
+            logger.warning("worktree_finalize_failed", story_id=story_id, exc_info=True)
+            return
+
+        logger.info(
+            "worktree_finalize_completed",
+            story_id=story_id,
+            committed=finalize_result.committed,
+            commit_sha=finalize_result.commit_sha,
+            error=finalize_result.error,
+        )
+
+    async def _create_preflight_failure_approval(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        event: TransitionEvent,
+        result: WorktreePreflightResult,
+        retry_event: str,
+    ) -> None:
+        """Create a pending preflight_failure approval for a blocked transition."""
+        from ato.approval_helpers import create_approval
+
+        worktree_path: str | None = None
+        story = await get_story(db, event.story_id)
+        if story is not None:
+            worktree_path = story.worktree_path
+
+        await create_approval(
+            db,
+            story_id=event.story_id,
+            approval_type="preflight_failure",
+            payload_dict={
+                "gate_type": result.gate_type,
+                "retry_event": retry_event,
+                "worktree_path": worktree_path,
+                "failure_reason": result.failure_reason,
+                "preflight_result": result.model_dump(mode="json"),
+                "options": ["manual_commit_and_retry", "escalate"],
+            },
+            recommended_action="manual_commit_and_retry",
+            risk_level="medium",
+            nudge=self._nudge,
+        )
+        logger.warning(
+            "worktree_preflight_blocked_transition",
+            story_id=event.story_id,
+            event_name=event.event_name,
+            gate_type=result.gate_type,
+            failure_reason=result.failure_reason,
+        )
 
     async def _on_phase_skip_check(
         self,

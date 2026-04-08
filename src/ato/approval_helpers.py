@@ -58,6 +58,7 @@ def format_approval_summary(approval_type: str, payload: str | None) -> str:
         "precommit_failure": "Pre-commit 检查失败",
         "rebase_conflict": "Rebase 冲突需处理",
         "needs_human_review": "需要人工审阅",
+        "preflight_failure": "Worktree 边界门控失败",
     }
     summary = templates.get(approval_type, approval_type)
 
@@ -156,6 +157,7 @@ _EXCEPTION_TYPE_TITLES: dict[str, str] = {
     "precommit_failure": "PRE-COMMIT FAILURE",
     "rebase_conflict": "REBASE CONFLICT",
     "needs_human_review": "NEEDS HUMAN REVIEW",
+    "preflight_failure": "WORKTREE PREFLIGHT FAILURE",
     "convergent_loop_escalation": "CONVERGENT LOOP ESCALATION",
 }
 
@@ -171,6 +173,7 @@ _OPTION_LABELS: dict[str, str] = {
     "manual_fix": "人工修复",
     "skip": "跳过",
     "manual_resolve": "人工解决冲突",
+    "manual_commit_and_retry": "人工提交后重试",
     "escalate": "升级处理",
     "restart_phase2": "从 Phase 2（梯度降级）重新开始",
     "restart_loop": "从 Phase 1 全量重跑",
@@ -301,6 +304,16 @@ def get_exception_context(approval_type: str, payload: dict[str, object]) -> tup
             what = "Regression 在 main 上失败，merge queue 已冻结。"
             if payload.get("reason"):
                 parts.append(f"reason: {payload['reason']}")
+        case "preflight_failure":
+            what = "Worktree 边界门控失败，原边界转换或 merge 已阻止。"
+            for key in (
+                "gate_type",
+                "retry_event",
+                "worktree_path",
+                "failure_reason",
+            ):
+                if payload.get(key):
+                    parts.append(f"{key}: {payload[key]}")
         case _:
             what = approval_type
 

@@ -47,6 +47,7 @@ coverage.xml
 
 # Worktrees
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # 工具缓存
 .mypy_cache/

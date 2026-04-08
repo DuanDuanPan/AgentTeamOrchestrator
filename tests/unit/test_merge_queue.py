@@ -21,10 +21,33 @@ from ato.models.db import (
     set_current_merge_story,
     set_merge_queue_frozen,
 )
-from ato.models.schemas import CLIAdapterError, StoryRecord
+from ato.models.schemas import CLIAdapterError, StoryRecord, WorktreePreflightResult
 
 _NOW = datetime.now(tz=UTC)
 _EARLIER = _NOW - timedelta(minutes=5)
+
+
+def _preflight_result(
+    story_id: str,
+    *,
+    passed: bool = True,
+    failure_reason: str | None = None,
+) -> WorktreePreflightResult:
+    return WorktreePreflightResult.model_validate(
+        {
+            "story_id": story_id,
+            "gate_type": "pre_merge",
+            "passed": passed,
+            "base_ref": "origin/main",
+            "base_sha": "base",
+            "head_sha": "head",
+            "porcelain_output": "?? dirty.py\n" if failure_reason else "",
+            "diffstat": " dirty.py | 1 +\n" if passed else "",
+            "changed_files": ["dirty.py"] if passed else [],
+            "failure_reason": failure_reason,
+            "checked_at": datetime.now(tz=UTC),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +248,14 @@ class TestMergeQueueClass:
                 "continue_rebase",
                 "abort_rebase",
                 "get_conflict_files",
+                "preflight_check",
                 "project_root",
             ]
         )
         worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
 
         tq = AsyncMock()
         settings = MagicMock()
@@ -245,6 +272,22 @@ class TestMergeQueueClass:
             settings=settings,
         )
         return queue, worktree_mgr, tq
+
+    def test_conflict_resolution_prompt_forbids_dangerous_git_commands(self) -> None:
+        from ato.merge_queue import _build_conflict_resolution_prompt
+
+        prompt = _build_conflict_resolution_prompt(["a.py"], "CONFLICT", 0)
+
+        assert "Do NOT create new commits" in prompt
+        for command in (
+            "git reset",
+            "git checkout",
+            "git switch",
+            "git stash",
+            "git clean",
+            "git merge",
+        ):
+            assert command in prompt
 
     async def test_enqueue_writes_to_db(self, initialized_db_path: Path) -> None:
         queue, _, _ = self._make_queue(initialized_db_path)
@@ -596,6 +639,9 @@ class TestStaleLockRecovery:
 
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
         tq = AsyncMock()
         settings = MagicMock()
         settings.merge_rebase_timeout = 120
@@ -790,6 +836,9 @@ class TestCrashRecoveryScenarios:
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
         worktree_mgr.cleanup = AsyncMock()
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
 
         tq = AsyncMock()
         settings = MagicMock()
@@ -966,6 +1015,9 @@ class TestRegressionTestExecution:
 
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
 
         tq = AsyncMock()
         settings = MagicMock()
@@ -1131,6 +1183,55 @@ class TestRegressionTestExecution:
 
         worktree_mgr.merge_to_main.assert_not_awaited()
 
+    async def test_pre_merge_preflight_failure_blocks_before_rebase_and_releases_lock(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """pre_merge gate 失败时不得 rebase/merge，且释放 merge queue 锁。"""
+        from ato.models.db import get_pending_approvals
+
+        queue, worktree_mgr, _ = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s-pre-merge-fail")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s-pre-merge-fail", "a1", _NOW, _NOW)
+            await dequeue_next_merge(db)
+            await set_current_merge_story(db, "s-pre-merge-fail")
+        finally:
+            await db.close()
+
+        worktree_mgr.preflight_check = AsyncMock(
+            return_value=_preflight_result(
+                "s-pre-merge-fail",
+                passed=False,
+                failure_reason="EMPTY_DIFF",
+            )
+        )
+        worktree_mgr.get_path = AsyncMock(return_value=None)
+        worktree_mgr.rebase_onto_main = AsyncMock(return_value=(True, ""))
+        worktree_mgr.merge_to_main = AsyncMock(return_value=(True, ""))
+
+        await queue._execute_merge("s-pre-merge-fail")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            entry = await get_merge_queue_entry(db, "s-pre-merge-fail")
+            state = await get_merge_queue_state(db)
+            pending = await get_pending_approvals(db)
+            preflight_approvals = [
+                approval for approval in pending if approval.approval_type == "preflight_failure"
+            ]
+            assert entry is not None
+            assert entry.status == "failed"
+            assert state.current_merge_story_id is None
+            assert len(preflight_approvals) == 1
+        finally:
+            await db.close()
+
+        worktree_mgr.rebase_onto_main.assert_not_awaited()
+        worktree_mgr.merge_to_main.assert_not_awaited()
+
     async def test_mark_merge_failed_still_clears_lock_when_status_update_fails(
         self, initialized_db_path: Path
     ) -> None:
@@ -1174,6 +1275,9 @@ class TestHappyPathMergeRegressionPassToDone:
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
         worktree_mgr.cleanup = AsyncMock()
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
 
         tq = AsyncMock()
         settings = MagicMock()
@@ -1335,6 +1439,9 @@ class TestRebaseConflictDoesNotFreezeQueue:
         worktree_mgr.project_root = Path("/fake/repo")
         worktree_mgr.get_conflict_files = AsyncMock(return_value=["a.py"])
         worktree_mgr.abort_rebase = AsyncMock()
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
 
         tq = AsyncMock()
         settings = MagicMock()
@@ -1384,6 +1491,9 @@ class TestRegressionFailurePayloadContent:
 
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
 
         tq = AsyncMock()
         settings = MagicMock()
@@ -1533,6 +1643,9 @@ class TestCodexRegressionRunner:
 
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
 
         tq = AsyncMock()
         settings = MagicMock()

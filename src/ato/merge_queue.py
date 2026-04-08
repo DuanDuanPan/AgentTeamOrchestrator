@@ -17,7 +17,7 @@ import aiosqlite
 import structlog
 
 from ato.config import ATOSettings
-from ato.models.schemas import CLIAdapterError, TransitionEvent
+from ato.models.schemas import CLIAdapterError, TransitionEvent, WorktreePreflightResult
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
 
@@ -165,6 +165,8 @@ You are resolving git rebase merge conflicts in this worktree.
 4. After resolving, run `git add <file>` for each resolved file.
 5. Do NOT run `git rebase --continue` — the orchestrator will handle that.
 6. Do NOT create new commits.
+7. Do NOT run `git reset`, `git checkout`, `git switch`, `git stash`,
+   `git clean`, or `git merge`.
 
 Important:
 - Remove ALL conflict markers (<<<<<<< , =======, >>>>>>>).
@@ -236,6 +238,20 @@ async def _snapshot_workspace_changes(repo_root: Path) -> set[str]:
             raw_path = raw_path.split(" -> ", 1)[1]
         paths.add(raw_path)
     return paths
+
+
+def _dirty_files_from_porcelain(porcelain_output: str) -> list[str]:
+    """Extract file paths from git status --porcelain=v1 output for finalize context."""
+    files: list[str] = []
+    for line in porcelain_output.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path:
+            files.append(path)
+    return files
 
 
 class MergeQueue:
@@ -571,9 +587,127 @@ class MergeQueue:
                 context="merge_worker_exception",
             )
 
+    async def _run_pre_merge_gate(self, story_id: str) -> bool:
+        """Run pre-merge worktree boundary gate before rebase/merge."""
+        from ato.models.db import get_connection, save_worktree_preflight_result
+
+        db = await get_connection(self._db_path)
+        try:
+            first_result = await self._worktree_mgr.preflight_check(story_id, "pre_merge")
+            await save_worktree_preflight_result(db, first_result, commit=True)
+            if first_result.passed:
+                return True
+
+            await self._dispatch_finalize_for_preflight_failure(story_id, first_result)
+
+            second_result = await self._worktree_mgr.preflight_check(story_id, "pre_merge")
+            await save_worktree_preflight_result(db, second_result, commit=True)
+            if second_result.passed:
+                logger.info(
+                    "merge_preflight_passed_after_finalize",
+                    story_id=story_id,
+                )
+                return True
+        finally:
+            await db.close()
+
+        await self._block_pre_merge_for_preflight_failure(story_id, second_result)
+        return False
+
+    async def _dispatch_finalize_for_preflight_failure(
+        self,
+        story_id: str,
+        result: WorktreePreflightResult,
+    ) -> None:
+        """Run one finalize attempt after a failed pre-merge gate."""
+        worktree_path = await self._worktree_mgr.get_path(story_id)
+        if worktree_path is None:
+            return
+
+        from ato.adapters.claude_cli import ClaudeAdapter
+        from ato.models.db import get_connection, get_story
+        from ato.subprocess_mgr import SubprocessManager
+
+        story = None
+        db = await get_connection(self._db_path)
+        try:
+            story = await get_story(db, story_id)
+        finally:
+            await db.close()
+
+        finalize_mgr = SubprocessManager(
+            max_concurrent=1,
+            adapter=ClaudeAdapter(),
+            db_path=self._db_path,
+        )
+        try:
+            finalize_result = await finalize_mgr.dispatch_finalize(
+                story_id=story_id,
+                worktree_path=str(worktree_path),
+                story_summary=story.title if story is not None else story_id,
+                dirty_files=_dirty_files_from_porcelain(result.porcelain_output),
+            )
+        except Exception:
+            logger.warning("merge_preflight_finalize_failed", story_id=story_id, exc_info=True)
+            return
+
+        logger.info(
+            "merge_preflight_finalize_completed",
+            story_id=story_id,
+            committed=finalize_result.committed,
+            commit_sha=finalize_result.commit_sha,
+            error=finalize_result.error,
+        )
+
+    async def _block_pre_merge_for_preflight_failure(
+        self,
+        story_id: str,
+        result: WorktreePreflightResult,
+    ) -> None:
+        """Create preflight_failure approval and release merge queue lock."""
+        from ato.approval_helpers import create_approval
+        from ato.models.db import complete_merge, get_connection, set_current_merge_story
+
+        worktree_path = await self._worktree_mgr.get_path(story_id)
+        db = await get_connection(self._db_path)
+        try:
+            await create_approval(
+                db,
+                story_id=story_id,
+                approval_type="preflight_failure",
+                payload_dict={
+                    "gate_type": "pre_merge",
+                    "retry_event": "merge_queue_retry",
+                    "worktree_path": str(worktree_path) if worktree_path is not None else None,
+                    "failure_reason": result.failure_reason,
+                    "preflight_result": result.model_dump(mode="json"),
+                    "options": ["manual_commit_and_retry", "escalate"],
+                },
+                recommended_action="manual_commit_and_retry",
+                risk_level="medium",
+            )
+            try:
+                await complete_merge(db, story_id, success=False)
+            except Exception:
+                logger.exception("merge_preflight_mark_failed_failed", story_id=story_id)
+            await set_current_merge_story(db, None)
+        finally:
+            await db.close()
+
+        logger.warning(
+            "merge_preflight_blocked",
+            story_id=story_id,
+            failure_reason=result.failure_reason,
+            base_ref=result.base_ref,
+        )
+
     async def _execute_merge(self, story_id: str) -> None:
         """执行完整 merge 流程。"""
         from ato.models.db import get_connection, mark_regression_dispatched
+
+        gate_passed = await self._run_pre_merge_gate(story_id)
+        if not gate_passed:
+            return
 
         # Step 1: Rebase worktree onto main
         logger.info("merge_rebase_started", story_id=story_id)

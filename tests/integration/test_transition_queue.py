@@ -6,9 +6,10 @@ import asyncio
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from ato.models.db import get_connection, get_story, insert_story
-from ato.models.schemas import StoryRecord, TransitionEvent
+from ato.models.schemas import StoryRecord, TransitionEvent, WorktreePreflightResult
 from ato.nudge import Nudge
 from ato.transition_queue import TransitionQueue
 
@@ -65,6 +66,23 @@ async def _read_story(db_path: Path, story_id: str) -> StoryRecord | None:
         return await get_story(db, story_id)
     finally:
         await db.close()
+
+
+def _preflight_pass(story_id: str, gate_type: str) -> WorktreePreflightResult:
+    return WorktreePreflightResult.model_validate(
+        {
+            "story_id": story_id,
+            "gate_type": gate_type,
+            "passed": True,
+            "base_ref": "main",
+            "base_sha": "base",
+            "head_sha": "head",
+            "porcelain_output": "",
+            "diffstat": " file.py | 1 +\n",
+            "changed_files": ["file.py"],
+            "checked_at": datetime.now(UTC),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -217,18 +235,23 @@ class TestEndToEnd:
             ("dev_done", "reviewing", "review"),
         ]
 
-        for event_name, expected_phase, expected_status in transitions:
-            await tq.submit(_evt("e2e", event_name))
-            await tq._queue.join()
+        with patch(
+            "ato.worktree_mgr.WorktreeManager.preflight_check",
+            new=AsyncMock(side_effect=_preflight_pass),
+        ):
+            for event_name, expected_phase, expected_status in transitions:
+                await tq.submit(_evt("e2e", event_name))
+                await tq._queue.join()
 
-            story = await _read_story(initialized_db_path, "e2e")
-            assert story is not None, f"Story not found after {event_name}"
-            assert story.current_phase == expected_phase, (
-                f"After {event_name}: expected phase={expected_phase}, got {story.current_phase}"
-            )
-            assert story.status == expected_status, (
-                f"After {event_name}: expected status={expected_status}, got {story.status}"
-            )
+                story = await _read_story(initialized_db_path, "e2e")
+                assert story is not None, f"Story not found after {event_name}"
+                assert story.current_phase == expected_phase, (
+                    f"After {event_name}: expected phase={expected_phase}, "
+                    f"got {story.current_phase}"
+                )
+                assert story.status == expected_status, (
+                    f"After {event_name}: expected status={expected_status}, got {story.status}"
+                )
 
         await tq.stop()
 
@@ -246,8 +269,12 @@ class TestEndToEnd:
         assert story is not None
         assert story.current_phase == "fixing"
 
-        await tq.submit(_evt("cl", "fix_done"))
-        await tq._queue.join()
+        with patch(
+            "ato.worktree_mgr.WorktreeManager.preflight_check",
+            new=AsyncMock(side_effect=_preflight_pass),
+        ):
+            await tq.submit(_evt("cl", "fix_done"))
+            await tq._queue.join()
 
         story = await _read_story(initialized_db_path, "cl")
         assert story is not None

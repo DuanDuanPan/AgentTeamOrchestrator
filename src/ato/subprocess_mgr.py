@@ -19,7 +19,7 @@ from typing import Any, Literal
 import structlog
 import structlog.contextvars
 
-from ato.adapters.base import BaseAdapter
+from ato.adapters.base import BaseAdapter, cleanup_process
 from ato.models.schemas import (
     AdapterResult,
     ClaudeOutput,
@@ -29,6 +29,7 @@ from ato.models.schemas import (
     ProgressCallback,
     ProgressEvent,
     TaskRecord,
+    WorktreeFinalizeResult,
 )
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
@@ -40,6 +41,9 @@ _SIDECAR_WAIT_TIMEOUT = 30
 
 _SIDECAR_POLL_INTERVAL = 0.5
 """轮询 sidecar 文件的间隔秒数。"""
+
+_FINALIZE_GIT_TIMEOUT = 30
+"""Finalize 结果验证 git 命令超时时间。"""
 
 
 def _launch_terminal_session(
@@ -499,6 +503,168 @@ class SubprocessManager:
         assert last_exc is not None
         raise last_exc
 
+    async def dispatch_finalize(
+        self,
+        story_id: str,
+        worktree_path: str,
+        story_summary: str,
+        *,
+        dirty_files: list[str] | None = None,
+    ) -> WorktreeFinalizeResult:
+        """Dispatch a single finalize agent and verify the result with local git commands."""
+        pre_rc, pre_head_out, pre_err = await self._run_finalize_git(
+            worktree_path,
+            "rev-parse",
+            "HEAD",
+        )
+        pre_head = pre_head_out.strip() if pre_rc == 0 else None
+        if pre_head is None:
+            return WorktreeFinalizeResult.model_validate(
+                {
+                    "story_id": story_id,
+                    "committed": False,
+                    "pre_head_sha": None,
+                    "error": f"git rev-parse HEAD failed before finalize: {pre_err}",
+                }
+            )
+
+        dirty_block = "\n".join(f"- {path}" for path in (dirty_files or []))
+        if not dirty_block:
+            dirty_block = "- None reported"
+
+        prompt = f"""\
+You are finalizing the story worktree before an ATO boundary gate.
+
+Story: {story_id}
+Summary: {story_summary}
+Worktree: {worktree_path}
+
+Dirty files reported by the preflight gate:
+{dirty_block}
+
+## Required Outcome
+Commit all legitimate story worktree changes so `git status --porcelain=v1 -uall`
+is empty and the story branch has a non-empty committed diff against main.
+
+## Allowed Git-Mutating Commands
+- git add -A
+- git commit
+
+## Forbidden Commands
+Do NOT run git reset, git checkout, git switch, git stash, git clean, git rebase,
+or git merge.
+
+The commit message MUST start with `{story_id}: `.
+Do not edit files except if needed to fix clearly broken generated artifacts introduced
+by this finalize attempt. The normal path is commit only.
+"""
+
+        dispatch_error: str | None = None
+        try:
+            await self.dispatch_with_retry(
+                story_id=story_id,
+                phase="worktree_finalize",
+                role="developer",
+                cli_tool="claude",
+                prompt=prompt,
+                options={"cwd": worktree_path, "max_turns": 3},
+                max_retries=0,
+            )
+        except CLIAdapterError as exc:
+            dispatch_error = str(exc)
+
+        post_rc, post_head_out, post_err = await self._run_finalize_git(
+            worktree_path,
+            "rev-parse",
+            "HEAD",
+        )
+        post_head = post_head_out.strip() if post_rc == 0 else None
+        if post_head is None:
+            return WorktreeFinalizeResult.model_validate(
+                {
+                    "story_id": story_id,
+                    "committed": False,
+                    "pre_head_sha": pre_head,
+                    "post_head_sha": None,
+                    "error": (
+                        dispatch_error or f"git rev-parse HEAD failed after finalize: {post_err}"
+                    ),
+                }
+            )
+
+        committed = pre_head != post_head
+        commit_message: str | None = None
+        files_changed: list[str] = []
+        if committed:
+            msg_rc, msg_out, msg_err = await self._run_finalize_git(
+                worktree_path,
+                "log",
+                "-1",
+                "--pretty=%B",
+            )
+            if msg_rc == 0:
+                commit_message = msg_out.strip()
+            elif dispatch_error is None:
+                dispatch_error = f"git log -1 --pretty=%B failed: {msg_err}"
+
+            diff_rc, diff_out, diff_err = await self._run_finalize_git(
+                worktree_path,
+                "diff",
+                "--name-only",
+                f"{pre_head}..{post_head}",
+            )
+            if diff_rc == 0:
+                files_changed = [line for line in diff_out.splitlines() if line]
+            elif dispatch_error is None:
+                dispatch_error = f"git diff --name-only {pre_head}..{post_head} failed: {diff_err}"
+
+        return WorktreeFinalizeResult.model_validate(
+            {
+                "story_id": story_id,
+                "committed": committed,
+                "pre_head_sha": pre_head,
+                "post_head_sha": post_head,
+                "commit_sha": post_head if committed else None,
+                "commit_message": commit_message,
+                "files_changed": files_changed,
+                "error": dispatch_error,
+            }
+        )
+
+    async def _run_finalize_git(
+        self,
+        worktree_path: str,
+        *args: str,
+    ) -> tuple[int, str, str]:
+        """Run a git command in a finalize worktree for result verification."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=worktree_path,
+            )
+        except OSError as exc:
+            return 127, "", str(exc)
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=_FINALIZE_GIT_TIMEOUT,
+            )
+        except TimeoutError:
+            await cleanup_process(proc)
+            return 124, "", f"git {' '.join(args)} timed out"
+        finally:
+            await cleanup_process(proc)
+
+        return (
+            proc.returncode or 0,
+            stdout_bytes.decode() if stdout_bytes else "",
+            stderr_bytes.decode() if stderr_bytes else "",
+        )
+
     async def dispatch_group(
         self,
         *,
@@ -614,9 +780,7 @@ class SubprocessManager:
 
             # 会话完成：先持久化主 task 的结果和成本
             completed_at = datetime.now(tz=UTC)
-            per_story_cost = (
-                result.cost_usd / len(tasks) if result.cost_usd else 0.0
-            )
+            per_story_cost = result.cost_usd / len(tasks) if result.cost_usd else 0.0
             for t in tasks:
                 db = await get_connection(self._db_path)
                 try:

@@ -8,6 +8,7 @@ import os
 import signal
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1808,6 +1809,57 @@ class TestMergeAuthorizationCreation:
             recovery_story_id="s1",
         )
 
+    async def test_pending_preflight_failure_blocks_new_merge_authorization(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """等待 preflight_failure 人工处理时不应再创建新的 merge_authorization。"""
+        from ato.approval_helpers import create_approval
+        from ato.models.db import get_connection, get_pending_approvals, insert_story
+        from ato.models.schemas import StoryRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-preflight-blocked-auth",
+                    title="Blocked Auth Story",
+                    status="in_progress",
+                    current_phase="merging",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            await create_approval(
+                db,
+                story_id="s-preflight-blocked-auth",
+                approval_type="preflight_failure",
+                payload_dict={
+                    "gate_type": "pre_merge",
+                    "failure_reason": "EMPTY_DIFF",
+                    "options": ["manual_commit_and_retry", "escalate"],
+                },
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._merge_queue = MagicMock()
+        orchestrator._nudge = MagicMock()
+
+        await orchestrator._create_merge_authorizations()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            merge_auths = [a for a in pending if a.approval_type == "merge_authorization"]
+            assert merge_auths == []
+        finally:
+            await db.close()
+
 
 class TestMergeAuthorizationConsumption:
     """merge_authorization 消费测试。"""
@@ -1857,6 +1909,143 @@ class TestMergeAuthorizationConsumption:
         )
 
         result = await orchestrator._handle_approval_decision(approval)
+        assert result is True
+        orchestrator._tq.submit.assert_awaited_once()
+        event = orchestrator._tq.submit.call_args[0][0]
+        assert event.event_name == "escalate"
+
+
+class TestPreflightFailureApprovalConsumption:
+    """preflight_failure approval 决策处理。"""
+
+    async def test_manual_commit_retry_pre_review_resubmits_retry_event(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        from ato.models.schemas import ApprovalRecord
+
+        now = datetime.now(tz=UTC)
+        orchestrator = Orchestrator(settings=_make_settings(), db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+        payload = json.dumps({"gate_type": "pre_review", "retry_event": "dev_done"})
+        approval = ApprovalRecord(
+            approval_id="appr-pre-review",
+            story_id="s1",
+            approval_type="preflight_failure",
+            status="approved",
+            decision="manual_commit_and_retry",
+            payload=payload,
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+
+        assert result is True
+        orchestrator._tq.submit.assert_awaited_once()
+        event = orchestrator._tq.submit.call_args[0][0]
+        assert event.story_id == "s1"
+        assert event.event_name == "dev_done"
+        assert event.source == "cli"
+
+    async def test_manual_commit_retry_pre_review_consumes_when_retry_blocks_again(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        from ato.models.schemas import ApprovalRecord, StateTransitionError, TransitionEvent
+
+        now = datetime.now(tz=UTC)
+        orchestrator = Orchestrator(settings=_make_settings(), db_path=initialized_db_path)
+
+        class BlockingTransitionQueue:
+            def __init__(self) -> None:
+                self.event: object | None = None
+                self.timeout_seconds: float | None = None
+
+            async def submit_and_wait(
+                self,
+                event: object,
+                *,
+                timeout_seconds: float = 5.0,
+            ) -> str:
+                self.event = event
+                self.timeout_seconds = timeout_seconds
+                raise StateTransitionError("blocked again")
+
+            async def submit(self, event: object) -> None:
+                raise AssertionError("submit should not be used when submit_and_wait exists")
+
+        tq = BlockingTransitionQueue()
+        orchestrator._tq = cast(Any, tq)
+        payload = json.dumps({"gate_type": "pre_review", "retry_event": "fix_done"})
+        approval = ApprovalRecord(
+            approval_id="appr-pre-review-no-wait",
+            story_id="s1",
+            approval_type="preflight_failure",
+            status="approved",
+            decision="manual_commit_and_retry",
+            payload=payload,
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+
+        assert result is True
+        event = tq.event
+        assert event is not None
+        assert isinstance(event, TransitionEvent)
+        assert event.event_name == "fix_done"
+        assert tq.timeout_seconds == float(orchestrator._settings.timeout.structured_job)
+
+    async def test_manual_commit_retry_pre_merge_reenqueues_merge(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        from ato.models.schemas import ApprovalRecord
+
+        now = datetime.now(tz=UTC)
+        orchestrator = Orchestrator(settings=_make_settings(), db_path=initialized_db_path)
+        orchestrator._merge_queue = AsyncMock()
+        payload = json.dumps({"gate_type": "pre_merge", "retry_event": "merge_queue_retry"})
+        approval = ApprovalRecord(
+            approval_id="appr-pre-merge",
+            story_id="s1",
+            approval_type="preflight_failure",
+            status="approved",
+            decision="manual_commit_and_retry",
+            payload=payload,
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+
+        assert result is True
+        orchestrator._merge_queue.enqueue.assert_awaited_once_with("s1", "appr-pre-merge", now)
+
+    async def test_preflight_failure_escalate_submits_escalate(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        from ato.models.schemas import ApprovalRecord
+
+        now = datetime.now(tz=UTC)
+        orchestrator = Orchestrator(settings=_make_settings(), db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+        approval = ApprovalRecord(
+            approval_id="appr-preflight-escalate",
+            story_id="s1",
+            approval_type="preflight_failure",
+            status="approved",
+            decision="escalate",
+            payload=json.dumps({"gate_type": "pre_review"}),
+            decided_at=now,
+            created_at=now,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+
         assert result is True
         orchestrator._tq.submit.assert_awaited_once()
         event = orchestrator._tq.submit.call_args[0][0]

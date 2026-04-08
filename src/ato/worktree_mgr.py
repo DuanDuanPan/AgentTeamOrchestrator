@@ -8,12 +8,18 @@ WorktreeManager 管理 git 基础设施（worktree 生命周期），
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
 
 from ato.adapters.base import cleanup_process
-from ato.models.schemas import WorktreeError
+from ato.models.schemas import (
+    WorktreeError,
+    WorktreeGateType,
+    WorktreePreflightFailureReason,
+    WorktreePreflightResult,
+)
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
@@ -299,27 +305,11 @@ class WorktreeManager:
 
         timeout = timeout_seconds or _GIT_TIMEOUT_SECONDS
 
-        # fetch latest main (if remote exists)
-        fetch_rc, _fetch_out, fetch_err = await self._run_git(
-            "-C",
-            str(worktree_path),
-            "fetch",
-            "origin",
-            "main",
+        rebase_target = await self._resolve_pre_merge_base_ref(
+            worktree_path,
+            story_id=story_id,
             timeout_seconds=timeout,
         )
-        # fetch 成功 → rebase origin/main（最新远端）
-        # fetch 失败 → 回退到本地 main（本地仓库或网络问题）
-        if fetch_rc != 0:
-            logger.warning(
-                "merge_fetch_main_failed",
-                story_id=story_id,
-                stderr=fetch_err,
-                note="Falling back to local main branch",
-            )
-            rebase_target = "main"
-        else:
-            rebase_target = "origin/main"
 
         # rebase onto target
         returncode, stdout, stderr = await self._run_git(
@@ -337,6 +327,160 @@ class WorktreeManager:
             return False, combined
 
         return True, ""
+
+    async def preflight_check(
+        self,
+        story_id: str,
+        gate_type: WorktreeGateType,
+    ) -> WorktreePreflightResult:
+        """检查 worktree 边界是否可推进。
+
+        Fail-closed：缺失 worktree、git 命令异常、base/head 解析失败均返回
+        ``passed=False``，不会抛给正常业务路径。
+        """
+        worktree_path = await self.get_path(story_id)
+        base_ref = self._default_base_ref(gate_type)
+
+        if worktree_path is None or not worktree_path.exists() or not worktree_path.is_dir():
+            result = self._make_preflight_result(
+                story_id=story_id,
+                gate_type=gate_type,
+                passed=False,
+                base_ref=base_ref,
+                failure_reason="NO_WORKTREE",
+                error_output=(
+                    f"No worktree directory found for story '{story_id}'"
+                    if worktree_path is None
+                    else f"Worktree path does not exist: {worktree_path}"
+                ),
+            )
+            self._log_preflight_result(result)
+            return result
+
+        try:
+            base_ref = await self._resolve_preflight_base_ref(
+                worktree_path,
+                gate_type,
+                story_id=story_id,
+            )
+
+            status_rc, porcelain_output, status_err = await self._run_git_in_worktree(
+                worktree_path,
+                "status",
+                "--porcelain=v1",
+                "-uall",
+            )
+            if status_rc != 0:
+                return self._git_error_result(
+                    story_id,
+                    gate_type,
+                    base_ref,
+                    error_output=status_err,
+                    command="git status --porcelain=v1 -uall",
+                )
+
+            head_rc, head_stdout, head_err = await self._run_git_in_worktree(
+                worktree_path,
+                "rev-parse",
+                "HEAD",
+            )
+            if head_rc != 0:
+                return self._git_error_result(
+                    story_id,
+                    gate_type,
+                    base_ref,
+                    error_output=head_err,
+                    command="git rev-parse HEAD",
+                    porcelain_output=porcelain_output,
+                )
+            head_sha = head_stdout.strip()
+
+            base_rc, base_stdout, base_err = await self._run_git_in_worktree(
+                worktree_path,
+                "rev-parse",
+                base_ref,
+            )
+            if base_rc != 0:
+                return self._git_error_result(
+                    story_id,
+                    gate_type,
+                    base_ref,
+                    error_output=base_err,
+                    command=f"git rev-parse {base_ref}",
+                    head_sha=head_sha,
+                    porcelain_output=porcelain_output,
+                )
+            base_sha = base_stdout.strip()
+
+            diffstat_rc, diffstat, diffstat_err = await self._run_git_in_worktree(
+                worktree_path,
+                "diff",
+                "--stat",
+                f"{base_ref}...HEAD",
+            )
+            if diffstat_rc != 0:
+                return self._git_error_result(
+                    story_id,
+                    gate_type,
+                    base_ref,
+                    error_output=diffstat_err,
+                    command=f"git diff --stat {base_ref}...HEAD",
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    porcelain_output=porcelain_output,
+                )
+
+            changed_rc, changed_stdout, changed_err = await self._run_git_in_worktree(
+                worktree_path,
+                "diff",
+                "--name-only",
+                f"{base_ref}...HEAD",
+            )
+            if changed_rc != 0:
+                return self._git_error_result(
+                    story_id,
+                    gate_type,
+                    base_ref,
+                    error_output=changed_err,
+                    command=f"git diff --name-only {base_ref}...HEAD",
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    porcelain_output=porcelain_output,
+                    diffstat=diffstat,
+                )
+
+            changed_files = [line for line in changed_stdout.splitlines() if line]
+            failure_reason: WorktreePreflightFailureReason | None = None
+            if porcelain_output.strip():
+                failure_reason = "UNCOMMITTED_CHANGES"
+            elif not changed_files:
+                failure_reason = "EMPTY_DIFF"
+
+            result = self._make_preflight_result(
+                story_id=story_id,
+                gate_type=gate_type,
+                passed=failure_reason is None,
+                base_ref=base_ref,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                porcelain_output=porcelain_output,
+                diffstat=diffstat,
+                changed_files=changed_files,
+                failure_reason=failure_reason,
+            )
+            self._log_preflight_result(result)
+            return result
+        except Exception as exc:
+            result = self._make_preflight_result(
+                story_id=story_id,
+                gate_type=gate_type,
+                passed=False,
+                base_ref=base_ref,
+                failure_reason="GIT_ERROR",
+                error_output=str(exc),
+            )
+            self._log_preflight_result(result)
+            return result
 
     async def continue_rebase(self, story_id: str) -> tuple[bool, str]:
         """在 worktree 中执行 git rebase --continue。
@@ -482,6 +626,133 @@ class WorktreeManager:
             proc.returncode or 0,
             stdout_bytes.decode() if stdout_bytes else "",
             stderr_bytes.decode() if stderr_bytes else "",
+        )
+
+    async def _run_git_in_worktree(
+        self,
+        worktree_path: Path,
+        *args: str,
+        timeout_seconds: int | None = None,
+    ) -> tuple[int, str, str]:
+        """在指定 story worktree 中执行 git 命令。"""
+        return await self._run_git(
+            "-C",
+            str(worktree_path),
+            *args,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _default_base_ref(self, gate_type: WorktreeGateType) -> str:
+        if gate_type == "pre_review":
+            return "main"
+        return "origin/main"
+
+    async def _resolve_preflight_base_ref(
+        self,
+        worktree_path: Path,
+        gate_type: WorktreeGateType,
+        *,
+        story_id: str,
+    ) -> str:
+        if gate_type == "pre_review":
+            return "main"
+        return await self._resolve_pre_merge_base_ref(worktree_path, story_id=story_id)
+
+    async def _resolve_pre_merge_base_ref(
+        self,
+        worktree_path: Path,
+        *,
+        story_id: str,
+        timeout_seconds: int | None = None,
+    ) -> str:
+        """Resolve the pre-merge base ref using the same fetch/fallback policy as rebase."""
+        fetch_rc, _fetch_out, fetch_err = await self._run_git_in_worktree(
+            worktree_path,
+            "fetch",
+            "origin",
+            "main",
+            timeout_seconds=timeout_seconds,
+        )
+        if fetch_rc != 0:
+            logger.warning(
+                "merge_fetch_main_failed",
+                story_id=story_id,
+                stderr=fetch_err,
+                note="Falling back to local main branch",
+            )
+            return "main"
+        return "origin/main"
+
+    def _make_preflight_result(
+        self,
+        *,
+        story_id: str,
+        gate_type: WorktreeGateType,
+        passed: bool,
+        base_ref: str,
+        base_sha: str | None = None,
+        head_sha: str | None = None,
+        porcelain_output: str = "",
+        diffstat: str = "",
+        changed_files: list[str] | None = None,
+        failure_reason: WorktreePreflightFailureReason | None = None,
+        error_output: str | None = None,
+    ) -> WorktreePreflightResult:
+        return WorktreePreflightResult.model_validate(
+            {
+                "story_id": story_id,
+                "gate_type": gate_type,
+                "passed": passed,
+                "base_ref": base_ref,
+                "base_sha": base_sha,
+                "head_sha": head_sha,
+                "porcelain_output": porcelain_output,
+                "diffstat": diffstat,
+                "changed_files": changed_files or [],
+                "failure_reason": failure_reason,
+                "error_output": error_output,
+                "checked_at": datetime.now(tz=UTC),
+            }
+        )
+
+    def _git_error_result(
+        self,
+        story_id: str,
+        gate_type: WorktreeGateType,
+        base_ref: str,
+        *,
+        error_output: str,
+        command: str,
+        base_sha: str | None = None,
+        head_sha: str | None = None,
+        porcelain_output: str = "",
+        diffstat: str = "",
+    ) -> WorktreePreflightResult:
+        result = self._make_preflight_result(
+            story_id=story_id,
+            gate_type=gate_type,
+            passed=False,
+            base_ref=base_ref,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            porcelain_output=porcelain_output,
+            diffstat=diffstat,
+            failure_reason="GIT_ERROR",
+            error_output=f"{command} failed: {error_output}".strip(),
+        )
+        self._log_preflight_result(result)
+        return result
+
+    def _log_preflight_result(self, result: WorktreePreflightResult) -> None:
+        logger.info(
+            "worktree_preflight_result",
+            story_id=result.story_id,
+            gate_type=result.gate_type,
+            passed=result.passed,
+            failure_reason=result.failure_reason,
+            base_ref=result.base_ref,
+            base_sha=result.base_sha,
+            head_sha=result.head_sha,
         )
 
     def _branch_meta_path(self, story_id: str) -> Path:

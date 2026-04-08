@@ -12,13 +12,13 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 12
+SCHEMA_VERSION: int = 13
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -38,6 +38,7 @@ ApprovalType = Literal[
     "batch_confirmation",
     "timeout",
     "needs_human_review",
+    "preflight_failure",
 ]
 """所有 approval 类型。"""
 
@@ -57,6 +58,7 @@ APPROVAL_TYPE_TO_NOTIFICATION: dict[str, NotificationLevel] = {
     "precommit_failure": "normal",
     "rebase_conflict": "normal",
     "needs_human_review": "normal",
+    "preflight_failure": "normal",
 }
 """approval_type → NotificationLevel 映射。"""
 
@@ -73,6 +75,7 @@ APPROVAL_RECOMMENDED_ACTIONS: dict[str, str] = {
     "precommit_failure": "retry",
     "rebase_conflict": "manual_resolve",
     "needs_human_review": "retry",
+    "preflight_failure": "manual_commit_and_retry",
 }
 """approval_type → 推荐操作映射。"""
 
@@ -89,6 +92,7 @@ APPROVAL_DEFAULT_VALID_OPTIONS: dict[str, list[str]] = {
     "precommit_failure": ["retry", "manual_fix", "skip"],
     "rebase_conflict": ["manual_resolve", "skip", "abandon"],
     "needs_human_review": ["retry", "skip", "escalate"],
+    "preflight_failure": ["manual_commit_and_retry", "escalate"],
 }
 """无 payload.options 时各 approval_type 的默认合法选项。"""
 
@@ -105,6 +109,7 @@ APPROVAL_TYPE_ICONS: dict[str, str] = {
     "precommit_failure": "🔧",
     "rebase_conflict": "⚡",
     "needs_human_review": "👁",
+    "preflight_failure": "🧭",
 }
 """approval_type → 展示图标映射。CLI 与 TUI 共享，避免 TUI 模块耦合。"""
 
@@ -242,6 +247,52 @@ class CheckResult(_StrictBase):
     check_item: str
     status: CheckStatus
     message: str
+
+
+# ---------------------------------------------------------------------------
+# Worktree boundary preflight / finalize 类型
+# ---------------------------------------------------------------------------
+
+WorktreeGateType = Literal["pre_review", "pre_merge"]
+"""Worktree 边界门控类型。"""
+
+WorktreePreflightFailureReason = Literal[
+    "NO_WORKTREE",
+    "UNCOMMITTED_CHANGES",
+    "EMPTY_DIFF",
+    "GIT_ERROR",
+]
+"""Worktree 边界门控失败原因。"""
+
+
+class WorktreePreflightResult(_StrictBase):
+    """worktree_preflight_results 表对应的审计模型。"""
+
+    story_id: str
+    gate_type: WorktreeGateType
+    passed: bool
+    base_ref: str
+    base_sha: str | None = None
+    head_sha: str | None = None
+    porcelain_output: str = ""
+    diffstat: str = ""
+    changed_files: list[str] = Field(default_factory=list)
+    failure_reason: WorktreePreflightFailureReason | None = None
+    error_output: str | None = None
+    checked_at: datetime
+
+
+class WorktreeFinalizeResult(_StrictBase):
+    """Finalize agent 执行后由本地 git 命令验证得到的结果。"""
+
+    story_id: str
+    committed: bool
+    pre_head_sha: str | None = None
+    post_head_sha: str | None = None
+    commit_sha: str | None = None
+    commit_message: str | None = None
+    files_changed: list[str] = Field(default_factory=list)
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------

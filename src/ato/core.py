@@ -31,6 +31,7 @@ from ato.models.schemas import (
     ApprovalRecord,
     ProgressCallback,
     RecoveryResult,
+    StateTransitionError,
     StoryRecord,
     TaskRecord,
     TransitionEvent,
@@ -2491,11 +2492,17 @@ class Orchestrator:
             stories_with_pending_auth = {
                 a.story_id for a in pending if a.approval_type == "merge_authorization"
             }
+            stories_with_pending_preflight = {
+                a.story_id for a in pending if a.approval_type == "preflight_failure"
+            }
 
             # 收集已有 decided 但未消费的 merge_authorization
             decided = await get_decided_unconsumed_approvals(db)
             stories_with_decided_auth = {
                 a.story_id for a in decided if a.approval_type == "merge_authorization"
+            }
+            stories_with_decided_preflight = {
+                a.story_id for a in decided if a.approval_type == "preflight_failure"
             }
 
             for story_id in merging_stories:
@@ -2510,6 +2517,10 @@ class Orchestrator:
                 if story_id in stories_with_pending_auth:
                     continue
                 if story_id in stories_with_decided_auth:
+                    continue
+                if story_id in stories_with_pending_preflight:
+                    continue
+                if story_id in stories_with_decided_preflight:
                     continue
                 # 跳过已在 merge queue 中的（failed 条目除外，允许重试）
                 entry = await get_merge_queue_entry(db, story_id)
@@ -2866,6 +2877,81 @@ class Orchestrator:
                 approval_id=approval.approval_id,
                 approval_type=atype,
                 decision=decision,
+            )
+            return False
+
+        if atype == "preflight_failure":
+            import json as _json
+
+            payload: dict[str, Any] = {}
+            if approval.payload:
+                try:
+                    loaded = _json.loads(approval.payload)
+                    if isinstance(loaded, dict):
+                        payload = loaded
+                except (ValueError, TypeError):
+                    payload = {}
+
+            gate_type = str(payload.get("gate_type", ""))
+            retry_event = str(payload.get("retry_event", ""))
+
+            if decision == "manual_commit_and_retry":
+                if gate_type == "pre_review" and retry_event:
+                    if self._tq is not None:
+                        event = TransitionEvent(
+                            story_id=approval.story_id,
+                            event_name=retry_event,
+                            source="cli",
+                            submitted_at=datetime.now(tz=UTC),
+                        )
+                        submit_and_wait = getattr(type(self._tq), "submit_and_wait", None)
+                        if callable(submit_and_wait):
+                            try:
+                                await self._tq.submit_and_wait(
+                                    event,
+                                    timeout_seconds=float(self._settings.timeout.structured_job),
+                                )
+                            except StateTransitionError:
+                                logger.info(
+                                    "preflight_failure_retry_blocked",
+                                    approval_id=approval.approval_id,
+                                    story_id=approval.story_id,
+                                    retry_event=retry_event,
+                                )
+                            except TimeoutError:
+                                logger.warning(
+                                    "preflight_failure_retry_timed_out",
+                                    approval_id=approval.approval_id,
+                                    story_id=approval.story_id,
+                                    retry_event=retry_event,
+                                )
+                        else:
+                            await self._tq.submit(event)
+                    return True
+                if gate_type == "pre_merge":
+                    if self._merge_queue is not None:
+                        await self._merge_queue.enqueue(
+                            approval.story_id,
+                            approval.approval_id,
+                            approval.decided_at or datetime.now(tz=UTC),
+                        )
+                    return True
+            if decision == "escalate":
+                if self._tq is not None:
+                    await self._submit_transition_event(
+                        story_id=approval.story_id,
+                        event_name="escalate",
+                        source="cli",
+                    )
+                return True
+
+            logger.warning(
+                "approval_unrecognized_decision",
+                approval_id=approval.approval_id,
+                approval_type=atype,
+                decision=decision,
+                gate_type=gate_type,
+                retry_event=retry_event,
             )
             return False
 

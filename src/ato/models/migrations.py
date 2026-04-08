@@ -317,6 +317,37 @@ async def _migrate_v11_to_v12(db: aiosqlite.Connection) -> None:
     await db.execute("UPDATE findings SET phase = 'reviewing' WHERE phase IS NULL OR phase = ''")
 
 
+@_register(13)
+async def _migrate_v12_to_v13(db: aiosqlite.Connection) -> None:
+    """v12 -> v13: 新增 worktree 边界 preflight 审计表。"""
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS worktree_preflight_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL,
+            gate_type TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            base_ref TEXT NOT NULL,
+            base_sha TEXT,
+            head_sha TEXT,
+            porcelain_output TEXT NOT NULL DEFAULT '',
+            diffstat TEXT NOT NULL DEFAULT '',
+            changed_files TEXT NOT NULL DEFAULT '[]',
+            failure_reason TEXT,
+            error_output TEXT,
+            checked_at TEXT NOT NULL
+        )"""
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_worktree_preflight_story "
+        "ON worktree_preflight_results(story_id)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_worktree_preflight_gate "
+        "ON worktree_preflight_results(story_id, gate_type, checked_at)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

@@ -4822,6 +4822,8 @@ class TestReviewPromptManifestInjection:
         assert "UX Design Context" in prompt
         assert "prototype.manifest.yaml" in prompt
         assert "Do not stop at a checkpoint" in prompt
+        assert "Review Preflight" in prompt
+        assert "git status --porcelain=v1 -uall" in prompt
         assert "git diff main...HEAD" in prompt
 
     async def test_rereview_prompt_includes_ux_context(
@@ -4871,6 +4873,8 @@ class TestReviewPromptManifestInjection:
         prompt = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
         assert "UX Design Context" in prompt
         assert "prototype.manifest.yaml" in prompt
+        assert "Review Preflight" in prompt
+        assert "git status --porcelain=v1 -uall" in prompt
 
 
 # ---------------------------------------------------------------------------

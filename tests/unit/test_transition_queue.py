@@ -5,15 +5,21 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ato.config import PhaseDefinition
 from ato.models.db import get_connection, get_story, insert_story
-from ato.models.schemas import StateTransitionError, StoryRecord, TransitionEvent
+from ato.models.schemas import (
+    StateTransitionError,
+    StoryRecord,
+    TransitionEvent,
+    WorktreePreflightResult,
+)
 from ato.nudge import Nudge
 from ato.state_machine import StoryLifecycle
-from ato.transition_queue import TransitionQueue, _replay_to_phase
+from ato.transition_queue import TransitionQueue, _gate_type_for_transition, _replay_to_phase
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,6 +44,7 @@ async def _insert_story_at_phase(
     story_id: str,
     phase: str,
     status: str = "in_progress",
+    worktree_path: str | None = None,
 ) -> None:
     """在 SQLite 中插入一个处于指定 phase 的 story。"""
     now = datetime.now(UTC)
@@ -46,6 +53,7 @@ async def _insert_story_at_phase(
         title=f"Test {story_id}",
         status=status,  # type: ignore[arg-type]
         current_phase=phase,
+        worktree_path=worktree_path,
         created_at=now,
         updated_at=now,
     )
@@ -55,6 +63,29 @@ async def _insert_story_at_phase(
         await db.commit()
     finally:
         await db.close()
+
+
+def _preflight_result(
+    story_id: str,
+    *,
+    passed: bool,
+    failure_reason: str | None = None,
+) -> WorktreePreflightResult:
+    return WorktreePreflightResult.model_validate(
+        {
+            "story_id": story_id,
+            "gate_type": "pre_review",
+            "passed": passed,
+            "base_ref": "main",
+            "base_sha": "base",
+            "head_sha": "head",
+            "porcelain_output": "?? dirty.py\n" if failure_reason else "",
+            "diffstat": " dirty.py | 1 +\n" if passed else "",
+            "changed_files": ["dirty.py"] if passed else [],
+            "failure_reason": failure_reason,
+            "checked_at": datetime.now(UTC),
+        }
+    )
 
 
 async def _read_story(db_path: Path, story_id: str) -> StoryRecord | None:
@@ -86,6 +117,21 @@ class TestTransitionEvent:
                 source="invalid",  # type: ignore[arg-type]
                 submitted_at=datetime.now(UTC),
             )
+
+
+# ---------------------------------------------------------------------------
+# Test: Worktree gate mapping
+# ---------------------------------------------------------------------------
+
+
+class TestWorktreeGateMapping:
+    def test_dev_done_and_fix_done_are_pre_review_gated(self) -> None:
+        assert _gate_type_for_transition("dev_done") == "pre_review"
+        assert _gate_type_for_transition("fix_done") == "pre_review"
+
+    def test_non_gated_event_returns_none(self) -> None:
+        assert _gate_type_for_transition("create_done") is None
+        assert _gate_type_for_transition("uat_pass") is None
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +318,84 @@ class TestTransitionQueueSubmitAndWait:
         assert story.current_phase == "qa_testing"
 
         await tq.stop()
+
+
+# ---------------------------------------------------------------------------
+# Test: pre-review worktree gate
+# ---------------------------------------------------------------------------
+
+
+class TestTransitionQueuePreReviewGate:
+    async def test_dev_done_preflight_pass_allows_transition(
+        self,
+        initialized_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await _insert_story_at_phase(
+            initialized_db_path,
+            "s-preflight-pass",
+            "developing",
+            worktree_path="/tmp/wt",
+        )
+
+        from ato.worktree_mgr import WorktreeManager
+
+        mock_preflight = AsyncMock(return_value=_preflight_result("s-preflight-pass", passed=True))
+        monkeypatch.setattr(WorktreeManager, "preflight_check", mock_preflight)
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            new_state = await tq.submit_and_wait(_make_event("s-preflight-pass", "dev_done"))
+        finally:
+            await tq.stop()
+
+        assert new_state == "reviewing"
+        story = await _read_story(initialized_db_path, "s-preflight-pass")
+        assert story is not None
+        assert story.current_phase == "reviewing"
+        mock_preflight.assert_awaited_once_with("s-preflight-pass", "pre_review")
+
+    async def test_dev_done_preflight_failure_creates_approval(
+        self,
+        initialized_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await _insert_story_at_phase(initialized_db_path, "s-preflight-fail", "developing")
+
+        from ato.worktree_mgr import WorktreeManager
+
+        mock_preflight = AsyncMock(
+            return_value=_preflight_result(
+                "s-preflight-fail",
+                passed=False,
+                failure_reason="UNCOMMITTED_CHANGES",
+            )
+        )
+        monkeypatch.setattr(WorktreeManager, "preflight_check", mock_preflight)
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+        try:
+            with pytest.raises(StateTransitionError, match="Worktree preflight blocked"):
+                await tq.submit_and_wait(_make_event("s-preflight-fail", "dev_done"))
+        finally:
+            await tq.stop()
+
+        from ato.models.db import get_pending_approvals
+
+        db = await get_connection(initialized_db_path)
+        try:
+            pending = await get_pending_approvals(db)
+            approvals = [a for a in pending if a.approval_type == "preflight_failure"]
+            assert len(approvals) == 1
+            assert approvals[0].recommended_action == "manual_commit_and_retry"
+        finally:
+            await db.close()
+
+        story = await _read_story(initialized_db_path, "s-preflight-fail")
+        assert story is not None
+        assert story.current_phase == "developing"
 
 
 # ---------------------------------------------------------------------------

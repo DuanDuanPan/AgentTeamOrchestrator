@@ -494,3 +494,63 @@ class TestMigrationV12:
                 ("f-qa", "qa_testing"),
                 ("f-review", "reviewing"),
             ]
+
+
+class TestMigrationV13:
+    """MIGRATIONS[13] — worktree_preflight_results 表。"""
+
+    async def test_migrate_v12_to_v13_creates_worktree_preflight_table(
+        self,
+        db_path: Path,
+    ) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, 12)
+
+            await run_migrations(db, 12, 13)
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='worktree_preflight_results'"
+            )
+            assert await cursor.fetchone() is not None
+
+            cursor = await db.execute("PRAGMA table_info(worktree_preflight_results)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            assert {
+                "story_id",
+                "gate_type",
+                "passed",
+                "base_ref",
+                "base_sha",
+                "head_sha",
+                "porcelain_output",
+                "diffstat",
+                "changed_files",
+                "failure_reason",
+                "error_output",
+                "checked_at",
+            } <= columns
+
+    async def test_worktree_preflight_table_coexists_with_system_preflight(
+        self,
+        db_path: Path,
+    ) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await run_migrations(db, 0, SCHEMA_VERSION)
+
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name IN ("
+                "'preflight_results', 'worktree_preflight_results') "
+                "ORDER BY name"
+            )
+            assert [row[0] for row in await cursor.fetchall()] == [
+                "preflight_results",
+                "worktree_preflight_results",
+            ]
