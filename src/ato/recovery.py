@@ -759,12 +759,20 @@ def _create_adapter(cli_tool: Literal["claude", "codex"]) -> BaseAdapter:
     return CodexAdapter()
 
 
-def _create_bmad_adapter() -> BmadAdapter:
-    """创建带 semantic fallback 的 BmadAdapter 实例。"""
+def _create_bmad_adapter(*, semantic_timeout: int | None = None) -> BmadAdapter:
+    """创建带 semantic fallback 的 BmadAdapter 实例。
+
+    Args:
+        semantic_timeout: semantic parser 超时秒数。
+            None 时使用 ClaudeSemanticParser 默认值。
+    """
     from ato.adapters.bmad_adapter import BmadAdapter
     from ato.adapters.semantic_parser import ClaudeSemanticParser
 
-    return BmadAdapter(semantic_runner=ClaudeSemanticParser())
+    kwargs: dict[str, int] = {}
+    if semantic_timeout is not None:
+        kwargs["timeout"] = semantic_timeout
+    return BmadAdapter(semantic_runner=ClaudeSemanticParser(**kwargs))
 
 
 class RecoveryEngine:
@@ -2101,7 +2109,12 @@ class RecoveryEngine:
             },
             db_path=self._db_path,
         )
-        bmad = _create_bmad_adapter()
+        _sem_timeout = (
+            self._settings.timeout.semantic_parser
+            if self._settings is not None
+            else None
+        )
+        bmad = _create_bmad_adapter(semantic_timeout=_sem_timeout)
         return ConvergentLoop(
             db_path=self._db_path,
             subprocess_mgr=mgr,
@@ -2717,7 +2730,12 @@ class RecoveryEngine:
                 )
 
                 # BMAD parse
-                bmad = _create_bmad_adapter()
+                _sem_t = (
+                    self._settings.timeout.semantic_parser
+                    if self._settings is not None
+                    else None
+                )
+                bmad = _create_bmad_adapter(semantic_timeout=_sem_t)
                 parse_result = await bmad.parse(
                     markdown_output=result.text_result,
                     skill_type=skill_type,
@@ -3071,6 +3089,14 @@ class RecoveryEngine:
                 )
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            # Story 10.3 AC2: transition ack timeout 不等于业务失败，
+            # consumer 可能稍后完成；不标记 dispatch failed。
+            logger.warning(
+                "recovery_transition_ack_timeout",
+                task_id=task.task_id,
+                story_id=task.story_id,
+            )
         except Exception:
             logger.exception(
                 "recovery_dispatch_error",

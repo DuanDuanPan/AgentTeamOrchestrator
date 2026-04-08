@@ -319,6 +319,34 @@ class TestTransitionQueueSubmitAndWait:
 
         await tq.stop()
 
+    async def test_submit_and_wait_timeout_does_not_cancel_future(
+        self, initialized_db_path: Path
+    ) -> None:
+        """Story 10.3 AC1: submit_and_wait timeout 不取消 completion future。"""
+        import asyncio
+
+        await _insert_story_at_phase(initialized_db_path, "s-slow", "queued", "backlog")
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        # Submit event that will eventually succeed, but wait with very short timeout
+        with pytest.raises(TimeoutError):
+            await tq.submit_and_wait(
+                _make_event("s-slow", "start_create"),
+                timeout_seconds=0.001,  # Very short timeout
+            )
+
+        # Give the consumer time to process the event
+        await asyncio.sleep(0.5)
+
+        # The transition should still have been committed by the consumer
+        story = await _read_story(initialized_db_path, "s-slow")
+        assert story is not None
+        assert story.current_phase == "creating"
+
+        await tq.stop()
+
 
 # ---------------------------------------------------------------------------
 # Test: pre-review worktree gate

@@ -3,6 +3,9 @@
 管理 story 级别的 git worktree 创建、清理与查询。
 WorktreeManager 管理 git 基础设施（worktree 生命周期），
 与 SubprocessManager（管理 agent CLI 调度）职责分离。
+
+Story 10.5 AC3: `dirty_files_from_porcelain` 是共享 helper，
+transition_queue 和 merge_queue 均从此模块导入。
 """
 
 from __future__ import annotations
@@ -22,6 +25,30 @@ from ato.models.schemas import (
 )
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Shared porcelain parser (Story 10.5 AC3)
+# ---------------------------------------------------------------------------
+
+
+def dirty_files_from_porcelain(porcelain_output: str) -> list[str]:
+    """Extract file paths from ``git status --porcelain=v1`` output.
+
+    Handles renames (``R  old -> new``), untracked files, paths with spaces,
+    empty lines, and malformed short lines.
+    """
+    files: list[str] = []
+    for line in porcelain_output.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path:
+            files.append(path)
+    return files
+
 
 WORKTREE_BASE = ".worktrees"
 """Worktree 存放子目录名（相对于 project_root）。"""

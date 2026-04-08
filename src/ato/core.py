@@ -2898,6 +2898,24 @@ class Orchestrator:
             if decision == "manual_commit_and_retry":
                 if gate_type == "pre_review" and retry_event:
                     if self._tq is not None:
+                        # Story 10.3 AC4: 检查当前 phase，blocked 时不提交非法 transition
+                        from ato.models.db import get_story
+
+                        db_check = await get_connection(self._db_path)
+                        try:
+                            story = await get_story(db_check, approval.story_id)
+                        finally:
+                            await db_check.close()
+                        if story is not None and story.current_phase == "blocked":
+                            logger.warning(
+                                "preflight_retry_blocked_phase",
+                                approval_id=approval.approval_id,
+                                story_id=approval.story_id,
+                                current_phase="blocked",
+                                retry_event=retry_event,
+                            )
+                            return False  # AC4: 不消费 approval
+
                         event = TransitionEvent(
                             story_id=approval.story_id,
                             event_name=retry_event,
@@ -2912,12 +2930,14 @@ class Orchestrator:
                                     timeout_seconds=float(self._settings.timeout.structured_job),
                                 )
                             except StateTransitionError:
-                                logger.info(
+                                logger.warning(
                                     "preflight_failure_retry_blocked",
                                     approval_id=approval.approval_id,
                                     story_id=approval.story_id,
                                     retry_event=retry_event,
                                 )
+                                # AC5: transition 失败 → 不消费 approval
+                                return False
                             except TimeoutError:
                                 logger.warning(
                                     "preflight_failure_retry_timed_out",
@@ -2925,6 +2945,8 @@ class Orchestrator:
                                     story_id=approval.story_id,
                                     retry_event=retry_event,
                                 )
+                                # AC5: timeout → 不消费 approval
+                                return False
                         else:
                             await self._tq.submit(event)
                     return True

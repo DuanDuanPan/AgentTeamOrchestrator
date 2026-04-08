@@ -394,12 +394,15 @@ class TestClaudeAdapterStreaming:
         error_events = [e for e in events_received if e.event_type == "error"]
         assert len(error_events) == 1
 
-    async def test_stream_error_emits_error_event(self) -> None:
-        """AC 13: 非零退出码 → on_progress 收到 error 事件。"""
-        # Send a result event so _consume_stream doesn't raise PARSE_ERROR
-        result_line = json.dumps({"type": "result", "total_cost_usd": 0.0}).encode() + b"\n"
+    async def test_stream_error_emits_error_event_no_result(self) -> None:
+        """AC 13: 无 result + 非零退出码 → on_progress 收到 error 事件。
+
+        Note: Story 10.2 result-first semantics 要求 result 存在时不报错，
+        所以本测试改为无 result 场景验证 error event 发送。
+        """
+        init_line = json.dumps({"type": "system", "session_id": "s1"}).encode() + b"\n"
         proc = _mock_stream_process(
-            [result_line],
+            [init_line],
             stderr_data=b"Error: auth token expired",
             returncode=1,
         )
@@ -496,3 +499,106 @@ class TestCleanupProcess:
         await cleanup_process(proc, timeout=0)
         proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Story 10.2: Result-First Semantics
+# ---------------------------------------------------------------------------
+
+
+class TestResultFirstSemantics:
+    """AC1-AC5: result 存在时优先于 process exit code。"""
+
+    async def test_result_with_nonzero_exit_returns_success(
+        self, stream_success_lines: list[bytes]
+    ) -> None:
+        """AC1+AC3: result 存在 + exit_code=1 → 返回 success ClaudeOutput。"""
+        proc = _mock_stream_process(
+            stream_success_lines,
+            stderr_data=b"",
+            returncode=1,
+        )
+        adapter = ClaudeAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await adapter.execute("test")
+
+        assert isinstance(result, ClaudeOutput)
+        assert result.status == "success"
+        assert result.exit_code == 0  # AC3: 业务 exit_code 应为 0
+        assert result.cost_usd == pytest.approx(0.0125)
+        assert result.text_result is not None
+        assert len(result.text_result) > 0
+
+    async def test_result_with_nonzero_exit_logs_warning(
+        self, stream_success_lines: list[bytes]
+    ) -> None:
+        """AC1: result+exit_code=1 时记录 warning。"""
+        proc = _mock_stream_process(
+            stream_success_lines,
+            stderr_data=b"some stderr noise",
+            returncode=1,
+        )
+        adapter = ClaudeAdapter()
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            patch("ato.adapters.claude_cli.logger") as mock_logger,
+        ):
+            result = await adapter.execute("test")
+
+        assert result.status == "success"
+        mock_logger.warning.assert_any_call(
+            "claude_nonzero_exit_with_result",
+            exit_code=1,
+            stderr_preview="some stderr noise",
+            session_id=result.session_id,
+            cost_usd=result.cost_usd,
+        )
+
+    async def test_no_result_nonzero_exit_still_errors(self) -> None:
+        """AC2: 无 result + exit_code=1 → 仍抛 CLIAdapterError。"""
+        lines = [
+            json.dumps({"type": "system", "session_id": "s1"}).encode() + b"\n",
+        ]
+        proc = _mock_stream_process(lines, stderr_data=b"segfault", returncode=1)
+        adapter = ClaudeAdapter()
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            pytest.raises(CLIAdapterError) as exc_info,
+        ):
+            await adapter.execute("test")
+        assert exc_info.value.exit_code == 1
+
+    async def test_result_with_stderr_uses_result_not_stderr(
+        self, stream_success_lines: list[bytes]
+    ) -> None:
+        """AC4: stderr 不覆盖有效 result，text_result 来自 result envelope。"""
+        proc = _mock_stream_process(
+            stream_success_lines,
+            stderr_data=b"WARNING: something happened",
+            returncode=1,
+        )
+        adapter = ClaudeAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await adapter.execute("test")
+
+        # text_result 应来自 stream result，不是 stderr
+        assert "WARNING" not in (result.text_result or "")
+        assert result.input_tokens == 1024
+        assert result.output_tokens == 256
+
+    async def test_result_with_nonzero_exit_emits_no_error_event(
+        self, stream_success_lines: list[bytes]
+    ) -> None:
+        """AC5: result 存在时不发 error 类型的 progress event。"""
+        proc = _mock_stream_process(stream_success_lines, returncode=1)
+        events_received: list[ProgressEvent] = []
+
+        async def on_progress(event: ProgressEvent) -> None:
+            events_received.append(event)
+
+        adapter = ClaudeAdapter()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            await adapter.execute("test", on_progress=on_progress)
+
+        error_events = [e for e in events_received if e.event_type == "error"]
+        assert len(error_events) == 0

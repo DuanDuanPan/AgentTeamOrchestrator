@@ -241,17 +241,13 @@ async def _snapshot_workspace_changes(repo_root: Path) -> set[str]:
 
 
 def _dirty_files_from_porcelain(porcelain_output: str) -> list[str]:
-    """Extract file paths from git status --porcelain=v1 output for finalize context."""
-    files: list[str] = []
-    for line in porcelain_output.splitlines():
-        if len(line) < 4:
-            continue
-        path = line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        if path:
-            files.append(path)
-    return files
+    """Extract file paths from git status --porcelain=v1 output for finalize context.
+
+    Delegates to shared helper in worktree_mgr (Story 10.5 AC3).
+    """
+    from ato.worktree_mgr import dirty_files_from_porcelain
+
+    return dirty_files_from_porcelain(porcelain_output)
 
 
 class MergeQueue:
@@ -591,6 +587,8 @@ class MergeQueue:
         """Run pre-merge worktree boundary gate before rebase/merge."""
         from ato.models.db import get_connection, save_worktree_preflight_result
 
+        # Story 10.5 AC4: 防御性初始化 second_result
+        second_result: WorktreePreflightResult | None = None
         db = await get_connection(self._db_path)
         try:
             first_result = await self._worktree_mgr.preflight_check(story_id, "pre_merge")
@@ -611,6 +609,13 @@ class MergeQueue:
         finally:
             await db.close()
 
+        # AC4: 若 second_result 未赋值（异常 unwind），fail closed
+        if second_result is None:
+            logger.error(
+                "merge_preflight_second_result_unbound",
+                story_id=story_id,
+            )
+            second_result = first_result
         await self._block_pre_merge_for_preflight_failure(story_id, second_result)
         return False
 
@@ -664,13 +669,24 @@ class MergeQueue:
         story_id: str,
         result: WorktreePreflightResult,
     ) -> None:
-        """Create preflight_failure approval and release merge queue lock."""
+        """Release merge queue lock, then create preflight_failure approval.
+
+        Story 10.5 AC1: 先释放内部 lock，再暴露可操作 approval。
+        """
         from ato.approval_helpers import create_approval
         from ato.models.db import complete_merge, get_connection, set_current_merge_story
 
         worktree_path = await self._worktree_mgr.get_path(story_id)
         db = await get_connection(self._db_path)
         try:
+            # AC1: 先释放内部状态 lock
+            try:
+                await complete_merge(db, story_id, success=False)
+            except Exception:
+                logger.exception("merge_preflight_mark_failed_failed", story_id=story_id)
+            await set_current_merge_story(db, None)
+
+            # AC1: lock 释放后再创建可操作 approval
             await create_approval(
                 db,
                 story_id=story_id,
@@ -686,11 +702,6 @@ class MergeQueue:
                 recommended_action="manual_commit_and_retry",
                 risk_level="medium",
             )
-            try:
-                await complete_merge(db, story_id, success=False)
-            except Exception:
-                logger.exception("merge_preflight_mark_failed_failed", story_id=story_id)
-            await set_current_merge_story(db, None)
         finally:
             await db.close()
 

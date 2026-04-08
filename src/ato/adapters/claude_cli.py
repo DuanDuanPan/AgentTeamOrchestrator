@@ -350,8 +350,32 @@ class ClaudeAdapter(BaseAdapter):
                     await stderr_task
 
         exit_code = proc.returncode or 0
+        stderr = stderr_task.result() if stderr_task.done() else ""
+
+        # Result-first semantics (Story 10.2):
+        # result_data 存在时，即使 exit_code != 0 也视为业务成功。
+        # 无 result 时，才按 exit_code 和 stderr 分类错误。
+        if result_data is not None and exit_code != 0:
+            # AC1: result 存在 + 非零 exit code → 业务成功 + warning
+            logger.warning(
+                "claude_nonzero_exit_with_result",
+                exit_code=exit_code,
+                stderr_preview=stderr[:200],
+                session_id=result_data.get("session_id"),
+                cost_usd=result_data.get("total_cost_usd", 0.0),
+            )
+            # AC3: 传 exit_code=0 以确保 ClaudeOutput.status == "success"
+            result = ClaudeOutput.from_json(result_data, exit_code=0)
+            logger.info(
+                "claude_adapter_success",
+                cost_usd=result.cost_usd,
+                duration_ms=result.duration_ms,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+            )
+            return result
+
         if exit_code != 0:
-            stderr = stderr_task.result() if stderr_task.done() else ""
             category, retryable = _classify_error(exit_code, stderr)
             logger.warning(
                 "claude_adapter_error",

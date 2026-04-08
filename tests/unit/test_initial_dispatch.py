@@ -426,7 +426,8 @@ class TestInitialDispatchDelegation:
         assert dispatched_task.phase == "creating"
         assert dispatched_task.role == "creator"
         assert dispatched_task.cli_tool == "claude"
-        assert dispatched_task.expected_artifact == "initial_dispatch_requested"
+        # BUG-006 fix: creating phase uses canonical artifact path (not placeholder)
+        assert dispatched_task.expected_artifact.endswith("s-create.md")
 
         db2 = await get_connection(db_path)
         try:

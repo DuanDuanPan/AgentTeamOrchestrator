@@ -218,6 +218,28 @@ class BmadAdapter:
                 }
             )
 
+        # Stage 1.5: explicit verdict fast-path (Story 10.4 AC1)
+        # Deterministic parser 无法识别结构时，检查 explicit verdict 是否明确通过。
+        # 避免不必要的 semantic fallback 超时。
+        if _is_clearly_passing_output(markdown_output):
+            logger.info(
+                "bmad_parse_explicit_pass_fast_path",
+                story_id=story_id,
+                skill_type=skill_type.value,
+            )
+            return BmadParseResult.model_validate(
+                {
+                    "skill_type": skill_type,
+                    "verdict": "approved",
+                    "findings": [],
+                    "parser_mode": "deterministic",
+                    "raw_markdown_hash": raw_hash,
+                    "raw_output_preview": preview,
+                    "parse_error": None,
+                    "parsed_at": now,
+                }
+            )
+
         # Stage 2: semantic fallback
         if self._semantic_runner is not None:
             try:
@@ -267,21 +289,33 @@ class BmadAdapter:
                     }
                 )
             except Exception as exc:
+                # Story 10.4 AC3: 区分 deterministic miss 和 semantic timeout
+                is_timeout = "timed out" in str(exc).lower()
                 logger.warning(
                     "bmad_semantic_fallback_failed",
                     story_id=story_id,
                     skill_type=skill_type.value,
                     error=str(exc),
+                    input_length=len(markdown_output),
+                    timeout_related=is_timeout,
+                    parser_mode="semantic_fallback",
                 )
 
         # Stage 3: 全部失败
-        error_msg = "Both deterministic and semantic parsing failed"
+        # AC3: parse_error 包含诊断信息
+        error_msg = (
+            f"Both deterministic and semantic parsing failed"
+            f" (skill_type={skill_type.value},"
+            f" input_length={len(markdown_output)},"
+            f" semantic_runner={'available' if self._semantic_runner else 'none'})"
+        )
         logger.warning(
             "bmad_parse_failed",
             story_id=story_id,
             skill_type=skill_type.value,
             parser_mode="failed",
             error=error_msg,
+            input_length=len(markdown_output),
             raw_output_preview=preview,
         )
         return BmadParseResult.model_validate(
@@ -301,6 +335,31 @@ class BmadAdapter:
 # ---------------------------------------------------------------------------
 # Verdict 计算
 # ---------------------------------------------------------------------------
+
+# Story 10.4 AC1: 明确通过输出的 fast-path 检测
+_CLEARLY_PASSING_RE = re.compile(
+    r"(?:"
+    r"(?:verdict|status)\s*:\s*pass"
+    r"|recommendation\s*:\s*approve"
+    r"|no\s+blocking\s+findings?"
+    r"|0\s+blocking"
+    r"|0\s+patch"
+    r")",
+    re.IGNORECASE,
+)
+
+# 否定语境：确保不把 "not approved" / "no pass" 误判为通过
+_NEGATION_PASS_RE = re.compile(
+    r"(?:not?\s+(?:pass|approved?)|(?:did|does)\s+not\s+pass|fail)",
+    re.IGNORECASE,
+)
+
+
+def _is_clearly_passing_output(markdown: str) -> bool:
+    """检测输出是否明确为 PASS/Approve，且无否定语境。"""
+    if not _CLEARLY_PASSING_RE.search(markdown):
+        return False
+    return not _NEGATION_PASS_RE.search(markdown)
 
 
 def _compute_verdict(findings: list[BmadFinding]) -> ParseVerdict:

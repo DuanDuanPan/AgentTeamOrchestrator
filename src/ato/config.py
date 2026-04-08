@@ -105,6 +105,7 @@ class TimeoutConfig(BaseModel):
     interactive_session: int = 7200
     idle_timeout: int = 300
     post_result_timeout: int = 30
+    semantic_parser: int = 120
 
 
 class CostConfig(BaseModel):

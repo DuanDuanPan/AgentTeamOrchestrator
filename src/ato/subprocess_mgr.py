@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
+import os
 import sys
 import time
 import uuid
@@ -44,6 +46,12 @@ _SIDECAR_POLL_INTERVAL = 0.5
 
 _FINALIZE_GIT_TIMEOUT = 30
 """Finalize 结果验证 git 命令超时时间。"""
+
+_TERMINAL_FINALIZER_TIMEOUT = 10
+"""Terminal finalizer 超时：adapter 返回后 DB 落库的最大允许秒数。"""
+
+_ACTIVITY_FLUSH_TIMEOUT = 3
+"""终态路径中 activity flush 的最大允许秒数。"""
 
 
 def _launch_terminal_session(
@@ -210,7 +218,6 @@ class SubprocessManager:
         """
         from ato.models.db import (
             get_connection,
-            insert_cost_log,
             insert_task,
             update_task_activity,
             update_task_status,
@@ -340,116 +347,271 @@ class SubprocessManager:
 
             logger.info("dispatch_started", story_id=story_id, phase=phase)
 
+            # --- Adapter 调用 ---
+            adapter_result: AdapterResult | None = None
+            adapter_exc: CLIAdapterError | None = None
             try:
-                result = await self._resolve_adapter(cli_tool).execute(
-                    prompt,
-                    options,
-                    on_process_start=_on_process_start,
-                    on_progress=_progress_wrapper,
-                )
-            except CLIAdapterError as exc:
-                # 终态前强制 flush 最新 activity（Fix: Codex turn_end 不在终态集合）
+                try:
+                    adapter_result = await self._resolve_adapter(cli_tool).execute(
+                        prompt,
+                        options,
+                        on_process_start=_on_process_start,
+                        on_progress=_progress_wrapper,
+                    )
+                except CLIAdapterError as exc:
+                    adapter_exc = exc
+
+                # --- Terminal Finalizer (bounded) ---
+                # 1. Cancel delayed activity flush (best-effort)
                 if delayed_flush_task and not delayed_flush_task.done():
                     delayed_flush_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await delayed_flush_task
-                await _flush_latest_activity()
 
-                completed_at = datetime.now(tz=UTC)
-                db = await get_connection(self._db_path)
+                # 2. Best-effort activity flush (AC2: 失败只记 warning，不阻塞终态)
                 try:
-                    await update_task_status(
-                        db,
-                        task_id,
-                        "failed",
-                        exit_code=exc.exit_code,
-                        error_message=str(exc),
-                        completed_at=completed_at,
+                    await asyncio.wait_for(
+                        _flush_latest_activity(), timeout=_ACTIVITY_FLUSH_TIMEOUT
                     )
-                    await insert_cost_log(
-                        db,
-                        CostLogRecord(
-                            cost_log_id=str(uuid.uuid4()),
-                            story_id=story_id,
-                            task_id=task_id,
-                            cli_tool=cli_tool,
-                            phase=phase,
-                            role=role,
-                            input_tokens=0,
-                            output_tokens=0,
-                            cost_usd=0.0,
-                            exit_code=exc.exit_code,
-                            error_category=exc.category.value,
-                            created_at=completed_at,
-                        ),
-                    )
-                finally:
-                    await db.close()
-                self._unregister_running(task_id)
-                raise
-            else:
-                # 终态前强制 flush 最新 activity（Fix: Codex turn_end 不在终态集合）
-                if delayed_flush_task and not delayed_flush_task.done():
-                    delayed_flush_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await delayed_flush_task
-                await _flush_latest_activity()
+                except Exception:
+                    logger.warning("terminal_activity_flush_failed", exc_info=True)
 
-                completed_at = datetime.now(tz=UTC)
-                # Fix #4: 从 ClaudeOutput/CodexOutput 提取 cache_read_input_tokens 和 model
-                cache_tokens = 0
-                model_name: str | None = None
-                if isinstance(result, ClaudeOutput):
-                    cache_tokens = result.cache_read_input_tokens
-                    if result.model_usage and isinstance(result.model_usage, dict):
-                        model_name = result.model_usage.get("model")
-                elif isinstance(result, CodexOutput):
-                    cache_tokens = result.cache_read_input_tokens
-                    model_name = result.model_name
-
-                db = await get_connection(self._db_path)
+                # 3. Terminal DB writes with timeout boundary (AC1)
                 try:
-                    await update_task_status(
-                        db,
-                        task_id,
-                        "completed",
-                        exit_code=result.exit_code,
-                        cost_usd=result.cost_usd,
-                        duration_ms=result.duration_ms,
-                        completed_at=completed_at,
-                        error_message=None,
-                        text_result=result.text_result,
-                    )
-                    await insert_cost_log(
-                        db,
-                        CostLogRecord(
-                            cost_log_id=str(uuid.uuid4()),
-                            story_id=story_id,
+                    async with asyncio.timeout(_TERMINAL_FINALIZER_TIMEOUT):
+                        if adapter_exc is not None:
+                            await self._finalize_failure(
+                                task_id, story_id, phase, role, cli_tool, adapter_exc
+                            )
+                        else:
+                            assert adapter_result is not None
+                            await self._finalize_success(
+                                task_id, story_id, phase, role, cli_tool, adapter_result
+                            )
+                except Exception as finalize_exc:
+                    # AC3: Fallback raw SQL — 保证 task 从 running 收敛为终态
+                    if not isinstance(finalize_exc, asyncio.CancelledError):
+                        logger.error(
+                            "terminal_finalizer_error",
                             task_id=task_id,
-                            cli_tool=cli_tool,
-                            model=model_name,
-                            phase=phase,
-                            role=role,
-                            input_tokens=result.input_tokens,
-                            output_tokens=result.output_tokens,
-                            cache_read_input_tokens=cache_tokens,
-                            cost_usd=result.cost_usd,
-                            duration_ms=result.duration_ms,
-                            session_id=result.session_id,
-                            exit_code=result.exit_code,
-                            created_at=completed_at,
-                        ),
-                    )
-                finally:
-                    await db.close()
-                self._unregister_running(task_id)
-                return result
+                            exc_info=True,
+                        )
+                        await self._fallback_update_task(
+                            task_id, adapter_exc, finalize_exc
+                        )
+                    else:
+                        # CancelledError: 仍尝试 fallback，然后重新抛出
+                        await self._fallback_update_task(
+                            task_id, adapter_exc, finalize_exc
+                        )
+                        raise
             finally:
-                # 清理后台 flush task，防止悬挂
+                # AC1: _unregister_running 在 outer finally，不依赖 DB 写入成功
+                self._unregister_running(task_id)
+                # 清理后台 flush task
                 if delayed_flush_task and not delayed_flush_task.done():
                     delayed_flush_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await delayed_flush_task
+
+            if adapter_exc is not None:
+                raise adapter_exc
+            assert adapter_result is not None
+            return adapter_result
+
+    async def _finalize_success(
+        self,
+        task_id: str,
+        story_id: str,
+        phase: str,
+        role: str,
+        cli_tool: CLITool,
+        result: AdapterResult,
+    ) -> None:
+        """成功路径的终态落库：update task + insert cost_log。"""
+        from ato.models.db import get_connection, insert_cost_log, update_task_status
+
+        completed_at = datetime.now(tz=UTC)
+        cache_tokens = 0
+        model_name: str | None = None
+        if isinstance(result, ClaudeOutput):
+            cache_tokens = result.cache_read_input_tokens
+            if result.model_usage and isinstance(result.model_usage, dict):
+                model_name = result.model_usage.get("model")
+        elif isinstance(result, CodexOutput):
+            cache_tokens = result.cache_read_input_tokens
+            model_name = result.model_name
+
+        db = await get_connection(self._db_path)
+        try:
+            await update_task_status(
+                db,
+                task_id,
+                "completed",
+                exit_code=result.exit_code,
+                cost_usd=result.cost_usd,
+                duration_ms=result.duration_ms,
+                completed_at=completed_at,
+                error_message=None,
+                text_result=result.text_result,
+            )
+            await insert_cost_log(
+                db,
+                CostLogRecord(
+                    cost_log_id=str(uuid.uuid4()),
+                    story_id=story_id,
+                    task_id=task_id,
+                    cli_tool=cli_tool,
+                    model=model_name,
+                    phase=phase,
+                    role=role,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    cache_read_input_tokens=cache_tokens,
+                    cost_usd=result.cost_usd,
+                    duration_ms=result.duration_ms,
+                    session_id=result.session_id,
+                    exit_code=result.exit_code,
+                    created_at=completed_at,
+                ),
+            )
+        finally:
+            await db.close()
+
+    async def _finalize_failure(
+        self,
+        task_id: str,
+        story_id: str,
+        phase: str,
+        role: str,
+        cli_tool: CLITool,
+        exc: CLIAdapterError,
+    ) -> None:
+        """失败路径的终态落库：update task failed + insert cost_log。"""
+        from ato.models.db import get_connection, insert_cost_log, update_task_status
+
+        completed_at = datetime.now(tz=UTC)
+        db = await get_connection(self._db_path)
+        try:
+            await update_task_status(
+                db,
+                task_id,
+                "failed",
+                exit_code=exc.exit_code,
+                error_message=str(exc),
+                completed_at=completed_at,
+            )
+            await insert_cost_log(
+                db,
+                CostLogRecord(
+                    cost_log_id=str(uuid.uuid4()),
+                    story_id=story_id,
+                    task_id=task_id,
+                    cli_tool=cli_tool,
+                    phase=phase,
+                    role=role,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=0.0,
+                    exit_code=exc.exit_code,
+                    error_category=exc.category.value,
+                    created_at=completed_at,
+                ),
+            )
+        finally:
+            await db.close()
+
+    async def _fallback_update_task(
+        self,
+        task_id: str,
+        adapter_exc: CLIAdapterError | None,
+        finalize_exc: BaseException,
+        *,
+        force_status: str | None = None,
+    ) -> None:
+        """AC3: 最小 raw SQL fallback — 保证 task 从 running 收敛为终态。
+
+        不创建 CostLogRecord，不等待外部 IO，用短事务写最少字段。
+        """
+        import aiosqlite
+
+        if force_status is not None:
+            status = force_status
+        else:
+            status = "failed" if adapter_exc is not None else "completed"
+        exit_code = adapter_exc.exit_code if adapter_exc is not None else 0
+        error_msg = f"finalizer_fallback: {finalize_exc!r}"
+        completed_at = datetime.now(tz=UTC).isoformat()
+
+        try:
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute("PRAGMA journal_mode=WAL")
+                await db.execute("PRAGMA busy_timeout=5000")
+                await db.execute(
+                    "UPDATE tasks SET status = ?, exit_code = ?, error_message = ?, "
+                    "completed_at = ? WHERE task_id = ? AND status = 'running'",
+                    (status, exit_code, error_msg, completed_at, task_id),
+                )
+                await db.commit()
+            logger.warning(
+                "fallback_update_task_applied",
+                task_id=task_id,
+                status=status,
+                original_error=repr(finalize_exc),
+            )
+        except Exception:
+            logger.error(
+                "fallback_update_task_failed",
+                task_id=task_id,
+                exc_info=True,
+            )
+
+    async def sweep_dead_workers(self) -> int:
+        """运行期 dead PID watchdog：检测并清理已退出的 worker。
+
+        复用 recovery 的 PID 检测语义：
+        - ESRCH → dead（进程不存在）
+        - EPERM → alive（权限不足但进程存在）
+
+        Returns:
+            清理的 dead worker 数量。
+        """
+        dead_pids: list[int] = []
+        for pid in list(self._running):
+            if not self._is_pid_alive(pid):
+                dead_pids.append(pid)
+
+        for pid in dead_pids:
+            rt = self._running.pop(pid)
+            logger.warning(
+                "dead_worker_detected",
+                task_id=rt.task_id,
+                story_id=rt.story_id,
+                phase=rt.phase,
+                pid=pid,
+            )
+            # 更新 DB：将 task 从 running 收敛为 failed
+            await self._fallback_update_task(
+                rt.task_id,
+                adapter_exc=None,
+                finalize_exc=RuntimeError(f"dead worker PID {pid} detected by watchdog"),
+                force_status="failed",
+            )
+
+        return len(dead_pids)
+
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        """检测 PID 是否存活。复用 recovery._is_pid_alive 的语义。"""
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError as e:
+            if e.errno == errno.ESRCH:
+                return False
+            if e.errno == errno.EPERM:
+                return True  # 权限不足但进程存在
+            raise
 
     async def dispatch_with_retry(
         self,

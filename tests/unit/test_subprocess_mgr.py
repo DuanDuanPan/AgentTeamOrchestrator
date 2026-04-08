@@ -17,7 +17,7 @@ from ato.models.schemas import (
     ErrorCategory,
     StoryRecord,
 )
-from ato.subprocess_mgr import SubprocessManager
+from ato.subprocess_mgr import RunningTask, SubprocessManager
 
 # ---------------------------------------------------------------------------
 # 辅助
@@ -770,3 +770,344 @@ class TestActivityFlush:
         assert row is not None
         assert row[0] == "text"
         assert "正在处理" in row[1]
+
+
+# ---------------------------------------------------------------------------
+# Story 10.1: Terminal Finalizer 边界
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalFinalizer:
+    """AC1-AC3: dispatch 终态路径在 DB helper 卡住时仍有界退出。"""
+
+    async def test_success_path_db_hang_bounded_exit(self, db_ready: Path) -> None:
+        """AC1+AC5: 成功路径的 task/cost 落库卡住时，dispatch 有界退出，
+        running 被注销，semaphore 被释放。"""
+        result = _make_adapter_result()
+        call_count = 0
+
+        class NormalAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                nonlocal call_count
+                call_count += 1
+                return result
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=NormalAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+
+        # Patch update_task_status to hang (simulate DB stuck)
+        original_update = None
+
+        async def _hanging_update(db: Any, task_id: str, status: str, **kw: Any) -> None:
+            if status in ("completed", "failed"):
+                await asyncio.sleep(999)  # hang forever
+            elif original_update is not None:
+                await original_update(db, task_id, status, **kw)
+
+        import ato.subprocess_mgr as mgr_mod
+
+        original_update = getattr(mgr_mod, "update_task_status", None)
+
+        with pytest.raises((asyncio.TimeoutError, Exception)):
+            async with asyncio.timeout(10):
+                # Monkey-patch the DB call at import point
+                import ato.models.db as db_mod
+
+                orig_fn = db_mod.update_task_status
+                db_mod.update_task_status = _hanging_update  # type: ignore[assignment]
+                try:
+                    await mgr.dispatch(
+                        story_id="story-test",
+                        phase="dev",
+                        role="developer",
+                        cli_tool="claude",
+                        prompt="test",
+                    )
+                finally:
+                    db_mod.update_task_status = orig_fn
+
+        # dispatch 必须有界退出后，running 被清空
+        assert len(mgr.running) == 0
+
+    async def test_activity_flush_hang_does_not_block_terminal(self, db_ready: Path) -> None:
+        """AC2: activity flush 卡住不阻塞终态落库。"""
+        from ato.models.db import get_tasks_by_story
+        from ato.models.schemas import ProgressEvent
+
+        result = _make_adapter_result()
+
+        class EmitAndHangFlushAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                on_progress = kw.get("on_progress")
+                if on_progress:
+                    await on_progress(
+                        ProgressEvent(
+                            event_type="text",
+                            summary="processing...",
+                            cli_tool="claude",
+                            timestamp=datetime.now(tz=UTC),
+                            raw={},
+                        )
+                    )
+                return result
+
+        mgr = SubprocessManager(  # type: ignore[arg-type]
+            max_concurrent=4, adapter=EmitAndHangFlushAdapter(), db_path=db_ready,
+        )
+
+        # Patch _flush_latest_activity to hang
+        import ato.models.db as db_mod
+
+        orig_update_activity = db_mod.update_task_activity
+
+        async def _hanging_activity(*args: Any, **kwargs: Any) -> None:
+            await asyncio.sleep(999)
+
+        db_mod.update_task_activity = _hanging_activity  # type: ignore[assignment]
+        try:
+            async with asyncio.timeout(10):
+                await mgr.dispatch(
+                    story_id="story-test",
+                    phase="dev",
+                    role="developer",
+                    cli_tool="claude",
+                    prompt="test",
+                )
+        finally:
+            db_mod.update_task_activity = orig_update_activity
+
+        # 终态应正常完成
+        db = await get_connection(db_ready)
+        tasks = await get_tasks_by_story(db, "story-test")
+        await db.close()
+        assert len(tasks) == 1
+        assert tasks[0].status == "completed"
+        assert len(mgr.running) == 0
+
+    async def test_failure_path_db_hang_still_unregisters(self, db_ready: Path) -> None:
+        """AC1: 失败路径 DB helper 卡住，_unregister_running 仍在 finally 执行。"""
+        error = CLIAdapterError("boom", category=ErrorCategory.UNKNOWN, retryable=False)
+
+        class FailAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                if cb := kw.get("on_process_start"):
+                    proc = AsyncMock()
+                    proc.pid = 9999
+                    await cb(proc)
+                raise error
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=FailAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+
+        # Patch update_task_status to hang on 'failed'
+        import ato.models.db as db_mod
+
+        orig_fn = db_mod.update_task_status
+
+        async def _hanging_on_failed(db: Any, task_id: str, status: str, **kw: Any) -> None:
+            if status == "failed":
+                await asyncio.sleep(999)
+            else:
+                await orig_fn(db, task_id, status, **kw)
+
+        db_mod.update_task_status = _hanging_on_failed  # type: ignore[assignment]
+        try:
+            with pytest.raises((CLIAdapterError, Exception)):
+                async with asyncio.timeout(10):
+                    await mgr.dispatch(
+                        story_id="story-test",
+                        phase="dev",
+                        role="developer",
+                        cli_tool="claude",
+                        prompt="test",
+                    )
+        finally:
+            db_mod.update_task_status = orig_fn
+
+        # _unregister_running 必须在 outer finally 中执行
+        assert len(mgr.running) == 0
+
+    async def test_cost_log_failure_triggers_fallback(self, db_ready: Path) -> None:
+        """AC3: insert_cost_log 失败时 fallback 保证 task 不永久 running。"""
+        from ato.models.db import get_tasks_by_story
+
+        result = _make_adapter_result()
+        adapter = FakeAdapter(result=result)
+        mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
+
+        import ato.models.db as db_mod
+
+        orig_cost = db_mod.insert_cost_log
+
+        async def _failing_cost(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("cost_log write failed")
+
+        db_mod.insert_cost_log = _failing_cost  # type: ignore[assignment]
+        try:
+            # Should not hang even though cost_log fails
+            async with asyncio.timeout(10):
+                await mgr.dispatch(
+                    story_id="story-test",
+                    phase="dev",
+                    role="developer",
+                    cli_tool="claude",
+                    prompt="test",
+                )
+        finally:
+            db_mod.insert_cost_log = orig_cost
+
+        # task 不应该还在 running
+        db = await get_connection(db_ready)
+        tasks = await get_tasks_by_story(db, "story-test")
+        await db.close()
+        assert len(tasks) == 1
+        assert tasks[0].status in ("completed", "failed")
+        assert len(mgr.running) == 0
+
+    async def test_semaphore_released_after_terminal_timeout(self, db_ready: Path) -> None:
+        """AC1: 终态超时后 semaphore slot 被释放，后续任务可调度。"""
+        result = _make_adapter_result()
+
+        class NormalAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                return result
+
+        mgr = SubprocessManager(max_concurrent=1, adapter=NormalAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+
+        # First dispatch: patch cost_log to fail (should still release semaphore)
+        import ato.models.db as db_mod
+
+        orig_cost = db_mod.insert_cost_log
+
+        async def _failing_cost(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("cost_log write failed")
+
+        db_mod.insert_cost_log = _failing_cost  # type: ignore[assignment]
+        try:
+            async with asyncio.timeout(10):
+                await mgr.dispatch(
+                    story_id="story-test",
+                    phase="dev",
+                    role="developer",
+                    cli_tool="claude",
+                    prompt="test1",
+                )
+        finally:
+            db_mod.insert_cost_log = orig_cost
+
+        # Second dispatch: should succeed (semaphore was released)
+        r2 = await mgr.dispatch(
+            story_id="story-test",
+            phase="dev",
+            role="developer",
+            cli_tool="claude",
+            prompt="test2",
+        )
+        assert r2.status == "success"
+
+
+# ---------------------------------------------------------------------------
+# Story 10.1: Dead PID Watchdog
+# ---------------------------------------------------------------------------
+
+
+class TestDeadPIDWatchdog:
+    """AC4: 运行期 dead PID watchdog 检测并清理已退出的 worker。"""
+
+    async def test_sweep_dead_workers_marks_dead_pid_failed(self, db_ready: Path) -> None:
+        """AC4: dead PID 被标记为 failed，从 _running 注销。"""
+        from ato.models.db import get_tasks_by_story
+
+        result = _make_adapter_result()
+        adapter = FakeAdapter(result=result)
+        mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
+
+        # 手动注入一个 dead PID 到 _running
+        dead_pid = 99999  # 不存在的 PID
+        mgr._running[dead_pid] = RunningTask(
+            task_id="task-dead",
+            story_id="story-test",
+            phase="dev",
+            pid=dead_pid,
+        )
+
+        # 在 DB 中也创建对应的 running task
+        from ato.models.db import get_connection, insert_task
+        from ato.models.schemas import TaskRecord
+
+        db = await get_connection(db_ready)
+        try:
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="task-dead",
+                    story_id="story-test",
+                    phase="dev",
+                    role="developer",
+                    cli_tool="claude",
+                    status="running",
+                    pid=dead_pid,
+                    started_at=_NOW,
+                ),
+            )
+        finally:
+            await db.close()
+
+        # 运行 watchdog sweep
+        swept = await mgr.sweep_dead_workers()
+
+        # 验证：dead PID 从 _running 移除
+        assert dead_pid not in mgr.running
+        assert swept == 1
+
+        # 验证：DB 中 task 状态更新
+        db = await get_connection(db_ready)
+        tasks = await get_tasks_by_story(db, "story-test")
+        await db.close()
+        dead_task = next(t for t in tasks if t.task_id == "task-dead")
+        assert dead_task.status == "failed"
+
+    async def test_sweep_skips_alive_pid(self, db_ready: Path) -> None:
+        """AC4: 存活的 PID 不被误判为 dead。"""
+        import os
+
+        alive_pid = os.getpid()  # 当前进程一定存活
+
+        result = _make_adapter_result()
+        adapter = FakeAdapter(result=result)
+        mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
+
+        mgr._running[alive_pid] = RunningTask(
+            task_id="task-alive",
+            story_id="story-test",
+            phase="dev",
+            pid=alive_pid,
+        )
+
+        swept = await mgr.sweep_dead_workers()
+
+        assert alive_pid in mgr.running
+        assert swept == 0
+
+    async def test_sweep_handles_permission_error_as_alive(self, db_ready: Path) -> None:
+        """AC4 补充: 权限不足的 PID 不误判为 dead。"""
+        import errno as errno_mod
+        from unittest.mock import patch
+
+        result = _make_adapter_result()
+        adapter = FakeAdapter(result=result)
+        mgr = SubprocessManager(max_concurrent=4, adapter=adapter, db_path=db_ready)  # type: ignore[arg-type]
+
+        pid = 12345
+        mgr._running[pid] = RunningTask(
+            task_id="task-perm",
+            story_id="story-test",
+            phase="dev",
+            pid=pid,
+        )
+
+        # Mock os.kill to raise EPERM (process exists but no permission)
+        eperm_error = OSError(errno_mod.EPERM, "Operation not permitted")
+        with patch("ato.subprocess_mgr.os.kill", side_effect=eperm_error):
+            swept = await mgr.sweep_dead_workers()
+
+        assert pid in mgr.running
+        assert swept == 0

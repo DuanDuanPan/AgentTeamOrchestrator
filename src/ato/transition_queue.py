@@ -109,17 +109,13 @@ def _gate_type_for_transition(event_name: str) -> WorktreeGateType | None:
 
 
 def _dirty_files_from_porcelain(porcelain_output: str) -> list[str]:
-    """Extract file paths from git status --porcelain=v1 output for finalize context."""
-    files: list[str] = []
-    for line in porcelain_output.splitlines():
-        if len(line) < 4:
-            continue
-        path = line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        if path:
-            files.append(path)
-    return files
+    """Extract file paths from git status --porcelain=v1 output for finalize context.
+
+    Delegates to shared helper in worktree_mgr (Story 10.5 AC3).
+    """
+    from ato.worktree_mgr import dirty_files_from_porcelain
+
+    return dirty_files_from_porcelain(porcelain_output)
 
 
 async def _replay_to_phase(sm: StoryLifecycle, target_phase: str) -> None:
@@ -281,7 +277,21 @@ class TransitionQueue:
         if self._nudge is not None:
             self._nudge.notify()
 
-        return await asyncio.wait_for(completion_future, timeout=timeout_seconds)
+        # Story 10.3 AC1: shield 防止 wait timeout 取消 completion_future，
+        # 使 consumer 稍后仍能安全 set_result/set_exception。
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(completion_future), timeout=timeout_seconds
+            )
+        except TimeoutError:
+            logger.warning(
+                "submit_and_wait_timeout",
+                story_id=event.story_id,
+                event_name=event.event_name,
+                queue_depth=self._queue.qsize(),
+                timeout_seconds=timeout_seconds,
+            )
+            raise
 
     async def _consumer(self, db: aiosqlite.Connection) -> None:
         """串行处理队列中的事件。"""
@@ -380,10 +390,39 @@ class TransitionQueue:
         if first_result.passed:
             return False
 
-        await self._dispatch_finalize_for_preflight_failure(mgr, event.story_id, first_result)
+        # Story 10.3 AC3: finalize 异常后保证 clean-or-approval 不变量。
+        # _dispatch_finalize_for_preflight_failure 内部已 catch 异常，
+        # 但额外 try/except 确保即使 refactor 后异常泄露也执行 second preflight。
+        try:
+            await self._dispatch_finalize_for_preflight_failure(
+                mgr, event.story_id, first_result
+            )
+        except Exception:
+            logger.warning(
+                "worktree_finalize_exception_proceeding_to_second_preflight",
+                story_id=event.story_id,
+                exc_info=True,
+            )
 
-        second_result = await mgr.preflight_check(event.story_id, gate_type)
-        await save_worktree_preflight_result(db, second_result, commit=True)
+        # Second preflight — fail closed: 若无法判断则创建 approval
+        try:
+            second_result = await mgr.preflight_check(event.story_id, gate_type)
+            await save_worktree_preflight_result(db, second_result, commit=True)
+        except Exception:
+            logger.error(
+                "second_preflight_failed_creating_approval",
+                story_id=event.story_id,
+                exc_info=True,
+            )
+            # Fail closed: 无法判断 worktree 状态 → 创建 approval
+            await self._create_preflight_failure_approval(
+                db,
+                event=event,
+                result=first_result,
+                retry_event=event.event_name,
+            )
+            return True
+
         if second_result.passed:
             logger.info(
                 "worktree_preflight_passed_after_finalize",

@@ -775,3 +775,79 @@ class TestReviewFinding6StandaloneBoldAndOrderedLists:
         assert result.findings[0].category == "test_coverage"
         assert result.findings[0].file_path == "tests/integration/test_crash_recovery.py"
         assert result.findings[0].line == 302
+
+
+# ---------------------------------------------------------------------------
+# Story 10.4: PASS/Approve fast-path — 不调用 semantic runner
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitPassFastPath:
+    """AC1: 明确通过输出不调用 semantic fallback。"""
+
+    async def test_verdict_pass_skips_semantic(self) -> None:
+        """Verdict: PASS 输出 → deterministic fast-path approved。"""
+        md = "# Story Validation\n\nResult: PASS\n\nAll criteria met."
+        runner = _FakeSemanticRunner([])
+        adapter = BmadAdapter(semantic_runner=runner)
+        result = await adapter.parse(
+            md, skill_type=BmadSkillType.STORY_VALIDATION, story_id="s1"
+        )
+        assert result.verdict == "approved"
+        assert result.parser_mode == "deterministic"
+        assert not runner.called
+
+    async def test_status_pass_skips_semantic(self) -> None:
+        """STATUS: PASS 输出 → fast-path approved。"""
+        md = "# Review\n\nStatus: PASS\n\nNo issues."
+        runner = _FakeSemanticRunner([])
+        adapter = BmadAdapter(semantic_runner=runner)
+        result = await adapter.parse(
+            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
+        )
+        assert result.verdict == "approved"
+        assert not runner.called
+
+    async def test_recommendation_approve_skips_semantic(self) -> None:
+        """Recommendation: Approve → fast-path approved。"""
+        md = "# QA\n\nRecommendation: Approve\n\nAll tests pass."
+        runner = _FakeSemanticRunner([])
+        adapter = BmadAdapter(semantic_runner=runner)
+        result = await adapter.parse(
+            md, skill_type=BmadSkillType.QA_REPORT, story_id="s1"
+        )
+        assert result.verdict == "approved"
+        assert not runner.called
+
+    async def test_no_blocking_findings_skips_semantic(self) -> None:
+        """'No blocking findings' → fast-path approved。"""
+        md = "# Review\n\nNo blocking findings.\n\nAll good."
+        runner = _FakeSemanticRunner([])
+        adapter = BmadAdapter(semantic_runner=runner)
+        result = await adapter.parse(
+            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
+        )
+        assert result.verdict == "approved"
+        assert not runner.called
+
+    async def test_zero_blocking_skips_semantic(self) -> None:
+        """'0 blocking' → fast-path approved。"""
+        md = "# Review\n\n0 blocking, 2 suggestion.\nRecommendation: Approve"
+        runner = _FakeSemanticRunner([])
+        adapter = BmadAdapter(semantic_runner=runner)
+        result = await adapter.parse(
+            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
+        )
+        assert result.verdict == "approved"
+        assert not runner.called
+
+    async def test_negation_not_approved_falls_to_semantic(self) -> None:
+        """'not approved' / 'did not pass' → 不走 fast-path。"""
+        md = "# Review\n\nStatus: PASS but did not pass quality gates.\nFail."
+        runner = _FakeSemanticRunner([])
+        adapter = BmadAdapter(semantic_runner=runner)
+        await adapter.parse(
+            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
+        )
+        # Should fall through to semantic (negation detected)
+        assert runner.called
