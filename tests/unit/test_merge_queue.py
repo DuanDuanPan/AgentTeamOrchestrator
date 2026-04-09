@@ -1957,6 +1957,62 @@ class TestCodexRegressionRunner:
                 skipped_command_reason=None,
             )
 
+    def test_validate_regression_command_audit_rejects_optional_priority_violation(self) -> None:
+        from ato.config import resolve_effective_test_policy
+        from ato.merge_queue import _validate_regression_command_audit
+        from ato.models.schemas import RegressionCommandAuditEntry
+
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+                "integration": TestLayerConfig(commands=["uv run pytest tests/integration/"]),
+            },
+            phase_test_policy={
+                "regression": PhaseTestPolicyConfig(
+                    required_layers=["unit"],
+                    optional_layers=["integration"],
+                    allow_discovery=True,
+                    max_additional_commands=2,
+                    allowed_when="after_required_commands",
+                )
+            },
+        )
+        policy = resolve_effective_test_policy(settings, "regression")
+        assert policy is not None
+
+        entries = [
+            RegressionCommandAuditEntry(
+                command="uv run pytest tests/unit/",
+                source="project_defined",
+                trigger_reason="required_layer",
+                exit_code=0,
+            ),
+            RegressionCommandAuditEntry(
+                command="uv run pytest tests/smoke/",
+                source="llm_discovered",
+                trigger_reason="discovery_fallback",
+                exit_code=0,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="optional commands 必须先于 discovered"):
+            _validate_regression_command_audit(
+                commands_attempted=[entry.command for entry in entries],
+                command_audit=entries,
+                test_policy=policy,
+                skipped_command_reason=None,
+            )
+
     async def test_dispatch_regression_preserves_single_task_contract(
         self, initialized_db_path: Path
     ) -> None:

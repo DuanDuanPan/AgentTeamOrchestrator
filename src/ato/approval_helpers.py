@@ -249,7 +249,23 @@ def get_exception_context(approval_type: str, payload: dict[str, object]) -> tup
                 parts.append(f"error_output: {payload['error_output']}")
         case "needs_human_review":
             # Design gate 失败 vs BMAD 解析失败：通过 failure_codes 区分
-            if "failure_codes" in payload:
+            if payload.get("reason") == "qa_protocol_invalid":
+                what = "QA command audit 协议校验失败，需要人工决定是否重试或升级。"
+                for key in (
+                    "task_id",
+                    "audit_status",
+                    "violation_code",
+                    "detail",
+                ):
+                    if payload.get(key):
+                        parts.append(f"{key}: {payload[key]}")
+                if payload.get("raw_output_preview"):
+                    parts.append(f"raw_output_preview: {payload['raw_output_preview']}")
+                if payload.get("commands_executed_preview"):
+                    parts.append(
+                        f"commands_executed_preview: {payload['commands_executed_preview']}"
+                    )
+            elif "failure_codes" in payload:
                 what = "Design gate 校验失败，设计阶段产出物不完整或无效。"
                 if "task_id" in payload:
                     parts.append(f"task_id: {payload['task_id']}")

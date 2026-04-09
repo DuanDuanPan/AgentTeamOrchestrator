@@ -1389,6 +1389,384 @@ class TestRecoveryActions:
         ]
         assert new_rounds == [2]
 
+    @pytest.mark.parametrize(
+        ("audit_status", "parse_error", "raw_lines", "expected_code"),
+        [
+            ("missing", None, [], "COMMANDS_EXECUTED_MISSING"),
+            (
+                "malformed",
+                "Malformed Commands Executed line 1: bad line",
+                ["- bad line"],
+                "COMMANDS_EXECUTED_MALFORMED",
+            ),
+        ],
+    )
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_qa_testing_protocol_invalid_parse_status_creates_needs_human_review(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+        audit_status: str,
+        parse_error: str | None,
+        raw_lines: list[str],
+        expected_code: str,
+    ) -> None:
+        from ato.models.db import get_pending_approvals
+        from ato.models.schemas import (
+            BmadFinding,
+            BmadParseResult,
+            BmadSkillType,
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db, _make_story("s-qa-invalid", worktree_path="/tmp/wt", current_phase="qa_testing")
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-qa-invalid",
+                    "s-qa-invalid",
+                    status="pending",
+                    pid=None,
+                    phase="qa_testing",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.QA_REPORT,
+            verdict="changes_requested",
+            findings=[
+                BmadFinding(
+                    severity="blocking",
+                    category="coverage",
+                    description="missing regression coverage",
+                    file_path="tests/unit/test_recovery.py",
+                    rule_id="QA-001",
+                )
+            ],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="bad audit",
+            command_audit=None,
+            command_audit_parse_status=audit_status,  # type: ignore[arg-type]
+            command_audit_parse_error=parse_error,
+            command_audit_raw_lines=raw_lines,
+            parsed_at=_NOW,
+        )
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "qa_testing",
+                    "role": "qa",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+        )
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=settings,
+        )
+        task = _make_task(
+            "t-qa-invalid",
+            "s-qa-invalid",
+            status="pending",
+            pid=None,
+            phase="qa_testing",
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            result = await engine._dispatch_convergent_loop(task)
+
+        assert result is True
+        mock_tq.submit.assert_not_called()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+            findings = await get_findings_by_story(db, "s-qa-invalid", phase="qa_testing")
+            tasks = await get_tasks_by_story(db, "s-qa-invalid")
+        finally:
+            await db.close()
+
+        assert findings == []
+        assert len(tasks) == 1
+        assert tasks[0].status == "completed"
+        assert len(approvals) == 1
+        payload = json.loads(approvals[0].payload or "{}")
+        assert payload["reason"] == "qa_protocol_invalid"
+        assert payload["audit_status"] == audit_status
+        assert payload["violation_code"] == expected_code
+        assert payload["task_id"] == "t-qa-invalid"
+        assert payload["options"] == ["retry", "skip", "escalate"]
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_qa_testing_protocol_invalid_policy_violation_skips_findings_and_transition(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        from ato.models.db import get_pending_approvals
+        from ato.models.schemas import (
+            BmadFinding,
+            BmadParseResult,
+            BmadSkillType,
+            RegressionCommandAuditEntry,
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db, _make_story("s-qa-policy", worktree_path="/tmp/wt", current_phase="qa_testing")
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-qa-policy",
+                    "s-qa-policy",
+                    status="pending",
+                    pid=None,
+                    phase="qa_testing",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.QA_REPORT,
+            verdict="changes_requested",
+            findings=[
+                BmadFinding(
+                    severity="blocking",
+                    category="coverage",
+                    description="missing regression coverage",
+                    file_path="tests/unit/test_recovery.py",
+                    rule_id="QA-001",
+                )
+            ],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="bad policy",
+            command_audit=[
+                RegressionCommandAuditEntry(
+                    command="uv run pytest tests/unit/",
+                    source="project_defined",
+                    trigger_reason="required_layer",
+                    exit_code=0,
+                ),
+                RegressionCommandAuditEntry(
+                    command="uv run pytest tests/smoke/",
+                    source="llm_discovered",
+                    trigger_reason="discovery_fallback",
+                    exit_code=0,
+                ),
+            ],
+            command_audit_parse_status="parsed",
+            command_audit_parse_error=None,
+            command_audit_raw_lines=[
+                "- `uv run pytest tests/unit/` | source=project_defined | "
+                "trigger=required_layer:unit | exit_code=0",
+                "- `uv run pytest tests/smoke/` | source=llm_discovered | "
+                "trigger=fallback:pytest | exit_code=0",
+            ],
+            parsed_at=_NOW,
+        )
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "qa_testing",
+                    "role": "qa",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+                "integration": TestLayerConfig(commands=["uv run pytest tests/integration/"]),
+            },
+            phase_test_policy={
+                "qa_testing": PhaseTestPolicyConfig(
+                    required_layers=["unit"],
+                    optional_layers=["integration"],
+                    allow_discovery=True,
+                    max_additional_commands=2,
+                    allowed_when="after_required_commands",
+                )
+            },
+        )
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=settings,
+        )
+        task = _make_task(
+            "t-qa-policy",
+            "s-qa-policy",
+            status="pending",
+            pid=None,
+            phase="qa_testing",
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            result = await engine._dispatch_convergent_loop(task)
+
+        assert result is True
+        mock_tq.submit.assert_not_called()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+            findings = await get_findings_by_story(db, "s-qa-policy", phase="qa_testing")
+        finally:
+            await db.close()
+
+        assert findings == []
+        assert len(approvals) == 1
+        payload = json.loads(approvals[0].payload or "{}")
+        assert payload["audit_status"] == "invalid"
+        assert payload["violation_code"] == "OPTIONAL_PRIORITY_VIOLATION"
+        assert "remaining optional commands" in payload["detail"]
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_qa_testing_bounded_fallback_valid_audit_continues_normal_path(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        from ato.models.db import get_pending_approvals
+        from ato.models.schemas import BmadParseResult, BmadSkillType, RegressionCommandAuditEntry
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db, _make_story("s-qa-pass", worktree_path="/tmp/wt", current_phase="qa_testing")
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-qa-pass",
+                    "s-qa-pass",
+                    status="pending",
+                    pid=None,
+                    phase="qa_testing",
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_tq = AsyncMock()
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.QA_REPORT,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="abc",
+            raw_output_preview="approve",
+            command_audit=[
+                RegressionCommandAuditEntry(
+                    command="uv run pytest tests/unit/",
+                    source="llm_discovered",
+                    trigger_reason="discovery_fallback",
+                    exit_code=0,
+                ),
+                RegressionCommandAuditEntry(
+                    command="uv run pytest tests/integration/",
+                    source="llm_diagnostic",
+                    trigger_reason="diagnostic",
+                    exit_code=0,
+                ),
+            ],
+            command_audit_parse_status="parsed",
+            command_audit_parse_error=None,
+            command_audit_raw_lines=[
+                "- `uv run pytest tests/unit/` | source=llm_discovered | "
+                "trigger=fallback:pytest | exit_code=0",
+                "- `uv run pytest tests/integration/` | source=llm_diagnostic | "
+                "trigger=diagnostic:rerun_failed | exit_code=0",
+            ],
+            parsed_at=_NOW,
+        )
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "qa_testing",
+                    "role": "qa",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+        )
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=mock_tq,
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=settings,
+        )
+        task = _make_task(
+            "t-qa-pass",
+            "s-qa-pass",
+            status="pending",
+            pid=None,
+            phase="qa_testing",
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            result = await engine._dispatch_convergent_loop(task)
+
+        assert result is True
+        mock_tq.submit.assert_called_once()
+        assert mock_tq.submit.call_args[0][0].event_name == "qa_pass"
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+        finally:
+            await db.close()
+
+        assert approvals == []
+
 
 # ---------------------------------------------------------------------------
 # Fix: dispatch 传递 worktree_path 和 sandbox

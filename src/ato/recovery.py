@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ato.adapters.bmad_adapter import BmadAdapter
 from ato.models.schemas import (
     BmadFinding,
+    BmadParseResult,
     ProgressCallback,
     RecoveryAction,
     RecoveryClassification,
@@ -38,6 +39,12 @@ from ato.models.schemas import (
 from ato.nudge import Nudge
 from ato.progress import build_agent_progress_callback
 from ato.subprocess_mgr import SubprocessManager
+from ato.test_policy_audit import (
+    CommandAuditValidationError,
+    CommandAuditViolationCode,
+    build_qa_protocol_invalid_payload,
+    validate_command_audit,
+)
 from ato.transition_queue import TransitionQueue
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
@@ -1634,6 +1641,49 @@ class RecoveryEngine:
         finally:
             await db.close()
 
+    async def _record_qa_protocol_invalid(
+        self,
+        task: TaskRecord,
+        parse_result: BmadParseResult,
+        *,
+        audit_status: Literal["missing", "malformed", "invalid"],
+        violation_code: CommandAuditViolationCode,
+        detail: str,
+    ) -> None:
+        """将 QA command-audit 协议违规分流为 needs_human_review。"""
+
+        from ato.approval_helpers import create_approval
+        from ato.models.db import get_connection
+
+        payload = build_qa_protocol_invalid_payload(
+            task_id=task.task_id,
+            parse_result=parse_result,
+            audit_status=audit_status,
+            violation_code=violation_code,
+            detail=detail,
+        )
+
+        db = await get_connection(self._db_path)
+        try:
+            await create_approval(
+                db,
+                story_id=task.story_id,
+                approval_type="needs_human_review",
+                payload_dict=payload,
+                nudge=self._nudge,
+            )
+        finally:
+            await db.close()
+
+        logger.warning(
+            "qa_protocol_invalid_recorded",
+            task_id=task.task_id,
+            story_id=task.story_id,
+            audit_status=audit_status,
+            violation_code=violation_code,
+            detail=detail,
+        )
+
     async def _dispatch_structured_job_group(self, tasks: list[TaskRecord]) -> None:
         """Re-dispatch grouped structured-job tasks in one shared CLI session."""
         from ato.core import derive_project_root, get_main_path_gate
@@ -1772,6 +1822,36 @@ class RecoveryEngine:
                     phase_cfg["test_policy"] = test_policy.model_dump()
                 return phase_cfg
         return {}
+
+    @staticmethod
+    def _resolve_test_policy_static(phase_cfg: dict[str, Any], phase: str) -> Any:
+        """返回 runtime 可消费的 EffectiveTestPolicy；QA 在无 settings 时回退到默认策略。"""
+        from ato.config import DEFAULT_QA_FALLBACK_MAX_ADDITIONAL_COMMANDS, EffectiveTestPolicy
+
+        test_policy = phase_cfg.get("test_policy")
+        if isinstance(test_policy, EffectiveTestPolicy):
+            return test_policy
+        if isinstance(test_policy, dict):
+            return EffectiveTestPolicy.model_validate(test_policy)
+        if phase != "qa_testing":
+            return None
+        return EffectiveTestPolicy(
+            phase="qa_testing",
+            policy_source="qa_bounded_fallback",
+            required_layers=[],
+            optional_layers=[],
+            required_layer_commands=[],
+            optional_layer_commands=[],
+            missing_optional_layers=[],
+            allow_discovery=True,
+            max_additional_commands=DEFAULT_QA_FALLBACK_MAX_ADDITIONAL_COMMANDS,
+            allowed_when="always",
+            required_commands=[],
+            optional_commands=[],
+            project_defined_commands=[],
+            discovery_priority=["repo_native_wrappers", "standard_test_entrypoints"],
+            legacy_baseline=False,
+        )
 
     def _build_dispatch_options(
         self,
@@ -2983,6 +3063,53 @@ class RecoveryEngine:
                     if post_processing_open:
                         await self._complete_convergent_post_processing(task.task_id)
                     return True  # dispatch 已执行，parse 失败已记录
+
+            if task.phase == "qa_testing" and parse_result.command_audit_parse_status is not None:
+                if parse_result.command_audit_parse_status == "missing":
+                    await self._record_qa_protocol_invalid(
+                        task,
+                        parse_result,
+                        audit_status="missing",
+                        violation_code="COMMANDS_EXECUTED_MISSING",
+                        detail="`## Commands Executed` section is missing",
+                    )
+                    if post_processing_open:
+                        await self._complete_convergent_post_processing(task.task_id)
+                    return True
+
+                if parse_result.command_audit_parse_status == "malformed":
+                    await self._record_qa_protocol_invalid(
+                        task,
+                        parse_result,
+                        audit_status="malformed",
+                        violation_code="COMMANDS_EXECUTED_MALFORMED",
+                        detail=(
+                            parse_result.command_audit_parse_error
+                            or "`## Commands Executed` section is malformed"
+                        ),
+                    )
+                    if post_processing_open:
+                        await self._complete_convergent_post_processing(task.task_id)
+                    return True
+
+                qa_test_policy = self._resolve_test_policy_static(phase_cfg, task.phase)
+                if qa_test_policy is not None and parse_result.command_audit is not None:
+                    try:
+                        validate_command_audit(
+                            command_audit=parse_result.command_audit,
+                            test_policy=qa_test_policy,
+                        )
+                    except CommandAuditValidationError as exc:
+                        await self._record_qa_protocol_invalid(
+                            task,
+                            parse_result,
+                            audit_status="invalid",
+                            violation_code=exc.violation_code,
+                            detail=exc.detail,
+                        )
+                        if post_processing_open:
+                            await self._complete_convergent_post_processing(task.task_id)
+                        return True
 
             blocking_threshold = (
                 self._settings.cost.blocking_threshold

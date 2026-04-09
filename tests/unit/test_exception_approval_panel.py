@@ -191,6 +191,30 @@ def test_format_context_needs_human_review_design_gate_payload() -> None:
     assert "reason:" in impact
 
 
+def test_format_context_needs_human_review_qa_protocol_invalid_payload() -> None:
+    """needs_human_review 收到 qa_protocol_invalid payload 时展示协议违规上下文。"""
+    payload: dict[str, object] = {
+        "reason": "qa_protocol_invalid",
+        "task_id": "t-qa-1",
+        "audit_status": "invalid",
+        "violation_code": "OPTIONAL_PRIORITY_VIOLATION",
+        "detail": "optional commands must run first",
+        "raw_output_preview": "Recommendation: Request Changes",
+        "commands_executed_preview": [
+            "- `uv run pytest tests/unit/` | source=project_defined | "
+            "trigger=required_layer:unit | exit_code=0"
+        ],
+    }
+    what, impact = get_exception_context("needs_human_review", payload)
+    assert "QA command audit" in what
+    assert "BMAD" not in what
+    assert "task_id: t-qa-1" in impact
+    assert "audit_status: invalid" in impact
+    assert "OPTIONAL_PRIORITY_VIOLATION" in impact
+    assert "raw_output_preview:" in impact
+    assert "commands_executed_preview:" in impact
+
+
 def test_format_context_rebase_conflict_includes_worktree_path_when_present() -> None:
     """rebase_conflict 若有 story.worktree_path，则展示到影响范围。"""
     payload: dict[str, object] = {

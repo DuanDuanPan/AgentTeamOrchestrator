@@ -137,6 +137,124 @@ ATO 已补充回归测试，覆盖以下语义：
 
 一旦违反协议，应将该轮 QA report 视为 **protocol-invalid**，而不是当作正常 `qa_fail` 结果消费。
 
+#### 5.1.1 `protocol-invalid` 的审批语义
+
+`protocol-invalid` 在近期方案中**不建议新增 approval_type**。更稳妥的做法是：
+
+- 继续复用现有 `needs_human_review`
+- 通过 payload 中的 `reason=qa_protocol_invalid` 区分它与
+  - `bmad_parse_failed`
+  - design gate 失败
+- 默认决策仍保持现有 `retry / skip / escalate`
+
+这样做的原因是：
+
+- 现有 orchestrator 已经为 `needs_human_review` 打通了 retry/requeue 语义
+- `protocol-invalid` 的本质是“该轮 QA 结果不可自动消费”，而不是“产品代码已确认失败”
+- 若直接把它落为普通 `qa_fail`，会把协议治理失败误记为产品缺陷
+
+因此，近期 V1 的正确处理链路应为：
+
+1. QA markdown 解析出 `## Commands Executed`
+2. command-audit validator 校验 policy
+3. 若校验失败：
+   - 不提交 `qa_fail`
+   - 不将该轮 findings 当作有效 QA findings 入库
+   - 将该轮结果标记为 `protocol-invalid`
+   - 创建 `needs_human_review` approval，推荐动作保持 `retry`
+
+#### 5.1.2 `protocol-invalid` payload 合同
+
+建议新增一个共享 helper（例如 `build_qa_protocol_invalid_payload()`），由 recovery / core 共用，避免 payload 结构分叉。
+
+建议 payload 最小字段集如下：
+
+```json
+{
+  "reason": "qa_protocol_invalid",
+  "task_id": "t-qa-123",
+  "phase": "qa_testing",
+  "skill_type": "qa_report",
+  "audit_status": "missing|malformed|invalid",
+  "violation_code": "ADDITIONAL_BUDGET_EXCEEDED",
+  "detail": "executed additional commands 超过 max_additional_commands 限制",
+  "policy_source": "explicit",
+  "allow_discovery": true,
+  "allowed_when": "after_required_commands",
+  "max_additional_commands": 3,
+  "required_commands": ["uv run pytest"],
+  "optional_commands": ["pnpm build", "pnpm smoke"],
+  "commands_executed_preview": [
+    "`uv run pytest` | source=project_defined | trigger=required_layer:unit | exit_code=0",
+    "`pwd` | source=llm_diagnostic | trigger=diagnostic:cwd_check | exit_code=0"
+  ],
+  "raw_output_preview": "QA markdown preview...",
+  "options": ["retry", "skip", "escalate"]
+}
+```
+
+建议同时固定以下约束：
+
+- `task_id` 必填
+  - 否则 `needs_human_review + retry` 无法精确重调度原 QA task
+- `reason` 固定为 `qa_protocol_invalid`
+- `audit_status` 仅表示审计阶段
+  - `missing`: `## Commands Executed` 缺失
+  - `malformed`: section 存在但格式不可解析
+  - `invalid`: 能解析，但违反 policy
+- `violation_code` 使用固定枚举，而不是直接依赖自然语言错误串
+- `detail` 保存单行人类可读原因，供 CLI/TUI 直接展示
+- `commands_executed_preview` 仅保存有限条目，避免 payload 过大
+- 不复用 design gate 的 `failure_codes`
+  - 否则会和现有 `needs_human_review` 的 design gate 渲染分支冲突
+
+建议第一版固定的 `violation_code` 最小集合：
+
+- `COMMANDS_EXECUTED_MISSING`
+- `COMMANDS_EXECUTED_MALFORMED`
+- `REQUIRED_ORDER_VIOLATION`
+- `REQUIRED_COMMANDS_INCOMPLETE`
+- `OPTIONAL_PRIORITY_VIOLATION`
+- `ADDITIONAL_BUDGET_EXCEEDED`
+- `ADDITIONAL_GATE_CLOSED`
+- `DISCOVERY_DISABLED`
+- `INVALID_COMMAND_SOURCE`
+- `INVALID_TRIGGER_REASON`
+
+#### 5.1.3 测试矩阵
+
+建议至少覆盖以下 5 层测试：
+
+1. payload helper
+   - `build_qa_protocol_invalid_payload` 包含 `task_id`、`reason`、`violation_code`
+   - `commands_executed_preview` 会截断
+   - 空字段遵循“缺失即省略”，不输出占位字段
+
+2. approval 展示
+   - `needs_human_review` 收到 `reason=qa_protocol_invalid` 时，TUI/CLI 展示协议违规文案
+   - 展示 `task_id`、`violation_code`、`detail`
+   - 缺失可选字段时不展示空行
+
+3. QA parser
+   - 缺少 `## Commands Executed` → `audit_status=missing`
+   - 命令行格式错误 → `audit_status=malformed`
+   - canonical 格式输入 → 成功解析为结构化 command audit
+
+4. shared validator
+   - required 未完成或顺序错误
+   - optional 尚未消费完时提前执行 diagnostic/discovered
+   - additional commands 超出预算
+   - `allow_discovery=false` 仍执行 discovered/diagnostic
+   - `allowed_when=after_required_failure` 但 required 全成功仍追加命令
+   - source / trigger_reason 非法
+
+5. recovery 集成
+   - `protocol-invalid` 时创建 `needs_human_review`
+   - 不提交 `qa_pass/qa_fail`
+   - 不把该轮 findings 当作有效 QA findings 入库
+   - task 标记为 failed / non-consumable result，并保留 retry 上下文
+   - `needs_human_review + retry` 可重排同一 `task_id`
+
 ### 5.2 中期建议
 
 将 QA 的命令执行面从“开放 shell 自由执行”收回到“受控执行接口”：
@@ -160,4 +278,3 @@ ATO 已补充回归测试，覆盖以下语义：
 - convergent-loop 重复 QA 派发竞态: 已修复
 - QA 对 `Commands Executed` 的机器校验: 未实现
 - QA 对 additional budget / diagnostic priority 的 fail-closed enforcement: 未实现
-

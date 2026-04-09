@@ -561,6 +561,10 @@ class RegressionCommandAuditEntry(_StrictBase):
     exit_code: int | None
 
 
+CommandAuditParseStatus = Literal["missing", "malformed", "parsed"]
+"""QA `## Commands Executed` section 的 parser 级状态。"""
+
+
 class RegressionResult(_StrictBase):
     """Codex regression runner 的结构化输出模型。
 
@@ -903,4 +907,8 @@ class BmadParseResult(_StrictBase):
     raw_markdown_hash: str
     raw_output_preview: str
     parse_error: str | None = None
+    command_audit: list[RegressionCommandAuditEntry] | None = None
+    command_audit_parse_status: CommandAuditParseStatus | None = None
+    command_audit_parse_error: str | None = None
+    command_audit_raw_lines: list[str] | None = None
     parsed_at: datetime

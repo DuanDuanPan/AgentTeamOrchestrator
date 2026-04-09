@@ -1319,6 +1319,64 @@ class TestProcessApprovalDecisions:
         finally:
             await db3.close()
 
+    async def test_needs_human_review_retry_with_qa_protocol_invalid_payload_consumed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """qa_protocol_invalid + retry 应消费 approval 并重置同一 task。"""
+        await _insert_test_task(
+            initialized_db_path,
+            status="failed",
+            task_id="t-qa-invalid",
+            story_id="test-story-1",
+        )
+
+        from ato.models.db import get_connection, insert_approval
+        from ato.models.schemas import ApprovalRecord
+
+        now = datetime.now(tz=UTC)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="qqqq1111-0000-0000-0000-000000000000",
+                    story_id="test-story-1",
+                    approval_type="needs_human_review",
+                    status="approved",
+                    decision="retry",
+                    decided_at=now,
+                    created_at=now,
+                    payload='{"reason": "qa_protocol_invalid", "task_id": "t-qa-invalid", '
+                    '"audit_status": "invalid", '
+                    '"violation_code": "OPTIONAL_PRIORITY_VIOLATION", '
+                    '"options": ["retry", "skip", "escalate"]}',
+                ),
+            )
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        await orchestrator._process_approval_decisions()
+
+        from ato.models.db import get_connection as gc4
+        from ato.models.db import get_decided_unconsumed_approvals
+
+        db4 = await gc4(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db4)
+            assert len(remaining) == 0
+
+            cursor = await db4.execute(
+                "SELECT status FROM tasks WHERE task_id = ?",
+                ("t-qa-invalid",),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "pending"
+        finally:
+            await db4.close()
+
     async def test_dispatch_interactive_restart_developing_includes_open_suggestions(
         self, initialized_db_path: Path
     ) -> None:

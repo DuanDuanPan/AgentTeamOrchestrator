@@ -25,6 +25,7 @@ from ato.models.schemas import (
     BmadSkillType,
     FindingSeverity,
     ParseVerdict,
+    RegressionCommandAuditEntry,
 )
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
@@ -197,30 +198,28 @@ class BmadAdapter:
                     reason=incomplete_reason,
                     raw_output_preview=preview,
                 )
-                return BmadParseResult.model_validate(
-                    {
-                        "skill_type": skill_type,
-                        "verdict": "parse_failed",
-                        "findings": [],
-                        "parser_mode": "failed",
-                        "raw_markdown_hash": raw_hash,
-                        "raw_output_preview": preview,
-                        "parse_error": incomplete_reason,
-                        "parsed_at": now,
-                    }
+                return _build_parse_result(
+                    markdown_output=markdown_output,
+                    skill_type=skill_type,
+                    verdict="parse_failed",
+                    findings=[],
+                    parser_mode="failed",
+                    raw_markdown_hash=raw_hash,
+                    raw_output_preview=preview,
+                    parse_error=incomplete_reason,
+                    parsed_at=now,
                 )
             verdict = _compute_effective_verdict(markdown_output, skill_type, findings)
-            return BmadParseResult.model_validate(
-                {
-                    "skill_type": skill_type,
-                    "verdict": verdict,
-                    "findings": findings,
-                    "parser_mode": "deterministic",
-                    "raw_markdown_hash": raw_hash,
-                    "raw_output_preview": preview,
-                    "parse_error": None,
-                    "parsed_at": now,
-                }
+            return _build_parse_result(
+                markdown_output=markdown_output,
+                skill_type=skill_type,
+                verdict=verdict,
+                findings=findings,
+                parser_mode="deterministic",
+                raw_markdown_hash=raw_hash,
+                raw_output_preview=preview,
+                parse_error=None,
+                parsed_at=now,
             )
 
         # Stage 1.5: explicit verdict fast-path (Story 10.4 AC1)
@@ -241,17 +240,16 @@ class BmadAdapter:
                     skill_type=skill_type.value,
                     raw_output_preview=preview,
                 )
-                return BmadParseResult.model_validate(
-                    {
-                        "skill_type": skill_type,
-                        "verdict": "parse_failed",
-                        "findings": [],
-                        "parser_mode": "failed",
-                        "raw_markdown_hash": raw_hash,
-                        "raw_output_preview": preview,
-                        "parse_error": incomplete_reason,
-                        "parsed_at": now,
-                    }
+                return _build_parse_result(
+                    markdown_output=markdown_output,
+                    skill_type=skill_type,
+                    verdict="parse_failed",
+                    findings=[],
+                    parser_mode="failed",
+                    raw_markdown_hash=raw_hash,
+                    raw_output_preview=preview,
+                    parse_error=incomplete_reason,
+                    parsed_at=now,
                 )
 
             # Preserve any suggestion-level findings (e.g. defer section)
@@ -262,17 +260,16 @@ class BmadAdapter:
                 skill_type=skill_type.value,
                 suggestion_count=len(suggestion_findings),
             )
-            return BmadParseResult.model_validate(
-                {
-                    "skill_type": skill_type,
-                    "verdict": "approved",
-                    "findings": suggestion_findings,
-                    "parser_mode": "deterministic",
-                    "raw_markdown_hash": raw_hash,
-                    "raw_output_preview": preview,
-                    "parse_error": None,
-                    "parsed_at": now,
-                }
+            return _build_parse_result(
+                markdown_output=markdown_output,
+                skill_type=skill_type,
+                verdict="approved",
+                findings=suggestion_findings,
+                parser_mode="deterministic",
+                raw_markdown_hash=raw_hash,
+                raw_output_preview=preview,
+                parse_error=None,
+                parsed_at=now,
             )
 
         # Stage 2: semantic fallback
@@ -298,30 +295,28 @@ class BmadAdapter:
                         reason=incomplete_reason,
                         raw_output_preview=preview,
                     )
-                    return BmadParseResult.model_validate(
-                        {
-                            "skill_type": skill_type,
-                            "verdict": "parse_failed",
-                            "findings": [],
-                            "parser_mode": "failed",
-                            "raw_markdown_hash": raw_hash,
-                            "raw_output_preview": preview,
-                            "parse_error": incomplete_reason,
-                            "parsed_at": now,
-                        }
+                    return _build_parse_result(
+                        markdown_output=markdown_output,
+                        skill_type=skill_type,
+                        verdict="parse_failed",
+                        findings=[],
+                        parser_mode="failed",
+                        raw_markdown_hash=raw_hash,
+                        raw_output_preview=preview,
+                        parse_error=incomplete_reason,
+                        parsed_at=now,
                     )
                 verdict = _compute_effective_verdict(markdown_output, skill_type, findings_objs)
-                return BmadParseResult.model_validate(
-                    {
-                        "skill_type": skill_type,
-                        "verdict": verdict,
-                        "findings": findings_objs,
-                        "parser_mode": "semantic_fallback",
-                        "raw_markdown_hash": raw_hash,
-                        "raw_output_preview": preview,
-                        "parse_error": None,
-                        "parsed_at": now,
-                    }
+                return _build_parse_result(
+                    markdown_output=markdown_output,
+                    skill_type=skill_type,
+                    verdict=verdict,
+                    findings=findings_objs,
+                    parser_mode="semantic_fallback",
+                    raw_markdown_hash=raw_hash,
+                    raw_output_preview=preview,
+                    parse_error=None,
+                    parsed_at=now,
                 )
             except Exception as exc:
                 # Story 10.4 AC3: 区分 deterministic miss 和 semantic timeout
@@ -355,18 +350,59 @@ class BmadAdapter:
             input_length=len(markdown_output),
             raw_output_preview=preview,
         )
-        return BmadParseResult.model_validate(
+        return _build_parse_result(
+            markdown_output=markdown_output,
+            skill_type=skill_type,
+            verdict="parse_failed",
+            findings=[],
+            parser_mode="failed",
+            raw_markdown_hash=raw_hash,
+            raw_output_preview=preview,
+            parse_error=error_msg,
+            parsed_at=now,
+        )
+
+
+def _build_parse_result(
+    *,
+    markdown_output: str,
+    skill_type: BmadSkillType,
+    verdict: ParseVerdict,
+    findings: list[BmadFinding],
+    parser_mode: str,
+    raw_markdown_hash: str,
+    raw_output_preview: str,
+    parse_error: str | None,
+    parsed_at: datetime,
+) -> BmadParseResult:
+    payload: dict[str, Any] = {
+        "skill_type": skill_type,
+        "verdict": verdict,
+        "findings": findings,
+        "parser_mode": parser_mode,
+        "raw_markdown_hash": raw_markdown_hash,
+        "raw_output_preview": raw_output_preview,
+        "parse_error": parse_error,
+        "parsed_at": parsed_at,
+    }
+
+    if skill_type == BmadSkillType.QA_REPORT and verdict != "parse_failed":
+        (
+            command_audit,
+            command_audit_parse_status,
+            command_audit_parse_error,
+            command_audit_raw_lines,
+        ) = _parse_qa_command_audit(markdown_output)
+        payload.update(
             {
-                "skill_type": skill_type,
-                "verdict": "parse_failed",
-                "findings": [],
-                "parser_mode": "failed",
-                "raw_markdown_hash": raw_hash,
-                "raw_output_preview": preview,
-                "parse_error": error_msg,
-                "parsed_at": now,
+                "command_audit": command_audit,
+                "command_audit_parse_status": command_audit_parse_status,
+                "command_audit_parse_error": command_audit_parse_error,
+                "command_audit_raw_lines": command_audit_raw_lines,
             }
         )
+
+    return BmadParseResult.model_validate(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1282,93 @@ _QA_CRITERION_RE = re.compile(
     r"(?:\*\*)?Criterion(?:\*\*)?\s*[：:]\s*([^\n]+)",
     re.IGNORECASE,
 )
+
+_QA_COMMAND_AUDIT_LINE_RE = re.compile(
+    r"^\s*(?:[-*]\s+)?`(?P<command>.+?)`\s*\|\s*"
+    r"source=(?P<source>project_defined|llm_discovered|llm_diagnostic)\s*\|\s*"
+    r"trigger=(?P<trigger>required_layer:[^|]+|optional_layer:[^|]+|fallback:[^|]+|"
+    r"diagnostic:[^|]+)\s*\|\s*"
+    r"exit_code=(?P<exit_code>-?\d+|null)\s*$"
+)
+_QA_COMMAND_AUDIT_HEADING_RE = re.compile(
+    r"^(#{2,4})\s+.*?(?:commands\s+executed).*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _parse_qa_command_audit(
+    markdown: str,
+) -> tuple[
+    list[RegressionCommandAuditEntry] | None,
+    str,
+    str | None,
+    list[str],
+]:
+    """解析 QA report 中 canonical `## Commands Executed` section。"""
+
+    has_commands_executed_heading = _QA_COMMAND_AUDIT_HEADING_RE.search(markdown) is not None
+    section = _extract_named_section(markdown, r"commands\s+executed")
+    if section is None:
+        if has_commands_executed_heading:
+            return (
+                None,
+                "malformed",
+                "Commands Executed section is empty",
+                [],
+            )
+        return (None, "missing", None, [])
+
+    raw_lines = [line.strip() for line in section.splitlines() if line.strip()]
+    if not raw_lines:
+        return (
+            None,
+            "malformed",
+            "Commands Executed section is empty",
+            [],
+        )
+
+    command_audit: list[RegressionCommandAuditEntry] = []
+    for line_no, line in enumerate(raw_lines, start=1):
+        match = _QA_COMMAND_AUDIT_LINE_RE.fullmatch(line)
+        if match is None:
+            return (
+                None,
+                "malformed",
+                f"Malformed Commands Executed line {line_no}: {line[:160]}",
+                raw_lines,
+            )
+
+        trigger = match.group("trigger")
+        if trigger.startswith("required_layer:"):
+            trigger_reason = "required_layer"
+        elif trigger.startswith("optional_layer:"):
+            trigger_reason = "optional_layer"
+        elif trigger.startswith("fallback:"):
+            trigger_reason = "discovery_fallback"
+        elif trigger.startswith("diagnostic:"):
+            trigger_reason = "diagnostic"
+        else:  # pragma: no cover - guarded by regex, kept for defensive stability
+            return (
+                None,
+                "malformed",
+                f"Malformed Commands Executed line {line_no}: unsupported trigger {trigger!r}",
+                raw_lines,
+            )
+
+        exit_code_raw = match.group("exit_code")
+        exit_code = None if exit_code_raw == "null" else int(exit_code_raw)
+        command_audit.append(
+            RegressionCommandAuditEntry.model_validate(
+                {
+                    "command": match.group("command"),
+                    "source": match.group("source"),
+                    "trigger_reason": trigger_reason,
+                    "exit_code": exit_code,
+                }
+            )
+        )
+
+    return (command_audit, "parsed", None, raw_lines)
 
 
 def _parse_qa_report(markdown: str) -> list[BmadFinding] | None:

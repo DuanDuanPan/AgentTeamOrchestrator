@@ -24,6 +24,7 @@ from ato.config import (
     resolve_effective_test_policy,
 )
 from ato.models.schemas import CLIAdapterError, TransitionEvent, WorktreePreflightResult
+from ato.test_policy_audit import validate_command_audit
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
 
@@ -289,90 +290,11 @@ def _validate_regression_command_audit(
     if test_policy is None:
         return
 
-    project_defined_commands = set(test_policy.project_defined_commands)
-    required_commands = list(test_policy.required_commands)
-    required_positions = {command: index for index, command in enumerate(required_commands)}
-    optional_commands = set(test_policy.optional_commands)
-
-    for entry in command_audit:
-        if entry.source == "project_defined" and entry.command not in project_defined_commands:
-            raise ValueError(
-                "command_audit.source=project_defined 的命令必须来自已声明的 project-defined 集合"
-            )
-        if entry.command in required_positions:
-            expected_trigger = (
-                "legacy_baseline" if test_policy.legacy_baseline else "required_layer"
-            )
-            if entry.source != "project_defined" or entry.trigger_reason != expected_trigger:
-                raise ValueError(
-                    "required command 必须标记为 project_defined，并使用正确的 trigger_reason"
-                )
-            continue
-        if entry.command in optional_commands:
-            if entry.source != "project_defined" or entry.trigger_reason != "optional_layer":
-                raise ValueError(
-                    "optional command 必须标记为 project_defined，且 trigger_reason=optional_layer"
-                )
-            continue
-        if entry.source == "llm_discovered" and entry.trigger_reason != "discovery_fallback":
-            raise ValueError("llm_discovered 命令必须使用 trigger_reason=discovery_fallback")
-        if entry.source == "llm_diagnostic" and entry.trigger_reason != "diagnostic":
-            raise ValueError("llm_diagnostic 命令必须使用 trigger_reason=diagnostic")
-
-    prefix_required_count = 0
-    last_required_position = -1
-    for entry in command_audit:
-        required_position = required_positions.get(entry.command)
-        if required_position is None:
-            break
-        if required_position <= last_required_position:
-            raise ValueError(
-                "required commands 必须保持声明顺序，且在 additional commands 之前执行"
-            )
-        prefix_required_count += 1
-        last_required_position = required_position
-
-    for entry in command_audit[prefix_required_count:]:
-        if entry.command in required_positions:
-            raise ValueError("required commands 必须先于所有 additional commands 完成")
-
-    executed_required_commands = [entry.command for entry in command_audit[:prefix_required_count]]
-    missing_required_commands = [
-        command for command in required_commands if command not in executed_required_commands
-    ]
-
-    if test_policy.legacy_baseline:
-        if missing_required_commands and not skipped_command_reason:
-            raise ValueError("skipped legacy baseline commands 必须填写 skipped_command_reason")
-    elif executed_required_commands != required_commands:
-        raise ValueError("explicit required commands 必须全部执行，且顺序必须与配置一致")
-
-    additional_entries = command_audit[prefix_required_count:]
-    additional_count = len(additional_entries)
-
-    if additional_count > test_policy.max_additional_commands:
-        raise ValueError("executed additional commands 超过 max_additional_commands 限制")
-
-    if test_policy.allowed_when == "never" and additional_count > 0:
-        raise ValueError("allowed_when=never 时不允许执行 additional commands")
-    if test_policy.allowed_when == "after_required_failure" and additional_count > 0:
-        has_required_failure = any(
-            entry.exit_code not in (None, 0) for entry in command_audit[:prefix_required_count]
-        )
-        if not has_required_failure:
-            raise ValueError(
-                "allowed_when=after_required_failure 时，"
-                "只有 required commands 失败后才允许追加命令"
-            )
-
-    if not test_policy.allow_discovery:
-        discovered_entries = [
-            entry
-            for entry in additional_entries
-            if entry.source in {"llm_discovered", "llm_diagnostic"}
-        ]
-        if discovered_entries:
-            raise ValueError("allow_discovery=false 时不允许执行 discovered 或 diagnostic commands")
+    validate_command_audit(
+        command_audit=command_audit,
+        test_policy=test_policy,
+        skipped_command_reason=skipped_command_reason,
+    )
 
 
 def _build_conflict_resolution_prompt(

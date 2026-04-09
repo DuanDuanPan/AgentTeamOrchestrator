@@ -233,6 +233,149 @@ Validation failed.
         assert result.parser_mode == "deterministic"
         assert result.verdict == "changes_requested"
 
+    async def test_qa_report_parses_commands_executed_section(self) -> None:
+        md = (
+            "Recommendation: Request Changes\n"
+            "Quality Score: 72/100\n\n"
+            "## Commands Executed\n"
+            "- `uv run pytest tests/unit/` | source=project_defined | "
+            "trigger=required_layer:unit | exit_code=1\n"
+            "- `uv run pytest tests/integration/` | source=project_defined | "
+            "trigger=optional_layer:integration | exit_code=0\n"
+            "- `uv run pytest tests/smoke/` | source=llm_discovered | "
+            "trigger=fallback:pytest | exit_code=0\n"
+            "- `uv run pytest tests/targeted/` | source=llm_diagnostic | "
+            "trigger=diagnostic:rerun_failed | exit_code=1\n\n"
+            "## Critical Issues\n\n"
+            "1. Missing regression coverage.\n"
+            "Severity: P1\n"
+            "Location: tests/unit/test_recovery.py:10\n"
+            "Criterion: Coverage\n"
+        )
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
+
+        assert result.command_audit_parse_status == "parsed"
+        assert result.command_audit_parse_error is None
+        assert result.command_audit_raw_lines is not None
+        assert len(result.command_audit_raw_lines) == 4
+        assert result.command_audit is not None
+        assert [entry.trigger_reason for entry in result.command_audit] == [
+            "required_layer",
+            "optional_layer",
+            "discovery_fallback",
+            "diagnostic",
+        ]
+
+    async def test_qa_report_missing_commands_executed_is_not_parse_failed(self) -> None:
+        md = (
+            "Recommendation: Request Changes\n"
+            "Quality Score: 72/100\n\n"
+            "## Critical Issues\n\n"
+            "1. Missing regression coverage.\n"
+            "Severity: P1\n"
+            "Location: tests/unit/test_recovery.py:10\n"
+            "Criterion: Coverage\n"
+        )
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
+
+        assert result.verdict == "changes_requested"
+        assert result.command_audit is None
+        assert result.command_audit_parse_status == "missing"
+        assert result.command_audit_parse_error is None
+        assert result.command_audit_raw_lines == []
+        assert len(result.findings) == 1
+
+    async def test_qa_report_malformed_commands_executed_is_deferred_to_recovery(self) -> None:
+        md = (
+            "Recommendation: Request Changes\n"
+            "Quality Score: 72/100\n\n"
+            "## Commands Executed\n"
+            "- uv run pytest tests/unit/ | source=project_defined | "
+            "trigger=required_layer:unit | exit_code=1\n\n"
+            "## Critical Issues\n\n"
+            "1. Missing regression coverage.\n"
+            "Severity: P1\n"
+            "Location: tests/unit/test_recovery.py:10\n"
+            "Criterion: Coverage\n"
+        )
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
+
+        assert result.verdict == "changes_requested"
+        assert result.command_audit is None
+        assert result.command_audit_parse_status == "malformed"
+        assert result.command_audit_parse_error is not None
+        assert "Malformed Commands Executed line 1" in result.command_audit_parse_error
+        assert result.command_audit_raw_lines is not None
+        assert result.command_audit_raw_lines[0].startswith("- uv run pytest")
+
+    async def test_qa_report_empty_commands_executed_section_is_malformed(self) -> None:
+        md = (
+            "Recommendation: Request Changes\n"
+            "Quality Score: 72/100\n\n"
+            "## Commands Executed\n\n"
+            "## Critical Issues\n\n"
+            "1. Missing regression coverage.\n"
+            "Severity: P1\n"
+            "Location: tests/unit/test_recovery.py:10\n"
+            "Criterion: Coverage\n"
+        )
+        adapter = BmadAdapter()
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
+
+        assert result.verdict == "changes_requested"
+        assert result.command_audit is None
+        assert result.command_audit_parse_status == "malformed"
+        assert result.command_audit_parse_error == "Commands Executed section is empty"
+        assert result.command_audit_raw_lines == []
+        assert len(result.findings) == 1
+
+    async def test_qa_report_explicit_pass_fast_path_still_parses_command_audit(self) -> None:
+        md = (
+            "Recommendation: Approve\n\n"
+            "## Commands Executed\n"
+            "- `uv run pytest tests/unit/` | source=project_defined | "
+            "trigger=required_layer:unit | exit_code=0\n"
+        )
+        adapter = BmadAdapter(semantic_runner=_FakeSemanticRunner([]))
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
+
+        assert result.verdict == "approved"
+        assert result.parser_mode == "deterministic"
+        assert result.command_audit_parse_status == "parsed"
+        assert result.command_audit is not None
+        assert result.command_audit[0].trigger_reason == "required_layer"
+
+    async def test_qa_report_semantic_fallback_still_parses_command_audit(self) -> None:
+        md = (
+            "# QA Output\n\n"
+            "## Commands Executed\n"
+            "- `uv run pytest tests/unit/` | source=project_defined | "
+            "trigger=required_layer:unit | exit_code=1\n"
+        )
+        runner = _FakeSemanticRunner(
+            [
+                {
+                    "severity": "blocking",
+                    "category": "coverage",
+                    "description": "Missing test",
+                    "file_path": "tests/unit/test_recovery.py",
+                    "line": 10,
+                    "rule_id": "qa.coverage",
+                }
+            ]
+        )
+        adapter = BmadAdapter(semantic_runner=runner)
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
+
+        assert runner.called
+        assert result.parser_mode == "semantic_fallback"
+        assert result.command_audit_parse_status == "parsed"
+        assert result.command_audit is not None
+        assert result.command_audit[0].trigger_reason == "required_layer"
+
     async def test_json_array_fast_path(self) -> None:
         md = _load_fixture("bmad_code_review_05.md")
         adapter = BmadAdapter()
