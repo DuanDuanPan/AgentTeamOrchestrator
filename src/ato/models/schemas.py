@@ -546,6 +546,21 @@ class BatchStoryLink(_StrictBase):
 # ---------------------------------------------------------------------------
 
 
+class RegressionCommandAuditEntry(_StrictBase):
+    """Regression 单条命令审计记录。"""
+
+    command: str
+    source: Literal["project_defined", "llm_discovered", "llm_diagnostic"]
+    trigger_reason: Literal[
+        "required_layer",
+        "optional_layer",
+        "discovery_fallback",
+        "diagnostic",
+        "legacy_baseline",
+    ]
+    exit_code: int | None
+
+
 class RegressionResult(_StrictBase):
     """Codex regression runner 的结构化输出模型。
 
@@ -556,6 +571,7 @@ class RegressionResult(_StrictBase):
     regression_status: Literal["pass", "fail"]
     summary: str
     commands_attempted: list[str]
+    command_audit: list[RegressionCommandAuditEntry]
     skipped_command_reason: str | None
     discovery_notes: str
 

@@ -16,7 +16,13 @@ from typing import Any
 import aiosqlite
 import structlog
 
-from ato.config import ATOSettings
+from ato.config import (
+    TEST_COMMAND_SOURCES,
+    TEST_COMMAND_TRIGGER_REASONS,
+    ATOSettings,
+    EffectiveTestPolicy,
+    resolve_effective_test_policy,
+)
 from ato.models.schemas import CLIAdapterError, TransitionEvent, WorktreePreflightResult
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
@@ -65,6 +71,29 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
                 "items": {"type": "string"},
                 "description": "Shell commands actually executed during regression",
             },
+            "command_audit": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "source": {
+                            "type": "string",
+                            "enum": list(TEST_COMMAND_SOURCES),
+                        },
+                        "trigger_reason": {
+                            "type": "string",
+                            "enum": list(TEST_COMMAND_TRIGGER_REASONS),
+                        },
+                        "exit_code": {
+                            "type": ["integer", "null"],
+                        },
+                    },
+                    "required": ["command", "source", "trigger_reason", "exit_code"],
+                    "additionalProperties": False,
+                },
+                "description": "Structured provenance for each executed command",
+            },
             "skipped_command_reason": {
                 "type": ["string", "null"],
                 "description": "If any baseline command was skipped, explain why",
@@ -78,6 +107,7 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
             "regression_status",
             "summary",
             "commands_attempted",
+            "command_audit",
             "skipped_command_reason",
             "discovery_notes",
         ],
@@ -130,6 +160,221 @@ and test suite autonomously. Look for pytest, unittest, jest, cargo test, go tes
 other standard test runners. Execute the full test suite you discover."""
 
 
+def _describe_allowed_when(allowed_when: str) -> str:
+    if allowed_when == "never":
+        return "Never run additional commands beyond the required set."
+    if allowed_when == "after_required_commands":
+        return "Additional commands are allowed only after all required commands finish."
+    if allowed_when == "after_required_failure":
+        return "Additional commands are allowed only if at least one required command fails."
+    return "Additional commands are always allowed, subject to the configured budget."
+
+
+def _format_policy_layer_commands(
+    layer_entries: list[dict[str, Any]],
+    *,
+    trigger_reason: str,
+) -> str:
+    if not layer_entries:
+        return "  - None"
+
+    lines: list[str] = []
+    for entry in layer_entries:
+        layer_name = str(entry["layer"])
+        commands = entry.get("commands", [])
+        for command in commands:
+            lines.append(
+                f"  - `{command}` (source=project_defined, trigger_reason={trigger_reason}, "
+                f"layer={layer_name})"
+            )
+    return "\n".join(lines)
+
+
+def _format_project_defined_commands(commands: list[str]) -> str:
+    if not commands:
+        return "  - None"
+    return "\n".join(f"  - `{command}`" for command in commands)
+
+
+def _build_regression_policy_instructions(test_policy: dict[str, Any]) -> str:
+    policy_source = str(test_policy.get("policy_source", "explicit"))
+    required_layers = ", ".join(test_policy.get("required_layers", [])) or "None"
+    optional_layers = ", ".join(test_policy.get("optional_layers", [])) or "None"
+    allow_discovery = bool(test_policy.get("allow_discovery", False))
+    additional_budget = int(test_policy.get("max_additional_commands", 0))
+    allowed_when = str(test_policy.get("allowed_when", "never"))
+
+    required_commands = _format_policy_layer_commands(
+        test_policy.get("required_layer_commands", []),
+        trigger_reason="legacy_baseline"
+        if bool(test_policy.get("legacy_baseline", False))
+        else "required_layer",
+    )
+    optional_commands = _format_policy_layer_commands(
+        test_policy.get("optional_layer_commands", []),
+        trigger_reason="optional_layer",
+    )
+    project_defined_commands = _format_project_defined_commands(
+        [str(command) for command in test_policy.get("project_defined_commands", [])]
+    )
+
+    if policy_source == "legacy_regression":
+        required_intro = (
+            "The operator has provided these baseline regression commands. You MUST execute them "
+            "first, in the exact order shown below:"
+        )
+    elif test_policy.get("required_commands"):
+        required_intro = "Execute the required project-defined commands first, in the exact order:"
+    else:
+        required_intro = (
+            "No project-defined required commands are configured. Use bounded discovery only."
+        )
+
+    discovery_rules = (
+        "Discovery outside the project-defined command set is disabled.\n"
+        if not allow_discovery
+        else "If the additional-command gate is open, discovered commands must prefer standard "
+        "test entrypoints such as `uv run pytest` / `pytest`, `npm test` / `pnpm test` / "
+        "`yarn test`, `go test ./...`, `cargo test`, or `./gradlew test`.\n"
+    )
+
+    return (
+        "## Execution Policy\n"
+        f"- Policy source: {policy_source}\n"
+        f"- Required layers: {required_layers}\n"
+        f"- Optional layers: {optional_layers}\n"
+        f"- allow_discovery: {str(allow_discovery).lower()}\n"
+        f"- max_additional_commands: {additional_budget}\n"
+        f"- allowed_when: {allowed_when}\n"
+        f"- Gate semantics: {_describe_allowed_when(allowed_when)}\n\n"
+        "## Project-defined Commands\n"
+        "Use `source=project_defined` in `command_audit` only for the commands listed here:\n"
+        f"{project_defined_commands}\n\n"
+        "## Required Commands\n"
+        f"{required_intro}\n"
+        f"{required_commands}\n\n"
+        "## Additional Commands\n"
+        f"- You may spend at most {additional_budget} additional command slots after the required "
+        "set, and only if the gate semantics allow it.\n"
+        "- Use project-defined optional commands before any discovered or diagnostic command.\n"
+        f"- Optional command candidates:\n{optional_commands}\n"
+        f"- {discovery_rules}\n"
+        "## Structured Result Contract\n"
+        "- `commands_attempted` must contain only raw shell command strings, in execution order.\n"
+        "- `command_audit` must contain one entry per executed command, in the same order as "
+        "`commands_attempted`.\n"
+        "- `command_audit.source` must be one of: "
+        f"{', '.join(TEST_COMMAND_SOURCES)}.\n"
+        "- `command_audit.trigger_reason` must be one of: "
+        f"{', '.join(TEST_COMMAND_TRIGGER_REASONS)}.\n"
+        "- `command_audit.exit_code` must be an integer when observed, otherwise null.\n"
+        "- Keep `discovery_notes` as free text explaining how you chose or discovered commands.\n"
+        "- Do NOT add source labels inside `commands_attempted`.\n"
+        "- If you skip a required legacy baseline command, explain it in "
+        "`skipped_command_reason`.\n"
+    )
+
+
+def _validate_regression_command_audit(
+    *,
+    commands_attempted: list[str],
+    command_audit: list[Any],
+    test_policy: EffectiveTestPolicy | None,
+    skipped_command_reason: str | None,
+) -> None:
+    audited_commands = [entry.command for entry in command_audit]
+    if audited_commands != commands_attempted:
+        raise ValueError("command_audit.command 必须与 commands_attempted 一一对应且顺序一致")
+
+    if test_policy is None:
+        return
+
+    project_defined_commands = set(test_policy.project_defined_commands)
+    required_commands = list(test_policy.required_commands)
+    required_positions = {command: index for index, command in enumerate(required_commands)}
+    optional_commands = set(test_policy.optional_commands)
+
+    for entry in command_audit:
+        if entry.source == "project_defined" and entry.command not in project_defined_commands:
+            raise ValueError(
+                "command_audit.source=project_defined 的命令必须来自已声明的 project-defined 集合"
+            )
+        if entry.command in required_positions:
+            expected_trigger = (
+                "legacy_baseline" if test_policy.legacy_baseline else "required_layer"
+            )
+            if entry.source != "project_defined" or entry.trigger_reason != expected_trigger:
+                raise ValueError(
+                    "required command 必须标记为 project_defined，并使用正确的 trigger_reason"
+                )
+            continue
+        if entry.command in optional_commands:
+            if entry.source != "project_defined" or entry.trigger_reason != "optional_layer":
+                raise ValueError(
+                    "optional command 必须标记为 project_defined，且 trigger_reason=optional_layer"
+                )
+            continue
+        if entry.source == "llm_discovered" and entry.trigger_reason != "discovery_fallback":
+            raise ValueError("llm_discovered 命令必须使用 trigger_reason=discovery_fallback")
+        if entry.source == "llm_diagnostic" and entry.trigger_reason != "diagnostic":
+            raise ValueError("llm_diagnostic 命令必须使用 trigger_reason=diagnostic")
+
+    prefix_required_count = 0
+    last_required_position = -1
+    for entry in command_audit:
+        required_position = required_positions.get(entry.command)
+        if required_position is None:
+            break
+        if required_position <= last_required_position:
+            raise ValueError(
+                "required commands 必须保持声明顺序，且在 additional commands 之前执行"
+            )
+        prefix_required_count += 1
+        last_required_position = required_position
+
+    for entry in command_audit[prefix_required_count:]:
+        if entry.command in required_positions:
+            raise ValueError("required commands 必须先于所有 additional commands 完成")
+
+    executed_required_commands = [entry.command for entry in command_audit[:prefix_required_count]]
+    missing_required_commands = [
+        command for command in required_commands if command not in executed_required_commands
+    ]
+
+    if test_policy.legacy_baseline:
+        if missing_required_commands and not skipped_command_reason:
+            raise ValueError("skipped legacy baseline commands 必须填写 skipped_command_reason")
+    elif executed_required_commands != required_commands:
+        raise ValueError("explicit required commands 必须全部执行，且顺序必须与配置一致")
+
+    additional_entries = command_audit[prefix_required_count:]
+    additional_count = len(additional_entries)
+
+    if additional_count > test_policy.max_additional_commands:
+        raise ValueError("executed additional commands 超过 max_additional_commands 限制")
+
+    if test_policy.allowed_when == "never" and additional_count > 0:
+        raise ValueError("allowed_when=never 时不允许执行 additional commands")
+    if test_policy.allowed_when == "after_required_failure" and additional_count > 0:
+        has_required_failure = any(
+            entry.exit_code not in (None, 0) for entry in command_audit[:prefix_required_count]
+        )
+        if not has_required_failure:
+            raise ValueError(
+                "allowed_when=after_required_failure 时，"
+                "只有 required commands 失败后才允许追加命令"
+            )
+
+    if not test_policy.allow_discovery:
+        discovered_entries = [
+            entry
+            for entry in additional_entries
+            if entry.source in {"llm_discovered", "llm_diagnostic"}
+        ]
+        if discovered_entries:
+            raise ValueError("allow_discovery=false 时不允许执行 discovered 或 diagnostic commands")
+
+
 def _build_conflict_resolution_prompt(
     conflict_files: list[str],
     conflict_output: str,
@@ -178,22 +423,12 @@ Important:
 
 
 def _build_regression_prompt(repo_root: Path, settings: ATOSettings) -> str:
-    """构建 regression runner 的 Codex prompt。
-
-    判定逻辑：
-    - regression_test_commands 显式配置（非 None）→ 用作 baseline
-    - regression_test_commands 未配置但 regression_test_command 非默认 → 用作 baseline
-    - 两者均为默认/未配置 → autonomous discovery
-    """
-    has_explicit_plural = settings.regression_test_commands is not None
-    has_explicit_singular = settings.regression_test_command != "uv run pytest"
-
-    if has_explicit_plural or has_explicit_singular:
-        commands = settings.get_regression_commands()
-        cmd_list = "\n".join(f"  - {cmd}" for cmd in commands)
-        baseline_instructions = _BASELINE_WITH_COMMANDS.format(commands=cmd_list)
-    else:
+    """构建 regression runner 的 Codex prompt。"""
+    policy = resolve_effective_test_policy(settings, "regression")
+    if policy is None:
         baseline_instructions = _BASELINE_WITHOUT_COMMANDS
+    else:
+        baseline_instructions = _build_regression_policy_instructions(policy.model_dump())
 
     return _REGRESSION_PROMPT_TEMPLATE.format(
         repo_root=repo_root,
@@ -923,6 +1158,7 @@ class MergeQueue:
                         await db.close()
                     return
 
+                test_policy = resolve_effective_test_policy(self._settings, "regression")
                 prompt = _build_regression_prompt(repo_root, self._settings)
                 opts = self._build_regression_dispatch_options()
 
@@ -963,6 +1199,12 @@ class MergeQueue:
 
                 try:
                     reg_result = RegressionResult.model_validate(result.structured_output)
+                    _validate_regression_command_audit(
+                        commands_attempted=reg_result.commands_attempted,
+                        command_audit=reg_result.command_audit,
+                        test_policy=test_policy,
+                        skipped_command_reason=reg_result.skipped_command_reason,
+                    )
                 except (ValidationError, TypeError) as ve:
                     db = await get_connection(self._db_path)
                     try:
@@ -974,6 +1216,22 @@ class MergeQueue:
                             error_message=(
                                 f"Regression runner produced invalid structured result: {ve}"
                             )[:500],
+                            completed_at=datetime.now(tz=UTC),
+                        )
+                    finally:
+                        await db.close()
+                    return
+                except ValueError as ve:
+                    db = await get_connection(self._db_path)
+                    try:
+                        await update_task_status(
+                            db,
+                            task_id,
+                            "completed",
+                            exit_code=1,
+                            error_message=(f"Regression command audit validation failed: {ve}")[
+                                :500
+                            ],
                             completed_at=datetime.now(tz=UTC),
                         )
                     finally:

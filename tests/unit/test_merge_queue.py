@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from ato.config import ATOSettings
 from ato.models.db import (
     complete_merge,
     dequeue_next_merge,
@@ -1706,6 +1709,22 @@ class TestCodexRegressionRunner:
         """构造 mock AdapterResult。"""
         from ato.models.schemas import AdapterResult
 
+        if (
+            structured_output is not None
+            and "command_audit" not in structured_output
+            and isinstance(structured_output.get("commands_attempted"), list)
+        ):
+            structured_output = dict(structured_output)
+            structured_output["command_audit"] = [
+                {
+                    "command": command,
+                    "source": "project_defined",
+                    "trigger_reason": "legacy_baseline",
+                    "exit_code": 0,
+                }
+                for command in structured_output["commands_attempted"]
+            ]
+
         return AdapterResult(
             status="success" if exit_code == 0 else "failure",
             exit_code=exit_code,
@@ -1722,17 +1741,26 @@ class TestCodexRegressionRunner:
         """regression_test_commands 显式配置 → prompt 包含基线命令。"""
         from ato.merge_queue import _build_regression_prompt
 
-        settings = MagicMock()
-        settings.regression_test_commands = ["uv run pytest tests/unit/"]
-        settings.regression_test_command = "uv run pytest"
-        settings.get_regression_commands = MagicMock(return_value=["uv run pytest tests/unit/"])
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            regression_test_commands=["uv run pytest tests/unit/"],
+        )
 
         prompt = _build_regression_prompt(Path("/repo"), settings)
         assert "uv run pytest tests/unit/" in prompt
-        assert "MUST execute them first" in prompt
-        assert "read-only observation mode" not in prompt
+        assert "baseline regression commands" in prompt
+        assert "command_audit" in prompt
         assert "git-clean relative to the starting snapshot" in prompt
-        assert "Do NOT skip a baseline command solely because it rebuilds native modules" in prompt
+        assert "legacy_baseline" in prompt
 
     async def test_build_regression_prompt_with_explicit_singular_command(
         self,
@@ -1740,15 +1768,23 @@ class TestCodexRegressionRunner:
         """singular 被用户改为非默认值 → 作为 baseline 命令。"""
         from ato.merge_queue import _build_regression_prompt
 
-        settings = MagicMock()
-        settings.regression_test_commands = None
-        settings.regression_test_command = "make test"
-        settings.get_regression_commands = MagicMock(return_value=["make test"])
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            regression_test_command="make test",
+        )
 
         prompt = _build_regression_prompt(Path("/repo"), settings)
         assert "make test" in prompt
-        assert "MUST execute them first" in prompt
-        assert "read-only observation mode" not in prompt
+        assert "baseline regression commands" in prompt
         assert "git-clean relative to the starting snapshot" in prompt
 
     async def test_build_regression_prompt_defaults_use_autonomous_discovery(
@@ -1757,15 +1793,169 @@ class TestCodexRegressionRunner:
         """两者均为默认/未配置 → autonomous discovery（AC7 可达路径）。"""
         from ato.merge_queue import _build_regression_prompt
 
-        settings = MagicMock()
-        settings.regression_test_commands = None
-        settings.regression_test_command = "uv run pytest"
-        settings.get_regression_commands = MagicMock(return_value=["uv run pytest"])
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+        )
 
         prompt = _build_regression_prompt(Path("/repo"), settings)
-        assert "Discover the project" in prompt
-        assert "read-only observation mode" not in prompt
+        assert "bounded discovery only" in prompt
         assert "git-clean relative to the starting snapshot" in prompt
+        assert "command_audit.source" in prompt
+
+    async def test_build_regression_prompt_with_explicit_phase_policy(self) -> None:
+        from ato.merge_queue import _build_regression_prompt
+
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "unit": {"commands": ["uv run pytest tests/unit/"]},
+                "integration": {"commands": ["uv run pytest tests/integration/"]},
+            },  # type: ignore[dict-item]
+            phase_test_policy={
+                "regression": {
+                    "required_layers": ["unit"],
+                    "optional_layers": ["integration"],
+                    "allow_discovery": True,
+                    "max_additional_commands": 2,
+                    "allowed_when": "after_required_failure",
+                }
+            },  # type: ignore[dict-item]
+        )
+
+        prompt = _build_regression_prompt(Path("/repo"), settings)
+        assert "Required layers: unit" in prompt
+        assert "Optional layers: integration" in prompt
+        assert "uv run pytest tests/integration/" in prompt
+        assert "trigger_reason" in prompt
+
+    def test_validate_regression_command_audit_rejects_closed_failure_gate(self) -> None:
+        from ato.config import resolve_effective_test_policy
+        from ato.merge_queue import _validate_regression_command_audit
+        from ato.models.schemas import RegressionCommandAuditEntry
+
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "unit": {"commands": ["uv run pytest tests/unit/"]},
+                "integration": {"commands": ["uv run pytest tests/integration/"]},
+            },  # type: ignore[dict-item]
+            phase_test_policy={
+                "regression": {
+                    "required_layers": ["unit"],
+                    "optional_layers": ["integration"],
+                    "allow_discovery": True,
+                    "max_additional_commands": 1,
+                    "allowed_when": "after_required_failure",
+                }
+            },  # type: ignore[dict-item]
+        )
+        policy = resolve_effective_test_policy(settings, "regression")
+        assert policy is not None
+
+        entries = [
+            RegressionCommandAuditEntry(
+                command="uv run pytest tests/unit/",
+                source="project_defined",
+                trigger_reason="required_layer",
+                exit_code=0,
+            ),
+            RegressionCommandAuditEntry(
+                command="uv run pytest tests/integration/",
+                source="project_defined",
+                trigger_reason="optional_layer",
+                exit_code=0,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="after_required_failure"):
+            _validate_regression_command_audit(
+                commands_attempted=[entry.command for entry in entries],
+                command_audit=entries,
+                test_policy=policy,
+                skipped_command_reason=None,
+            )
+
+    def test_validate_regression_command_audit_rejects_discovery_when_disabled(self) -> None:
+        from ato.config import resolve_effective_test_policy
+        from ato.merge_queue import _validate_regression_command_audit
+        from ato.models.schemas import RegressionCommandAuditEntry
+
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "unit": {"commands": ["uv run pytest tests/unit/"]},
+            },  # type: ignore[dict-item]
+            phase_test_policy={
+                "regression": {
+                    "required_layers": ["unit"],
+                    "optional_layers": [],
+                    "allow_discovery": False,
+                    "max_additional_commands": 1,
+                    "allowed_when": "after_required_commands",
+                }
+            },  # type: ignore[dict-item]
+        )
+        policy = resolve_effective_test_policy(settings, "regression")
+        assert policy is not None
+
+        entries = [
+            RegressionCommandAuditEntry(
+                command="uv run pytest tests/unit/",
+                source="project_defined",
+                trigger_reason="required_layer",
+                exit_code=0,
+            ),
+            RegressionCommandAuditEntry(
+                command="pytest tests/e2e/",
+                source="llm_discovered",
+                trigger_reason="discovery_fallback",
+                exit_code=1,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="allow_discovery=false"):
+            _validate_regression_command_audit(
+                commands_attempted=[entry.command for entry in entries],
+                command_audit=entries,
+                test_policy=policy,
+                skipped_command_reason=None,
+            )
 
     async def test_dispatch_regression_preserves_single_task_contract(
         self, initialized_db_path: Path
@@ -1809,7 +1999,10 @@ class TestCodexRegressionRunner:
             structured_output={
                 "regression_status": "pass",
                 "summary": "All 42 tests passed",
-                "commands_attempted": ["uv run pytest tests/unit/"],
+                "commands_attempted": [
+                    "uv run pytest tests/unit/",
+                    "uv run pytest tests/integration/",
+                ],
                 "skipped_command_reason": None,
                 "discovery_notes": "pytest detected",
             },
@@ -1859,7 +2052,10 @@ class TestCodexRegressionRunner:
             structured_output={
                 "regression_status": "fail",
                 "summary": "3 tests failed in test_auth.py",
-                "commands_attempted": ["uv run pytest tests/unit/"],
+                "commands_attempted": [
+                    "uv run pytest tests/unit/",
+                    "uv run pytest tests/integration/",
+                ],
                 "skipped_command_reason": None,
                 "discovery_notes": "pytest detected",
             },
@@ -1896,6 +2092,99 @@ class TestCodexRegressionRunner:
             assert row[0] == "completed"
             assert row[1] == 1
             assert "3 tests failed" in row[2]
+        finally:
+            await db.close()
+
+    async def test_run_regression_via_codex_invalid_command_audit_fails_closed(
+        self, initialized_db_path: Path
+    ) -> None:
+        """违反 additional-command gate 的 command_audit → fail-closed。"""
+        from ato.core import reset_main_path_gate
+
+        reset_main_path_gate()
+
+        queue = self._make_queue(initialized_db_path)
+        queue._settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "unit": {"commands": ["uv run pytest tests/unit/"]},
+                "integration": {"commands": ["uv run pytest tests/integration/"]},
+            },  # type: ignore[dict-item]
+            phase_test_policy={
+                "regression": {
+                    "required_layers": ["unit"],
+                    "optional_layers": ["integration"],
+                    "allow_discovery": True,
+                    "max_additional_commands": 1,
+                    "allowed_when": "after_required_failure",
+                }
+            },  # type: ignore[dict-item]
+        )
+        task_id = await self._setup_task(initialized_db_path)
+
+        result = self._make_adapter_result(
+            structured_output={
+                "regression_status": "pass",
+                "summary": "All tests passed",
+                "commands_attempted": [
+                    "uv run pytest tests/unit/",
+                    "uv run pytest tests/integration/",
+                ],
+                "command_audit": [
+                    {
+                        "command": "uv run pytest tests/unit/",
+                        "source": "project_defined",
+                        "trigger_reason": "required_layer",
+                        "exit_code": 0,
+                    },
+                    {
+                        "command": "uv run pytest tests/integration/",
+                        "source": "project_defined",
+                        "trigger_reason": "optional_layer",
+                        "exit_code": 0,
+                    },
+                ],
+                "skipped_command_reason": None,
+                "discovery_notes": "policy-driven run",
+            },
+        )
+
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                return_value=set(),
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            cursor = await db.execute(
+                "SELECT status, exit_code, error_message FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "completed"
+            assert row[1] == 1
+            assert "audit validation failed" in row[2].lower()
         finally:
             await db.close()
 
@@ -2172,7 +2461,10 @@ class TestCodexRegressionRunner:
             structured_output={
                 "regression_status": "pass",
                 "summary": "All tests passed",
-                "commands_attempted": ["uv run pytest"],
+                "commands_attempted": [
+                    "uv run pytest tests/unit/",
+                    "uv run pytest tests/integration/",
+                ],
                 "skipped_command_reason": None,
                 "discovery_notes": "pytest",
             },

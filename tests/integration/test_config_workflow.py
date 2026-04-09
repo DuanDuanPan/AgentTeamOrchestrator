@@ -50,6 +50,23 @@ class TestConfigWorkflow:
         assert definitions[8].phase_type == "interactive_session"  # uat
         assert definitions[8].timeout_seconds == settings.timeout.interactive_session
 
+    def test_example_template_propagates_test_policy_to_phase_cfg(self, tmp_path: Path) -> None:
+        from ato.recovery import RecoveryEngine
+
+        example_path = Path("ato.yaml.example")
+        config_path = _write_config(tmp_path, example_path.read_text(encoding="utf-8"))
+
+        settings = load_config(config_path)
+        qa_cfg = RecoveryEngine._resolve_phase_config_static(settings, "qa_testing")
+        regression_cfg = RecoveryEngine._resolve_phase_config_static(settings, "regression")
+
+        assert "test_policy" in qa_cfg
+        assert "test_policy" in regression_cfg
+        assert qa_cfg["test_policy"]["policy_source"] == "explicit"
+        assert regression_cfg["test_policy"]["policy_source"] == "explicit"
+        assert qa_cfg["test_policy"]["required_layers"] == ["lint", "typecheck", "unit"]
+        assert regression_cfg["test_policy"]["optional_layers"] == ["integration", "smoke"]
+
     def test_nested_custom_config_end_to_end_applies_model_overrides(self, tmp_path: Path) -> None:
         """自定义路径中的配置可加载，并正确应用 model_map 与 timeout 映射。"""
         config_path = _write_config(

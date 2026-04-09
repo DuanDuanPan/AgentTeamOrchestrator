@@ -2,8 +2,8 @@
 title: '跨项目测试策略分层与受控发现'
 slug: 'cross-project-test-policy-layering'
 created: '2026-04-09'
-status: 'review'
-stepsCompleted: [1, 2, 3, 4]
+status: 'Implementation Complete'
+stepsCompleted: [1, 2, 3, 4, 5, 6, 7]
 tech_stack:
   - 'Python 3.11+'
   - 'Pydantic Settings / YAML 配置'
@@ -119,46 +119,78 @@ ATO 当前对测试执行采用了不对称模型：`regression` 支持操作者
 - 统一的是“测试策略抽象”，不是 `qa_testing` 与 `regression` 的完整 phase 语义；两者现有的 workspace、调度器、结果消费链路必须保留。
 - 第一版固定采用 `test_catalog` 与 `phase_test_policy` 作为 canonical 配置命名，避免在实现期再引入 `test_layers`、`test_capabilities` 等平行命名。
 - effective test policy 只能由 `config.py` 中的单一 resolver 计算；`recovery.py` 与 `merge_queue.py` 只能消费解析结果，不能各自拼装策略。解析结果必须通过统一 runtime surface 向下传播，例如 `phase_cfg["test_policy"]` 或等价字段，而不是让各调用方再读原始 YAML。
-- 第一版审计信息不新增 DB schema；但允许扩展现有 structured output / text output 合同。regression 应引入机器可验证的 `command_audit` 结构化字段，同时保留 `commands_attempted` 作为纯命令文本列表；QA 审计继续走文本 section，但格式必须稳定。
+- 第一版审计信息不新增 DB schema；但允许扩展现有 structured output / text output 合同。regression 应引入机器可读、schema-validated 的 `command_audit` 结构化字段，同时保留 `commands_attempted` 作为纯命令文本列表；QA 审计继续走文本 section，但格式必须稳定。
 - 非 `qa_testing` / `regression` 的 phase 默认行为不变，不能在实现时顺手把策略抽象扩散到 `validating`、`reviewing` 等其他 phase。
 - `qa_testing` 在无显式 policy 时仍必须“可运行”，但 fallback 不能继续是无上限自由发现。第一版应提供内建 bounded-discovery 默认策略：优先 repo-native wrapper scripts，其次标准 test entrypoints，并受默认 `max_additional_commands` 限制。
 - `ato.yaml.example` 必须同时展示两层信息：phase policy 使用抽象 layer 名，`test_catalog` 使用项目真实命令映射。不能把“不要在 phase policy 中写死工具名”误写成“示例里完全不展示真实命令”。
+
+### Clarifications
+
+#### Clarification 1: `allowed_when` 采用“声明式配置 + 运行时求值”两层模型
+
+- `config.py` 中的单一 resolver 负责产出 declaration-only 的 effective policy，包括 `required_layers`、`optional_layers`、`allow_discovery`、`max_additional_commands`、`allowed_when` 以及由 layer 展开的命令集合；resolver 不接收、也不推断运行时执行结果。
+- `allowed_when` 的布尔求值发生在 phase execution 内，而不是 `load_config()` 或 `_resolve_phase_config_static()` 阶段。`recovery.py` 与 `merge_queue.py` 可以消费 `phase_cfg["test_policy"]` 并基于“本次 phase 执行尝试中 required commands 的完成/失败结果”决定是否允许 additional commands，但不能回读原始 YAML 或重新发明第二套策略语义。
+- `after_required_commands` 表示：当前执行尝试中的 required commands 已全部完成（无论成功或失败）；`after_required_failure` 表示：当前执行尝试中的 required commands 至少有一条失败；`never` / `always` 按字面语义处理。
+- 对 legacy regression 路径，operator baseline commands 在该执行模型下等价视为 required commands；其完成/失败结果直接作为 `allowed_when` 的输入信号。
+- 对 `qa_testing` 这类 convergent loop，`allowed_when` 与 `max_additional_commands` 一样按每轮 execution attempt 重新求值、重新计数，不跨轮累计状态。
+
+#### Clarification 2: regression `command_audit` 是 best-effort provenance，不是 deterministic proof
+
+- `command_audit` 的目标是“机器可读、可测试、可审计的结构化记录”，不是对命令来源做完全确定性的系统证明。ATO 对其进行 schema 校验与有限一致性校验，但下游逻辑不得仅凭 `source` 字段做硬性判定。
+- regression prompt 必须显式向 agent 提供 project-defined command 集合，包括 required commands、optional commands 与 legacy baseline commands（若存在），从而让 agent 能在输出时把命令来源标注为 `project_defined`、`llm_discovered` 或 `llm_diagnostic`。
+- ATO 侧至少应校验：`commands_attempted` 仍是纯命令字符串列表；`command_audit.command` 与 `commands_attempted` 可对应；标记为 `project_defined` 的命令必须来自 prompt 中提供的 project-defined command 集合或 legacy baseline 集合。
+- `exit_code` 采用 best-effort 语义：若 agent 能观察到退出码，则输出整数；若命令未启动、被跳过、或运行环境无法可靠提供退出码，则输出 `null`（或 schema 允许的等价空值），而不是臆造数值。
+- `discovery_notes` 保留，用于补充“为何选择该命令/如何发现该入口”的自由文本说明；`command_audit` 不替代 `discovery_notes`，两者并存。
+
+#### Clarification 3: QA bounded-discovery fallback 与文本审计格式固定为 canonical 合同
+
+- 当 `qa_testing` 没有显式 `phase_test_policy` 时，ATO 必须使用内建 bounded-discovery fallback，而不是恢复到“执行全部可发现测试命令”的开放式 prompt。fallback 的固定优先顺序为：
+  1. repo-native wrapper scripts / task entrypoints，例如 `package.json` scripts、`Makefile` targets、`justfile`、`Taskfile.yml`、`tox` / `nox` / `hatch` / `poetry` / `uv` 项目包装入口；
+  2. 若未发现稳定 wrapper，再尝试标准 test entrypoints，例如 Python 的 `uv run pytest` / `pytest`，Node 的 `npm test` / `pnpm test` / `yarn test`，Go 的 `go test ./...`，Rust 的 `cargo test`，JVM 的 `./gradlew test`；
+  3. 仅当 `allow_discovery=true` 且满足 `allowed_when` 时，才允许在上述集合之外追加诊断型命令，并受 `max_additional_commands` 限制。
+- 上述优先顺序属于 prompt 合同的一部分，必须在 QA prompt 文本中固定表达，而不是交由实现者在不同 phase 各自发明。
+- QA 文本审计继续使用稳定 markdown section，不引入新的 findings schema。第一版固定使用 `## Commands Executed` section，并要求每条命令按以下 canonical 单行格式记录：
+  - ``- `COMMAND` | source=project_defined|llm_discovered|llm_diagnostic | trigger=required_layer:<name>|optional_layer:<name>|fallback:<kind>|diagnostic:<reason> | exit_code=<int|null>``
+- 若命令未执行而被跳过，不写入 `Commands Executed` 条目；跳过原因应在相邻说明文本或总结段落中解释，但不得把来源标签直接拼进 regression `commands_attempted`。
 
 ## Implementation Plan
 
 ### Tasks
 
-- [ ] Task 1: 在配置模型中引入通用测试能力层与 phase 策略层，同时保留 legacy regression 路径
+- [x] Task 1: 在配置模型中引入通用测试能力层与 phase 策略层，同时保留 legacy regression 路径
   - File: `src/ato/config.py`
   - Action: 新增面向跨项目测试策略的配置 DTO，例如 `TestLayerConfig` 与 `PhaseTestPolicyConfig`，并在 `ATOSettings` 中增加通用配置入口（如 `test_catalog`、`phase_test_policy` 或等价命名）。
   - Notes: 必须支持“单 layer 多命令”“layer 可缺省”“phase 按需声明 required/optional layers”。推荐内建 layer 名至少包含 `bootstrap / lint / typecheck / unit / integration / system / build / smoke / package`，但项目可只声明子集。`regression_test_command` / `regression_test_commands` 不能删除，需通过 helper 映射为新模型下的 effective regression policy。
 
-- [ ] Task 2: 为 phase 解析提供“有效测试策略”访问器，而不是让 prompt 直接读取原始 YAML
+- [x] Task 2: 为 phase 解析提供“有效测试策略”访问器，而不是让 prompt 直接读取原始 YAML
   - File: `src/ato/config.py`
   - Action: 增加 helper，用于根据 phase 名称返回有效测试策略，合并优先级至少覆盖：显式 `phase_test_policy` > legacy regression config > 无配置时的 discovery fallback。
   - Notes: 对非法策略引用做校验并抛 `ConfigError`；例如引用未知 layer、`max_additional_commands < 0`、`allowed_when` 非法枚举等。helper 必须同时固化三类关键语义：`required_layers` 顺序即执行顺序、`optional_layers` 顺序即候选追加顺序、`max_additional_commands` 按单次 phase 执行尝试计数。不要把该逻辑散落到 `recovery.py` 和 `merge_queue.py`。
   - Notes: 解析后的 effective policy 必须通过统一 runtime surface 向下传播，例如挂入 `_resolve_phase_config_static()` 返回值的 `test_policy` 字段，避免出现第二套配置读取路径。
+  - Notes: resolver 只产出 declaration-only 的 effective policy；`allowed_when` 的布尔求值必须在 phase execution 内基于“本次执行尝试中的 required commands 结果”完成，而不是在 `load_config()` 时提前求值。
 
-- [ ] Task 3: 将 `qa_testing` prompt 改造成“策略驱动 + parser 兼容”
+- [x] Task 3: 将 `qa_testing` prompt 改造成“策略驱动 + parser 兼容”
   - File: `src/ato/recovery.py`
   - Action: 改造 `qa_testing` prompt 模板或其构造路径，使其优先使用项目声明的测试 layer 与 phase policy，明确 required layers、optional layers、是否允许 discovery、额外命令上限及触发条件。
   - Notes: 必须保留 `qa_report` 解析器依赖的完整合同：`Recommendation`、`Quality Score`、`Critical Issues`、`Recommendations`、`Quality Criteria Assessment`、编号 issue block，以及每个 issue 内的 `Severity` / `Location` / `Criterion` 元数据。`Commands Executed` 可以增强，但不能破坏现有解析兼容性。
-  - Notes: 当 `qa_testing` 没有显式 policy 时，不应继续使用“无限制发现并尽量全跑”的旧 prompt，而应使用内建 bounded-discovery fallback：优先 repo-native wrapper scripts，其次标准 test entrypoints，并受默认 `max_additional_commands` 约束。命令记录需要体现来源与触发原因，但 QA 侧继续使用稳定文本 section，而不是引入新 findings schema。
+  - Notes: 当 `qa_testing` 没有显式 policy 时，不应继续使用“无限制发现并尽量全跑”的旧 prompt，而应使用内建 bounded-discovery fallback：优先 repo-native wrapper scripts / task entrypoints（如 `package.json` scripts、`Makefile`、`justfile`、`Taskfile.yml`、`tox` / `nox` / `hatch` / `poetry` / `uv` 包装入口），其次标准 test entrypoints（如 `uv run pytest` / `pytest`、`npm test` / `pnpm test` / `yarn test`、`go test ./...`、`cargo test`、`./gradlew test`），并受默认 `max_additional_commands` 约束。命令记录需要体现来源与触发原因，但 QA 侧继续使用稳定文本 section，而不是引入新 findings schema。
+  - Notes: 第一版固定使用 `## Commands Executed` 文本 section，并要求每条命令采用 canonical 单行格式：``- `COMMAND` | source=... | trigger=... | exit_code=...``。
 
-- [ ] Task 4: 将 `regression` prompt 与 baseline 行为升级为通用策略模型的一个特例
+- [x] Task 4: 将 `regression` prompt 与 baseline 行为升级为通用策略模型的一个特例
   - File: `src/ato/merge_queue.py`
   - Action: 改造 `_build_regression_prompt()`，使其在显式 phase policy 存在时按通用策略生成指令；若不存在，则继续保留当前 `regression_test_commands` baseline contract。
   - Notes: 现有 “The operator has provided these baseline regression commands. You MUST execute them first” 语义必须保留。新增策略后，只允许在 `allowed_when` 满足时执行额外发现/诊断命令，并且 required commands 的求值必须覆盖 legacy baseline 语义。
   - File: `src/ato/models/schemas.py`
-  - Action: 扩展 `RegressionResult` 及对应 JSON schema，使 regression structured output 同时提供向后兼容的 `commands_attempted: list[str]` 与机器可验证的 `command_audit` 条目列表。
+  - Action: 扩展 `RegressionResult` 及对应 JSON schema，使 regression structured output 同时提供向后兼容的 `commands_attempted: list[str]` 与机器可读、schema-validated 的 `command_audit` 条目列表。
   - Notes: `commands_attempted` 必须继续保持“纯 shell 命令文本”语义，不能把来源标签直接拼进字符串；来源、触发原因、exit code 等元数据应进入 `command_audit`。
+  - Notes: `command_audit` 属于 best-effort provenance 记录。prompt 必须显式提供 project-defined command 集合，ATO 至少做 schema 校验与有限一致性校验；`source` 字段不得被下游当作 deterministic proof 使用。`discovery_notes` 保留，不与 `command_audit` 合并。
 
-- [ ] Task 5: 更新公开配置模板，给出跨语言友好的最小示例
+- [x] Task 5: 更新公开配置模板，给出跨语言友好的最小示例
   - File: `ato.yaml.example`
   - Action: 增加通用测试能力与 phase 策略示例，展示如何为 `qa_testing` 与 `regression` 分别声明 required layers、optional layers 和 discovery 边界。
   - Notes: phase policy 必须使用抽象 layer 名；`test_catalog` 必须展示这些 layer 如何映射到项目真实命令。可以用注释或双示例表现 Node/Python 等不同项目，但不能把真实命令完全藏掉。legacy `regression_test_command(s)` 注释仍需保留，并明确其迁移/兼容关系。
 
-- [ ] Task 6: 用现有测试矩阵覆盖配置、prompt 和 regression 合同
+- [x] Task 6: 用现有测试矩阵覆盖配置、prompt 和 regression 合同
   - File: `tests/unit/test_config.py`
   - Action: 新增配置解析与校验测试，覆盖通用 `test_catalog` / `phase_test_policy` 加载、单 layer 多命令、缺省 layer、legacy regression 映射、非法 layer 引用拒绝、`required_layers` 执行顺序、`max_additional_commands` 计数语义。
   - Notes: 测试应直接断言 effective policy 的结果，而不是只断言原始字段存在。必须显式覆盖 `regression_test_commands: []` 回退 singular 与 singular 默认值触发 discovery 的 legacy 边界。
@@ -172,10 +204,11 @@ ATO 当前对测试执行采用了不对称模型：`regression` 支持操作者
   - Action: 增加示例配置到 effective policy/runtime surface 的端到端测试，验证新增配置字段不会破坏模板加载与 phase cfg 传播。
   - Notes: 至少覆盖 `phase_cfg["test_policy"]` 或等价传播面，并验证未纳入范围的 phase 在加载后仍保持原行为。
 
-- [ ] Task 7: 固化枚举与文本合同，避免实现期二次发明
+- [x] Task 7: 固化枚举与文本合同，避免实现期二次发明
   - File: `src/ato/config.py`
   - Action: 为 `allowed_when` 提供固定枚举定义，为命令来源与触发原因提供固定枚举或常量集合。
   - Notes: 第一版要同时固定 QA 文本审计格式与 regression `command_audit` 结构字段名，避免测试、prompt 与 structured output 各写一套约定。
+  - Notes: `command_audit.exit_code` 应采用 `int | null` 或等价固定合同；无法可靠观察退出码时必须输出空值，而不是伪造退出码。
 
 ### Acceptance Criteria
 
@@ -183,7 +216,7 @@ ATO 当前对测试执行采用了不对称模型：`regression` 支持操作者
 - [ ] AC 2: Given 某个测试 layer 配置了多条命令，when 解析该 layer，then 命令按声明顺序保留；and `required_layers` 的声明顺序即执行顺序；and `optional_layers` 的声明顺序即候选追加顺序。
 - [ ] AC 3: Given 仅配置 legacy `regression_test_commands` 而没有新的 regression phase policy，when 构建 regression prompt，then prompt 仍明确要求优先执行 operator baseline commands；and `regression_test_commands: []` 回退到 singular；and plural 为 `None` 且 singular 为默认值 `"uv run pytest"` 时继续走 discovery fallback。
 - [ ] AC 4: Given `qa_testing` 存在显式 phase policy，when 构建 QA prompt，then prompt 优先使用声明的 required/optional layers；and 仅在 `allow_discovery=true` 且满足 `allowed_when` 条件时才允许追加命令；and prompt 仍包含 `Recommendation`、`Quality Score`、`Critical Issues`、`Recommendations`、`Quality Criteria Assessment`、编号 issue block，以及每个 issue 所需的 `Severity` / `Location` / `Criterion` 元数据。
-- [ ] AC 5: Given `regression` 存在显式 phase policy，when 构建 regression prompt，then prompt 先按 required order 执行 required commands；and 只有满足策略条件时才允许额外发现/诊断；and structured output 同时包含向后兼容的 `commands_attempted` 与机器可验证的 `command_audit`。
+- [ ] AC 5: Given `regression` 存在显式 phase policy，when 构建 regression prompt，then prompt 先按 required order 执行 required commands；and 只有满足策略条件时才允许额外发现/诊断；and structured output 同时包含向后兼容的 `commands_attempted` 与机器可读、schema-validated 的 `command_audit`。
 - [ ] AC 6: Given phase policy 或测试能力映射引用了未知 layer、非法触发条件、或负数 `max_additional_commands`，when 调用 `load_config()`，then 抛出 `ConfigError`，并给出可定位到配置项的错误信息。
 - [ ] AC 7: Given `qa_testing` 与 `regression` 都接入新模型，when 它们运行在各自现有链路中，then 仅统一测试策略抽象；and `qa_testing` 继续在 worktree 上运行、`regression` 继续由 merge queue 在 main workspace 上运行；and 不引入新的 DB schema。
 - [ ] AC 8: Given 修改完成后运行相关测试，when 执行 `tests/unit/test_config.py`、`tests/unit/test_recovery.py`、`tests/unit/test_merge_queue.py`、`tests/integration/test_config_workflow.py`，then 新增策略逻辑与 legacy 路径均被覆盖；and 至少有一条测试验证 QA prompt 的 parser 兼容性未被破坏；and 至少有一条测试验证 effective policy 通过统一 runtime surface 传播。
@@ -230,7 +263,7 @@ ATO 当前对测试执行采用了不对称模型：`regression` 支持操作者
 - 第一版只解决“如何平衡硬规则与受控发现”，不解决所有测试治理问题；例如 flaky 策略库、历史命令推荐、自动策略学习可以留到后续 story。
 - 高风险项 1：把 `test_catalog` / phase policy 设计成通用 CI DSL，导致学习成本过高。第一版必须限制字段集，避免表达式求值、复杂依赖图和条件树。
 - 高风险项 2：把抽象 layer 重新退化成工具名，或把 `lint` / `typecheck` 这类真实决策维度压扁成过粗的抽象。每个推荐 layer 在实现中都需要附带语义说明。
-- 高风险项 3：为了审计而改动 QA parser 或 findings schema。第一版应优先保持 QA findings 解析不变，只在文本 section 中增强命令审计；需要机器验证的审计信息优先放入 regression structured output。
+- 高风险项 3：为了审计而改动 QA parser 或 findings schema。第一版应优先保持 QA findings 解析不变，只在文本 section 中增强命令审计；需要机器可读、schema-validated 的审计信息优先放入 regression structured output。
 - 高风险项 4：没有定义 `required_layers` 执行顺序、`allowed_when` 求值模型、`max_additional_commands` 计数单位，导致不同 phase 各自实现出不同语义。第一版必须把这三件事写成固定协议。
-- 高风险项 5：把来源标签直接塞进 `commands_attempted`，破坏该字段原有“纯命令文本”语义。若需要机器可验证审计，必须使用独立结构化字段。
+- 高风险项 5：把来源标签直接塞进 `commands_attempted`，破坏该字段原有“纯命令文本”语义。若需要机器可读、schema-validated 的审计，必须使用独立结构化字段。
 - 第一版非目标：不自动学习历史命令、不做跨项目命令推荐、不引入 flaky policy registry，也不在本 story 中解决命令成功率统计与动态策略调优。

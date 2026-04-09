@@ -54,3 +54,12 @@ History follows Conventional Commit-style prefixes such as `feat:`, `feat(story-
 ## Configuration & Operational Notes
 
 Start from `ato.yaml.example` for local configuration. Do not commit runtime state, secrets, or `.ato/` SQLite data. If you touch approval, recovery, or convergent-loop flows, verify both CLI and TUI behavior because they share the same state store.
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current

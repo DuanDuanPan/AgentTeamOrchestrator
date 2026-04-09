@@ -164,6 +164,138 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
     ),
 }
 
+
+def _describe_allowed_when(allowed_when: str) -> str:
+    if allowed_when == "never":
+        return "Never run additional commands beyond the required command set."
+    if allowed_when == "after_required_commands":
+        return "Additional commands are allowed only after all required commands finish."
+    if allowed_when == "after_required_failure":
+        return "Additional commands are allowed only if at least one required command fails."
+    return "Additional commands are always allowed, subject to the configured budget."
+
+
+def _format_policy_layer_commands(
+    layer_entries: list[dict[str, Any]],
+    *,
+    trigger_prefix: str,
+) -> str:
+    if not layer_entries:
+        return "  - None"
+
+    lines: list[str] = []
+    for entry in layer_entries:
+        layer_name = str(entry["layer"])
+        commands = entry.get("commands", [])
+        for command in commands:
+            lines.append(f"  - `{command}` (trigger={trigger_prefix}:{layer_name})")
+    return "\n".join(lines)
+
+
+def _build_qa_testing_prompt(
+    worktree_path: str,
+    story_id: str,
+    phase_cfg: dict[str, Any],
+) -> str:
+    test_policy = phase_cfg.get("test_policy")
+    if not isinstance(test_policy, dict):
+        return _CONVERGENT_LOOP_PROMPTS["qa_testing"].format(
+            worktree_path=worktree_path,
+            story_id=story_id,
+        )
+
+    policy_source = str(test_policy.get("policy_source", "explicit"))
+    required_layers = ", ".join(test_policy.get("required_layers", [])) or "None"
+    optional_layers = ", ".join(test_policy.get("optional_layers", [])) or "None"
+    missing_optional_layers = test_policy.get("missing_optional_layers", [])
+    missing_optional_note = ""
+    if missing_optional_layers:
+        missing = ", ".join(str(layer) for layer in missing_optional_layers)
+        missing_optional_note = (
+            f"- Skip undeclared optional layers silently: {missing}. "
+            "Do not fail the run for them.\n"
+        )
+
+    allow_discovery = bool(test_policy.get("allow_discovery", False))
+    additional_budget = int(test_policy.get("max_additional_commands", 0))
+    allowed_when = str(test_policy.get("allowed_when", "never"))
+    required_commands = _format_policy_layer_commands(
+        test_policy.get("required_layer_commands", []),
+        trigger_prefix="required_layer",
+    )
+    optional_commands = _format_policy_layer_commands(
+        test_policy.get("optional_layer_commands", []),
+        trigger_prefix="optional_layer",
+    )
+
+    discovery_block = (
+        "## Discovery Priority\n"
+        "1. Prefer repo-native wrapper scripts and task entrypoints such as package.json "
+        "scripts, Makefile targets, justfile, Taskfile.yml, tox, nox, hatch, poetry, or uv.\n"
+        "2. If no stable wrapper exists, try standard test entrypoints such as "
+        "`uv run pytest` / `pytest`, `npm test` / `pnpm test` / `yarn test`, "
+        "`go test ./...`, `cargo test`, `./gradlew test`.\n"
+        "3. Only when the additional-command gate is open may you use diagnostic commands "
+        "outside the policy-defined list.\n"
+    )
+    if policy_source != "qa_bounded_fallback":
+        discovery_block = (
+            "## Discovery Priority\n"
+            "1. Use project-defined optional commands before any discovered command.\n"
+            "2. Only if `allow_discovery=true` and the additional-command gate is open may you "
+            "run discovered or diagnostic commands.\n"
+        )
+
+    discovery_permission = "enabled" if allow_discovery else "disabled"
+
+    return (
+        f"Run the test policy for the project in the worktree at {worktree_path}. "
+        f"Story: {story_id}.\n\n"
+        "## Test Policy\n"
+        f"- Policy source: {policy_source}\n"
+        f"- Required layers: {required_layers}\n"
+        f"- Optional layers: {optional_layers}\n"
+        f"- allow_discovery: {str(allow_discovery).lower()} ({discovery_permission})\n"
+        f"- max_additional_commands: {additional_budget} per QA round\n"
+        f"- allowed_when: {allowed_when}\n"
+        f"- Gate semantics: {_describe_allowed_when(allowed_when)}\n"
+        "Treat all commands from required/optional layers as project_defined commands.\n"
+        f"{missing_optional_note}"
+        "\n## Required Commands\n"
+        "Execute required commands first, in the exact order shown below:\n"
+        f"{required_commands}\n\n"
+        "## Additional Commands\n"
+        f"- After the required commands finish, you may spend at most {additional_budget} "
+        "additional command slots in this QA round.\n"
+        "- Use optional commands in the configured order before any discovered or "
+        "diagnostic command.\n"
+        "- If the gate semantics do not permit additional commands, stop after the required set.\n"
+        f"- Optional command candidates:\n{optional_commands}\n\n"
+        f"{discovery_block}\n"
+        "## Analysis Requirements\n"
+        "1. Execute the required command set first.\n"
+        "2. Decide whether the additional-command gate is open based only on the required "
+        "commands from this round.\n"
+        "3. If the gate is open, spend the limited additional-command budget on the highest-signal "
+        "optional, discovered, or diagnostic commands.\n"
+        "4. Analyze failures, errors, and warnings, then propose concrete fixes.\n\n"
+        "## Output format\n"
+        "- **Recommendation**: Approve / Request Changes / Block\n"
+        "- **Quality Score**: N/100\n"
+        "- `## Commands Executed` section is mandatory.\n"
+        "- Under `## Commands Executed`, record each executed command on its own line using this "
+        "exact format:\n"
+        "  - `COMMAND` | source=project_defined|llm_discovered|llm_diagnostic | "
+        "trigger=required_layer:<name>|optional_layer:<name>|fallback:<kind>|diagnostic:<reason> "
+        "| exit_code=<int|null>\n"
+        "- List findings under ## Critical Issues (Must Fix) and "
+        "## Recommendations (Should Fix) sections.\n"
+        "- For each issue include **Severity**: P0-P3, **Location**: `file:line`, "
+        "**Criterion**: criterion_name, and a concrete fix description.\n"
+        "- Also include a Quality Criteria Assessment table."
+    )
+
+
 # Shared designing-phase prompt contract. Core initial dispatch and RecoveryEngine
 # recovery both format the same template through `_STRUCTURED_JOB_PROMPTS`.
 _DESIGNING_SAVE_REPORT_KEYS = (
@@ -1578,11 +1710,11 @@ class RecoveryEngine:
         """从 settings 读取 phase 级别配置（静态版本，供 core.py 复用）。"""
         if settings is None:
             return {}
-        from ato.config import build_phase_definitions
+        from ato.config import build_phase_definitions, resolve_effective_test_policy
 
         for pd in build_phase_definitions(settings):
             if pd.name == phase:
-                return {
+                phase_cfg = {
                     "cli_tool": pd.cli_tool,
                     "role": pd.role,
                     "phase_type": pd.phase_type,
@@ -1597,6 +1729,10 @@ class RecoveryEngine:
                     "parallel_safe": pd.parallel_safe,
                     "batchable": pd.batchable,
                 }
+                test_policy = resolve_effective_test_policy(settings, phase)
+                if test_policy is not None:
+                    phase_cfg["test_policy"] = test_policy.model_dump()
+                return phase_cfg
         return {}
 
     def _build_dispatch_options(
@@ -2678,11 +2814,14 @@ class RecoveryEngine:
                     from ato.design_artifacts import ARTIFACTS_REL
 
                     validation_report_path = f"{ARTIFACTS_REL}/{task.story_id}-validation-report.md"
-                    prompt = prompt_template.format(
-                        worktree_path=effective_path,
-                        story_id=task.story_id,
-                        validation_report_path=validation_report_path,
-                    )
+                    if task.phase == "qa_testing":
+                        prompt = _build_qa_testing_prompt(effective_path, task.story_id, phase_cfg)
+                    else:
+                        prompt = prompt_template.format(
+                            worktree_path=effective_path,
+                            story_id=task.story_id,
+                            validation_report_path=validation_report_path,
+                        )
                 else:
                     prompt = (
                         f"Recovery re-dispatch for story {task.story_id}, "

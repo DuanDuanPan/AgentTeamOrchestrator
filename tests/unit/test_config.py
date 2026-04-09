@@ -15,6 +15,7 @@ from ato.config import (
     build_phase_definitions,
     evaluate_skip_condition,
     load_config,
+    resolve_effective_test_policy,
 )
 from ato.models.schemas import ConfigError, StoryRecord
 
@@ -1170,6 +1171,251 @@ regression_test_command: "uv run pytest"
             "Empty plural list must fall back to singular to prevent "
             "silently skipping regression gate"
         )
+
+
+class TestCrossProjectTestPolicy:
+    def test_explicit_policy_preserves_layer_and_command_order(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: qa_testing
+    role: qa
+    type: convergent_loop
+    next_on_success: regression
+    next_on_failure: regression
+  - name: regression
+    role: qa
+    type: structured_job
+    next_on_success: done
+    next_on_failure: done
+test_catalog:
+  lint:
+    commands:
+      - "uv run ruff check src tests"
+  unit:
+    commands:
+      - "uv run pytest tests/unit/"
+      - "uv run pytest tests/unit/test_config.py"
+  integration:
+    commands:
+      - "uv run pytest tests/integration/"
+phase_test_policy:
+  qa_testing:
+    required_layers:
+      - lint
+      - unit
+    optional_layers:
+      - integration
+    allow_discovery: true
+    max_additional_commands: 2
+    allowed_when: after_required_failure
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+
+        policy = resolve_effective_test_policy(config, "qa_testing")
+        assert policy is not None
+        assert policy.policy_source == "explicit"
+        assert policy.required_layers == ["lint", "unit"]
+        assert policy.optional_layers == ["integration"]
+        assert policy.required_commands == [
+            "uv run ruff check src tests",
+            "uv run pytest tests/unit/",
+            "uv run pytest tests/unit/test_config.py",
+        ]
+        assert policy.optional_commands == ["uv run pytest tests/integration/"]
+        assert [entry.layer for entry in policy.required_layer_commands] == ["lint", "unit"]
+        assert policy.allow_discovery is True
+        assert policy.max_additional_commands == 2
+        assert policy.allowed_when == "after_required_failure"
+
+    def test_optional_unknown_layer_is_skipped(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: qa_testing
+    role: qa
+    type: convergent_loop
+    next_on_success: done
+    next_on_failure: done
+test_catalog:
+  unit:
+    commands:
+      - "uv run pytest tests/unit/"
+phase_test_policy:
+  qa_testing:
+    required_layers:
+      - unit
+    optional_layers:
+      - integration
+      - smoke
+    allow_discovery: false
+    max_additional_commands: 1
+    allowed_when: after_required_commands
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+
+        policy = resolve_effective_test_policy(config, "qa_testing")
+        assert policy is not None
+        assert policy.optional_layers == []
+        assert policy.missing_optional_layers == ["integration", "smoke"]
+        assert policy.optional_commands == []
+
+    def test_required_unknown_layer_raises_config_error(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: qa_testing
+    role: qa
+    type: convergent_loop
+    next_on_success: done
+    next_on_failure: done
+phase_test_policy:
+  qa_testing:
+    required_layers:
+      - unit
+    allow_discovery: false
+    max_additional_commands: 0
+    allowed_when: never
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match=r"required_layers.*unit"):
+            load_config(p)
+
+    def test_explicit_policy_with_no_runnable_commands_raises_config_error(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: regression
+    role: qa
+    type: structured_job
+    next_on_success: done
+    next_on_failure: done
+phase_test_policy:
+  regression:
+    required_layers: []
+    optional_layers: []
+    allow_discovery: false
+    max_additional_commands: 0
+    allowed_when: never
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match=r"不会执行任何命令"):
+            load_config(p)
+
+    def test_optional_only_policy_with_unreachable_gate_raises_config_error(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: regression
+    role: qa
+    type: structured_job
+    next_on_success: done
+    next_on_failure: done
+test_catalog:
+  integration:
+    commands:
+      - "uv run pytest tests/integration/"
+phase_test_policy:
+  regression:
+    required_layers: []
+    optional_layers:
+      - integration
+    allow_discovery: false
+    max_additional_commands: 1
+    allowed_when: after_required_failure
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match=r"不会执行任何命令"):
+            load_config(p)
+
+    def test_qa_testing_uses_bounded_fallback_without_explicit_policy(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: qa_testing
+    role: qa
+    type: convergent_loop
+    next_on_success: done
+    next_on_failure: done
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+
+        policy = resolve_effective_test_policy(config, "qa_testing")
+        assert policy is not None
+        assert policy.policy_source == "qa_bounded_fallback"
+        assert policy.allow_discovery is True
+        assert policy.allowed_when == "always"
+        assert policy.discovery_priority == ["repo_native_wrappers", "standard_test_entrypoints"]
+
+    def test_regression_legacy_baseline_maps_to_required_commands(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: regression
+    role: qa
+    type: structured_job
+    next_on_success: done
+    next_on_failure: done
+regression_test_commands:
+  - "uv run pytest tests/unit/"
+  - "uv run pytest tests/integration/"
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+
+        policy = resolve_effective_test_policy(config, "regression")
+        assert policy is not None
+        assert policy.policy_source == "legacy_regression"
+        assert policy.required_layers == ["_legacy_baseline"]
+        assert policy.required_commands == [
+            "uv run pytest tests/unit/",
+            "uv run pytest tests/integration/",
+        ]
+        assert policy.allowed_when == "after_required_commands"
+        assert policy.allow_discovery is True
+
+    def test_regression_default_discovery_fallback_without_baseline(self, tmp_path: Path) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: regression
+    role: qa
+    type: structured_job
+    next_on_success: done
+    next_on_failure: done
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+        config = load_config(p)
+
+        policy = resolve_effective_test_policy(config, "regression")
+        assert policy is not None
+        assert policy.policy_source == "regression_discovery_fallback"
+        assert policy.required_commands == []
+        assert policy.allow_discovery is True
+        assert policy.allowed_when == "always"
 
 
 # ---------------------------------------------------------------------------

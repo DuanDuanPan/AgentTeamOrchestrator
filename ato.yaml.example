@@ -190,17 +190,73 @@ timeout:
 #     qa_testing: codex-mini-latest
 
 # ---------------------------------------------------------------------------
+# 跨项目测试策略分层（可选）
+# ---------------------------------------------------------------------------
+# test_catalog 定义“抽象 layer 名 → 项目真实命令”的映射。
+# phase_test_policy 定义不同 phase 如何消费这些 layer。
+#
+# 约束：
+# - required_layers 必跑，按声明顺序执行
+# - optional_layers 是候选追加层，按声明顺序尝试
+# - allow_discovery 控制是否允许在声明集合外追加发现/诊断命令
+# - max_additional_commands 约束单次 phase 执行尝试中的追加命令数
+# - allowed_when:
+#     never / after_required_commands / after_required_failure / always
+#
+# 推荐 layer 名：
+#   bootstrap / lint / typecheck / unit / integration / system / build / smoke / package
+
+test_catalog:
+  lint:
+    commands:
+      - "uv run ruff check src tests"
+  typecheck:
+    commands:
+      - "uv run mypy src"
+  unit:
+    commands:
+      - "uv run pytest tests/unit/"
+  integration:
+    commands:
+      - "uv run pytest tests/integration/"
+  smoke:
+    commands:
+      - "uv run pytest tests/smoke/"
+
+phase_test_policy:
+  qa_testing:
+    required_layers:
+      - lint
+      - typecheck
+      - unit
+    optional_layers:
+      - integration
+      - smoke
+    allow_discovery: true
+    max_additional_commands: 2
+    allowed_when: after_required_failure
+
+  regression:
+    required_layers:
+      - unit
+    optional_layers:
+      - integration
+      - smoke
+    allow_discovery: true
+    max_additional_commands: 2
+    allowed_when: after_required_commands
+
+# ---------------------------------------------------------------------------
 # Merge & Regression 配置
 # ---------------------------------------------------------------------------
 
-# 回归测试基线命令（操作者提供的基线命令列表）
-# Codex LLM regression runner 会优先执行这些命令；
-# 若 Codex 判断某命令不适用，会在结构化结果中说明跳过原因。
-# 未配置时，Codex 会自主发现项目测试体系并执行回归测试。
-regression_test_commands:
-  - "uv run pytest tests/unit/"
-  - "uv run pytest tests/integration/"
-  - "uv run pytest tests/smoke/"
+# 回归测试基线命令（legacy fallback 示例，仅在未配置 phase_test_policy.regression 时生效）
+# 如果上面的 phase_test_policy.regression 已配置，本段不会参与运行时解析。
+# 需要使用 legacy baseline 时，删除 phase_test_policy.regression，再取消注释以下示例：
+# regression_test_commands:
+#   - "uv run pytest tests/unit/"
+#   - "uv run pytest tests/integration/"
+#   - "uv run pytest tests/smoke/"
 
 # 向后兼容：单命令格式（当 regression_test_commands 存在时此字段被忽略）
 # regression_test_command: "uv run pytest"

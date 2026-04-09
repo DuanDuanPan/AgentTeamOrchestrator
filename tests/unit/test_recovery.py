@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ato.config import ATOSettings
 from ato.models.db import (
     get_connection,
     get_findings_by_story,
@@ -2260,6 +2261,18 @@ class TestConvergentLoopPromptFormat:
             raw_output_preview="ok",
             parsed_at=_NOW,
         )
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "qa_testing",
+                    "role": "qa",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+        )
 
         engine = RecoveryEngine(
             db_path=initialized_db_path,
@@ -2267,6 +2280,7 @@ class TestConvergentLoopPromptFormat:
             transition_queue=AsyncMock(),
             interactive_phases={"uat"},
             convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=settings,
         )
 
         with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
@@ -2281,6 +2295,92 @@ class TestConvergentLoopPromptFormat:
         assert "Recommendation" in prompt
         assert "Quality Score" in prompt
         assert "Critical Issues" in prompt
+        assert "## Commands Executed" in prompt
+        assert "repo-native wrapper scripts" in prompt
+        assert "source=project_defined|llm_discovered|llm_diagnostic" in prompt
+
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_qa_testing_prompt_uses_explicit_test_policy(
+        self,
+        mock_alive: MagicMock,
+        mock_artifact: MagicMock,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db, _make_story("s-policy", worktree_path="/tmp/wt", current_phase="qa_testing")
+            )
+            await insert_task(
+                db,
+                _make_task("t-policy", "s-policy", status="running", pid=999, phase="qa_testing"),
+            )
+        finally:
+            await db.close()
+
+        mock_parse = BmadParseResult(
+            skill_type=BmadSkillType.QA_REPORT,
+            verdict="approved",
+            findings=[],
+            parser_mode="deterministic",
+            raw_markdown_hash="h",
+            raw_output_preview="ok",
+            parsed_at=_NOW,
+        )
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "qa_testing",
+                    "role": "qa",
+                    "type": "convergent_loop",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "lint": {"commands": ["uv run ruff check src tests"]},
+                "unit": {"commands": ["uv run pytest tests/unit/"]},
+                "integration": {"commands": ["uv run pytest tests/integration/"]},
+            },  # type: ignore[dict-item]
+            phase_test_policy={
+                "qa_testing": {
+                    "required_layers": ["lint", "unit"],
+                    "optional_layers": ["integration"],
+                    "allow_discovery": True,
+                    "max_additional_commands": 2,
+                    "allowed_when": "after_required_failure",
+                }
+            },  # type: ignore[dict-item]
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            interactive_phases={"uat"},
+            convergent_loop_phases={"reviewing", "validating", "qa_testing"},
+            settings=settings,
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.return_value = mock_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            await engine.run_recovery()
+            await engine.await_background_tasks()
+
+        prompt = _mock_recovery_adapter.execute.call_args[0][0]
+        assert "Required layers: lint, unit" in prompt
+        assert "Optional layers: integration" in prompt
+        assert "trigger=required_layer:<name>|optional_layer:<name>|fallback:<kind>" in prompt
+        assert "uv run ruff check src tests" in prompt
+        assert "uv run pytest tests/integration/" in prompt
 
     async def test_reviewing_retry_with_open_findings_uses_scoped_rereview(
         self,

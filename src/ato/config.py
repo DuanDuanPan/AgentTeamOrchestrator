@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 import structlog
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -29,13 +29,18 @@ __all__ = [
     "ConvergentLoopConfig",
     "CostConfig",
     "DispatchProfile",
+    "EffectiveTestPolicy",
     "PhaseConfig",
     "PhaseDefinition",
+    "PhaseTestPolicyConfig",
+    "ResolvedTestLayer",
     "RoleConfig",
+    "TestLayerConfig",
     "TimeoutConfig",
     "build_phase_definitions",
     "evaluate_skip_condition",
     "load_config",
+    "resolve_effective_test_policy",
     "resolve_loop_dispatch_profiles",
     "resolve_role_dispatch_config",
 ]
@@ -117,6 +122,133 @@ class CostConfig(BaseModel):
     blocking_threshold: int = 10
 
 
+AllowedWhen = Literal["never", "after_required_commands", "after_required_failure", "always"]
+CommandSource = Literal["project_defined", "llm_discovered", "llm_diagnostic"]
+CommandTriggerReason = Literal[
+    "required_layer",
+    "optional_layer",
+    "discovery_fallback",
+    "diagnostic",
+    "legacy_baseline",
+]
+
+TEST_POLICY_SUPPORTED_PHASES: frozenset[str] = frozenset({"qa_testing", "regression"})
+RECOMMENDED_TEST_LAYERS: tuple[str, ...] = (
+    "bootstrap",
+    "lint",
+    "typecheck",
+    "unit",
+    "integration",
+    "system",
+    "build",
+    "smoke",
+    "package",
+)
+TEST_COMMAND_SOURCES: tuple[CommandSource, ...] = (
+    "project_defined",
+    "llm_discovered",
+    "llm_diagnostic",
+)
+TEST_COMMAND_TRIGGER_REASONS: tuple[CommandTriggerReason, ...] = (
+    "required_layer",
+    "optional_layer",
+    "discovery_fallback",
+    "diagnostic",
+    "legacy_baseline",
+)
+DEFAULT_QA_FALLBACK_MAX_ADDITIONAL_COMMANDS = 4
+DEFAULT_REGRESSION_MAX_ADDITIONAL_COMMANDS = 4
+DEFAULT_REGRESSION_TEST_COMMAND = "uv run pytest"
+LEGACY_REGRESSION_BASELINE_LAYER = "_legacy_baseline"
+
+
+class TestLayerConfig(BaseModel):
+    """项目级测试 layer 到真实命令的映射。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[str] = Field(default_factory=list)
+
+    @field_validator("commands")
+    @classmethod
+    def _validate_commands(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("每个 test_catalog layer 至少需要一条命令")
+        cleaned: list[str] = []
+        for command in value:
+            stripped = command.strip()
+            if not stripped:
+                raise ValueError("test_catalog layer 命令不能为空字符串")
+            cleaned.append(stripped)
+        return cleaned
+
+
+class PhaseTestPolicyConfig(BaseModel):
+    """phase 级测试策略声明。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    required_layers: list[str] = Field(default_factory=list)
+    optional_layers: list[str] = Field(default_factory=list)
+    allow_discovery: bool = False
+    max_additional_commands: int = 0
+    allowed_when: AllowedWhen = "never"
+
+    @field_validator("required_layers", "optional_layers")
+    @classmethod
+    def _validate_layer_names(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for layer in value:
+            stripped = layer.strip()
+            if not stripped:
+                raise ValueError("layer 名称不能为空字符串")
+            cleaned.append(stripped)
+        return cleaned
+
+    @field_validator("max_additional_commands")
+    @classmethod
+    def _validate_max_additional_commands(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("max_additional_commands 必须 >= 0")
+        return value
+
+
+class EffectiveTestPolicy(BaseModel):
+    """供 runtime surface 消费的解析后测试策略。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: str
+    policy_source: Literal[
+        "explicit",
+        "legacy_regression",
+        "qa_bounded_fallback",
+        "regression_discovery_fallback",
+    ]
+    required_layers: list[str] = Field(default_factory=list)
+    optional_layers: list[str] = Field(default_factory=list)
+    required_layer_commands: list[ResolvedTestLayer] = Field(default_factory=list)
+    optional_layer_commands: list[ResolvedTestLayer] = Field(default_factory=list)
+    missing_optional_layers: list[str] = Field(default_factory=list)
+    allow_discovery: bool = False
+    max_additional_commands: int = 0
+    allowed_when: AllowedWhen = "never"
+    required_commands: list[str] = Field(default_factory=list)
+    optional_commands: list[str] = Field(default_factory=list)
+    project_defined_commands: list[str] = Field(default_factory=list)
+    discovery_priority: list[str] = Field(default_factory=list)
+    legacy_baseline: bool = False
+
+
+class ResolvedTestLayer(BaseModel):
+    """展开后用于 prompt/runtime surface 的 layer 视图。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    layer: str
+    commands: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # 主配置类（BaseSettings）
 # ---------------------------------------------------------------------------
@@ -143,6 +275,8 @@ class ATOSettings(BaseSettings):
     timeout: TimeoutConfig = TimeoutConfig()
     cost: CostConfig | None = None
     model_map: dict[str, str] = {}
+    test_catalog: dict[str, TestLayerConfig] = Field(default_factory=dict)
+    phase_test_policy: dict[str, PhaseTestPolicyConfig] = Field(default_factory=dict)
     regression_test_command: str = "uv run pytest"
     regression_test_commands: list[str] | None = None
     merge_rebase_timeout: int = 120
@@ -377,6 +511,7 @@ def _validate_config(config: ATOSettings) -> None:
 
     # 验证可达 done（图遍历）
     _validate_reachability(config.phases, phase_names)
+    _validate_test_policy_config(config, phase_names)
 
     # 数值边界
     _validate_numeric_bounds(config)
@@ -456,6 +591,205 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
         raise ConfigError("配置错误：timeout.post_result_timeout 必须 > 0")
     if config.polling_interval <= 0:
         raise ConfigError("配置错误：polling_interval 必须 > 0")
+
+
+def _validate_test_policy_config(config: ATOSettings, phase_names: set[str]) -> None:
+    """验证跨项目测试策略配置。"""
+    for layer_name in config.test_catalog:
+        if not layer_name.strip():
+            raise ConfigError("配置错误：test_catalog 不能包含空 layer 名")
+
+    for phase_name, policy in config.phase_test_policy.items():
+        if phase_name not in phase_names:
+            raise ConfigError(f"配置错误：phase_test_policy 键 '{phase_name}' 引用了未定义的阶段")
+        if phase_name not in TEST_POLICY_SUPPORTED_PHASES:
+            raise ConfigError(
+                f"配置错误：phase_test_policy 当前仅支持 {sorted(TEST_POLICY_SUPPORTED_PHASES)}，"
+                f"不支持阶段 '{phase_name}'"
+            )
+        missing_required = [
+            layer for layer in policy.required_layers if layer not in config.test_catalog
+        ]
+        if missing_required:
+            missing_str = ", ".join(missing_required)
+            raise ConfigError(
+                f"配置错误：阶段 '{phase_name}' 的 required_layers 引用了未声明的 layer: "
+                f"{missing_str}"
+            )
+
+        declared_optional = [
+            layer for layer in policy.optional_layers if layer in config.test_catalog
+        ]
+        has_required_path = bool(policy.required_layers)
+        has_additional_path = (
+            policy.max_additional_commands > 0
+            and policy.allowed_when in {"always", "after_required_commands"}
+            and (bool(declared_optional) or policy.allow_discovery)
+        )
+        if not has_required_path and not has_additional_path:
+            raise ConfigError(
+                f"配置错误：阶段 '{phase_name}' 的 test policy 不会执行任何命令；"
+                "请至少配置一个 required layer，或提供可达的 additional command 路径"
+            )
+
+
+def _expand_policy_layers(
+    settings: ATOSettings,
+    layers: list[str],
+    *,
+    required: bool,
+    phase: str,
+) -> tuple[list[str], list[str], list[str], list[ResolvedTestLayer]]:
+    """按 layer 声明顺序展开为命令列表。"""
+    resolved_layers: list[str] = []
+    commands: list[str] = []
+    missing_layers: list[str] = []
+    resolved_layer_commands: list[ResolvedTestLayer] = []
+
+    for layer in layers:
+        layer_cfg = settings.test_catalog.get(layer)
+        if layer_cfg is None:
+            if required:
+                raise ConfigError(
+                    f"配置错误：阶段 '{phase}' 的 required_layers 引用了未声明的 layer '{layer}'"
+                )
+            missing_layers.append(layer)
+            continue
+        resolved_layers.append(layer)
+        commands.extend(layer_cfg.commands)
+        resolved_layer_commands.append(
+            ResolvedTestLayer(layer=layer, commands=list(layer_cfg.commands))
+        )
+
+    return resolved_layers, commands, missing_layers, resolved_layer_commands
+
+
+def _default_discovery_priority(phase: str) -> list[str]:
+    if phase == "qa_testing":
+        return ["repo_native_wrappers", "standard_test_entrypoints"]
+    return ["standard_test_entrypoints"]
+
+
+def _resolve_explicit_test_policy(
+    settings: ATOSettings,
+    phase: str,
+    policy: PhaseTestPolicyConfig,
+) -> EffectiveTestPolicy:
+    required_layers, required_commands, _, required_layer_commands = _expand_policy_layers(
+        settings,
+        policy.required_layers,
+        required=True,
+        phase=phase,
+    )
+    (
+        optional_layers,
+        optional_commands,
+        missing_optional_layers,
+        optional_layer_commands,
+    ) = _expand_policy_layers(
+        settings,
+        policy.optional_layers,
+        required=False,
+        phase=phase,
+    )
+    return EffectiveTestPolicy(
+        phase=phase,
+        policy_source="explicit",
+        required_layers=required_layers,
+        optional_layers=optional_layers,
+        required_layer_commands=required_layer_commands,
+        optional_layer_commands=optional_layer_commands,
+        missing_optional_layers=missing_optional_layers,
+        allow_discovery=policy.allow_discovery,
+        max_additional_commands=policy.max_additional_commands,
+        allowed_when=policy.allowed_when,
+        required_commands=required_commands,
+        optional_commands=optional_commands,
+        project_defined_commands=[*required_commands, *optional_commands],
+        discovery_priority=_default_discovery_priority(phase),
+        legacy_baseline=False,
+    )
+
+
+def _resolve_legacy_regression_policy(settings: ATOSettings) -> EffectiveTestPolicy:
+    has_explicit_plural = settings.regression_test_commands is not None
+    has_explicit_singular = settings.regression_test_command != DEFAULT_REGRESSION_TEST_COMMAND
+
+    if has_explicit_plural or has_explicit_singular:
+        commands = settings.get_regression_commands()
+        return EffectiveTestPolicy(
+            phase="regression",
+            policy_source="legacy_regression",
+            required_layers=[LEGACY_REGRESSION_BASELINE_LAYER],
+            optional_layers=[],
+            required_layer_commands=[
+                ResolvedTestLayer(
+                    layer=LEGACY_REGRESSION_BASELINE_LAYER,
+                    commands=list(commands),
+                )
+            ],
+            optional_layer_commands=[],
+            allow_discovery=True,
+            max_additional_commands=DEFAULT_REGRESSION_MAX_ADDITIONAL_COMMANDS,
+            allowed_when="after_required_commands",
+            required_commands=commands,
+            optional_commands=[],
+            project_defined_commands=list(commands),
+            discovery_priority=_default_discovery_priority("regression"),
+            legacy_baseline=True,
+        )
+
+    return EffectiveTestPolicy(
+        phase="regression",
+        policy_source="regression_discovery_fallback",
+        required_layers=[],
+        optional_layers=[],
+        required_layer_commands=[],
+        optional_layer_commands=[],
+        allow_discovery=True,
+        max_additional_commands=DEFAULT_REGRESSION_MAX_ADDITIONAL_COMMANDS,
+        allowed_when="always",
+        required_commands=[],
+        optional_commands=[],
+        project_defined_commands=[],
+        discovery_priority=_default_discovery_priority("regression"),
+        legacy_baseline=False,
+    )
+
+
+def resolve_effective_test_policy(settings: ATOSettings, phase: str) -> EffectiveTestPolicy | None:
+    """根据 phase 返回解析后的 effective test policy。"""
+    phase_test_policy = (
+        settings.phase_test_policy if isinstance(settings.phase_test_policy, dict) else {}
+    )
+    explicit_policy = phase_test_policy.get(phase)
+    if isinstance(explicit_policy, dict):
+        explicit_policy = PhaseTestPolicyConfig.model_validate(explicit_policy)
+    if explicit_policy is not None:
+        return _resolve_explicit_test_policy(settings, phase, explicit_policy)
+
+    if phase == "qa_testing":
+        return EffectiveTestPolicy(
+            phase="qa_testing",
+            policy_source="qa_bounded_fallback",
+            required_layers=[],
+            optional_layers=[],
+            required_layer_commands=[],
+            optional_layer_commands=[],
+            allow_discovery=True,
+            max_additional_commands=DEFAULT_QA_FALLBACK_MAX_ADDITIONAL_COMMANDS,
+            allowed_when="always",
+            required_commands=[],
+            optional_commands=[],
+            project_defined_commands=[],
+            discovery_priority=_default_discovery_priority("qa_testing"),
+            legacy_baseline=False,
+        )
+
+    if phase == "regression":
+        return _resolve_legacy_regression_policy(settings)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
