@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ato.config import ATOSettings
+from ato.config import ATOSettings, PhaseTestPolicyConfig, TestLayerConfig
 from ato.models.db import (
     complete_merge,
     dequeue_next_merge,
@@ -1826,18 +1826,18 @@ class TestCodexRegressionRunner:
                 },
             ],
             test_catalog={
-                "unit": {"commands": ["uv run pytest tests/unit/"]},
-                "integration": {"commands": ["uv run pytest tests/integration/"]},
-            },  # type: ignore[dict-item]
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+                "integration": TestLayerConfig(commands=["uv run pytest tests/integration/"]),
+            },
             phase_test_policy={
-                "regression": {
-                    "required_layers": ["unit"],
-                    "optional_layers": ["integration"],
-                    "allow_discovery": True,
-                    "max_additional_commands": 2,
-                    "allowed_when": "after_required_failure",
-                }
-            },  # type: ignore[dict-item]
+                "regression": PhaseTestPolicyConfig(
+                    required_layers=["unit"],
+                    optional_layers=["integration"],
+                    allow_discovery=True,
+                    max_additional_commands=2,
+                    allowed_when="after_required_failure",
+                )
+            },
         )
 
         prompt = _build_regression_prompt(Path("/repo"), settings)
@@ -1863,18 +1863,18 @@ class TestCodexRegressionRunner:
                 },
             ],
             test_catalog={
-                "unit": {"commands": ["uv run pytest tests/unit/"]},
-                "integration": {"commands": ["uv run pytest tests/integration/"]},
-            },  # type: ignore[dict-item]
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+                "integration": TestLayerConfig(commands=["uv run pytest tests/integration/"]),
+            },
             phase_test_policy={
-                "regression": {
-                    "required_layers": ["unit"],
-                    "optional_layers": ["integration"],
-                    "allow_discovery": True,
-                    "max_additional_commands": 1,
-                    "allowed_when": "after_required_failure",
-                }
-            },  # type: ignore[dict-item]
+                "regression": PhaseTestPolicyConfig(
+                    required_layers=["unit"],
+                    optional_layers=["integration"],
+                    allow_discovery=True,
+                    max_additional_commands=1,
+                    allowed_when="after_required_failure",
+                )
+            },
         )
         policy = resolve_effective_test_policy(settings, "regression")
         assert policy is not None
@@ -1919,17 +1919,17 @@ class TestCodexRegressionRunner:
                 },
             ],
             test_catalog={
-                "unit": {"commands": ["uv run pytest tests/unit/"]},
-            },  # type: ignore[dict-item]
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+            },
             phase_test_policy={
-                "regression": {
-                    "required_layers": ["unit"],
-                    "optional_layers": [],
-                    "allow_discovery": False,
-                    "max_additional_commands": 1,
-                    "allowed_when": "after_required_commands",
-                }
-            },  # type: ignore[dict-item]
+                "regression": PhaseTestPolicyConfig(
+                    required_layers=["unit"],
+                    optional_layers=[],
+                    allow_discovery=False,
+                    max_additional_commands=1,
+                    allowed_when="after_required_commands",
+                )
+            },
         )
         policy = resolve_effective_test_policy(settings, "regression")
         assert policy is not None
@@ -2116,18 +2116,18 @@ class TestCodexRegressionRunner:
                 },
             ],
             test_catalog={
-                "unit": {"commands": ["uv run pytest tests/unit/"]},
-                "integration": {"commands": ["uv run pytest tests/integration/"]},
-            },  # type: ignore[dict-item]
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+                "integration": TestLayerConfig(commands=["uv run pytest tests/integration/"]),
+            },
             phase_test_policy={
-                "regression": {
-                    "required_layers": ["unit"],
-                    "optional_layers": ["integration"],
-                    "allow_discovery": True,
-                    "max_additional_commands": 1,
-                    "allowed_when": "after_required_failure",
-                }
-            },  # type: ignore[dict-item]
+                "regression": PhaseTestPolicyConfig(
+                    required_layers=["unit"],
+                    optional_layers=["integration"],
+                    allow_discovery=True,
+                    max_additional_commands=1,
+                    allowed_when="after_required_failure",
+                )
+            },
         )
         task_id = await self._setup_task(initialized_db_path)
 

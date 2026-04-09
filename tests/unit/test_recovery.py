@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ato.config import ATOSettings
+from ato.config import ATOSettings, PhaseTestPolicyConfig, TestLayerConfig
 from ato.models.db import (
     get_connection,
     get_findings_by_story,
@@ -2343,19 +2343,19 @@ class TestConvergentLoopPromptFormat:
                 },
             ],
             test_catalog={
-                "lint": {"commands": ["uv run ruff check src tests"]},
-                "unit": {"commands": ["uv run pytest tests/unit/"]},
-                "integration": {"commands": ["uv run pytest tests/integration/"]},
-            },  # type: ignore[dict-item]
+                "lint": TestLayerConfig(commands=["uv run ruff check src tests"]),
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+                "integration": TestLayerConfig(commands=["uv run pytest tests/integration/"]),
+            },
             phase_test_policy={
-                "qa_testing": {
-                    "required_layers": ["lint", "unit"],
-                    "optional_layers": ["integration"],
-                    "allow_discovery": True,
-                    "max_additional_commands": 2,
-                    "allowed_when": "after_required_failure",
-                }
-            },  # type: ignore[dict-item]
+                "qa_testing": PhaseTestPolicyConfig(
+                    required_layers=["lint", "unit"],
+                    optional_layers=["integration"],
+                    allow_discovery=True,
+                    max_additional_commands=2,
+                    allowed_when="after_required_failure",
+                )
+            },
         )
 
         engine = RecoveryEngine(

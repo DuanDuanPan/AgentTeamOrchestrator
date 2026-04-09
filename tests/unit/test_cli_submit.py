@@ -18,7 +18,7 @@ from ato.models.db import (
     insert_story,
     insert_task,
 )
-from ato.models.schemas import StoryRecord, TaskRecord
+from ato.models.schemas import StoryRecord, TaskRecord, TaskStatus
 
 runner = CliRunner()
 
@@ -41,7 +41,7 @@ def _make_task(
     story_id: str = "story-submit-1",
     task_id: str = "task-1",
     phase: str = "uat",
-    status: str = "running",
+    status: TaskStatus = "running",
 ) -> TaskRecord:
     return TaskRecord(
         task_id=task_id,

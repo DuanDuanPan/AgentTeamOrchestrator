@@ -813,7 +813,7 @@ class TestTerminalFinalizer:
                 import ato.models.db as db_mod
 
                 orig_fn = db_mod.update_task_status
-                db_mod.update_task_status = _hanging_update  # type: ignore[assignment]
+                db_mod.update_task_status = _hanging_update
                 try:
                     await mgr.dispatch(
                         story_id="story-test",
@@ -850,8 +850,10 @@ class TestTerminalFinalizer:
                     )
                 return result
 
-        mgr = SubprocessManager(  # type: ignore[arg-type]
-            max_concurrent=4, adapter=EmitAndHangFlushAdapter(), db_path=db_ready,
+        mgr = SubprocessManager(
+            max_concurrent=4,
+            adapter=EmitAndHangFlushAdapter(),  # type: ignore[arg-type]
+            db_path=db_ready,
         )
 
         # Patch _flush_latest_activity to hang
@@ -862,7 +864,7 @@ class TestTerminalFinalizer:
         async def _hanging_activity(*args: Any, **kwargs: Any) -> None:
             await asyncio.sleep(999)
 
-        db_mod.update_task_activity = _hanging_activity  # type: ignore[assignment]
+        db_mod.update_task_activity = _hanging_activity
         try:
             async with asyncio.timeout(10):
                 await mgr.dispatch(
@@ -908,7 +910,7 @@ class TestTerminalFinalizer:
             else:
                 await orig_fn(db, task_id, status, **kw)
 
-        db_mod.update_task_status = _hanging_on_failed  # type: ignore[assignment]
+        db_mod.update_task_status = _hanging_on_failed
         try:
             with pytest.raises((CLIAdapterError, Exception)):
                 async with asyncio.timeout(10):
@@ -940,7 +942,7 @@ class TestTerminalFinalizer:
         async def _failing_cost(*args: Any, **kwargs: Any) -> None:
             raise RuntimeError("cost_log write failed")
 
-        db_mod.insert_cost_log = _failing_cost  # type: ignore[assignment]
+        db_mod.insert_cost_log = _failing_cost
         try:
             # Should not hang even though cost_log fails
             async with asyncio.timeout(10):
@@ -980,7 +982,7 @@ class TestTerminalFinalizer:
         async def _failing_cost(*args: Any, **kwargs: Any) -> None:
             raise RuntimeError("cost_log write failed")
 
-        db_mod.insert_cost_log = _failing_cost  # type: ignore[assignment]
+        db_mod.insert_cost_log = _failing_cost
         try:
             async with asyncio.timeout(10):
                 await mgr.dispatch(

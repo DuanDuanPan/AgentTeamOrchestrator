@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -805,11 +806,11 @@ class TestBuildLlmRecommendPrompt:
 _FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "claude_batch_recommend.json"
 
 
-def _load_fixture() -> dict:
-    return json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+def _load_fixture() -> dict[str, Any]:
+    return json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
-def _make_mock_adapter(fixture_data: dict | None = None) -> AsyncMock:
+def _make_mock_adapter(fixture_data: dict[str, Any] | None = None) -> AsyncMock:
     """创建 mock ClaudeAdapter，返回 fixture 数据。"""
     adapter = AsyncMock()
     if fixture_data is not None:

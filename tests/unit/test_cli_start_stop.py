@@ -116,7 +116,7 @@ class TestResolveConfigPath:
         # CWD 下也不能有 ato.yaml — chdir 到一个已知空目录
         empty_cwd = tmp_path / "empty_cwd"
         empty_cwd.mkdir()
-        monkeypatch.chdir(empty_cwd)  # type: ignore[union-attr]
+        monkeypatch.chdir(empty_cwd)  # type: ignore[attr-defined]
 
         result = _resolve_config_path(None, db_path)
         assert result is None

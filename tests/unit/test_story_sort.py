@@ -47,7 +47,7 @@ class TestSortStoriesByStatus:
     """sort_stories_by_status 排序测试。"""
 
     def test_basic_ordering(self) -> None:
-        stories = [
+        stories: list[dict[str, object]] = [
             {"story_id": "s1", "status": "done", "updated_at": "2026-01-01T00:00:00"},
             {"story_id": "s2", "status": "in_progress", "updated_at": "2026-01-01T00:00:00"},
             {"story_id": "s3", "status": "ready", "updated_at": "2026-01-01T00:00:00"},
@@ -60,7 +60,7 @@ class TestSortStoriesByStatus:
         assert ids == ["s3", "s2", "s4", "s1", "s5"]
 
     def test_awaiting_before_active(self) -> None:
-        stories = [
+        stories: list[dict[str, object]] = [
             {"story_id": "s1", "status": "review", "updated_at": "2026-01-01T00:00:00"},
             {"story_id": "s2", "status": "uat", "updated_at": "2026-01-01T00:00:00"},
         ]
@@ -71,7 +71,7 @@ class TestSortStoriesByStatus:
 
     def test_running_before_frozen(self) -> None:
         """running 排在 frozen 之前。"""
-        stories = [
+        stories: list[dict[str, object]] = [
             {"story_id": "s1", "status": "blocked", "updated_at": "2026-01-01T00:00:00"},
             {"story_id": "s2", "status": "in_progress", "updated_at": "2026-01-01T00:00:00"},
         ]
@@ -81,7 +81,7 @@ class TestSortStoriesByStatus:
         assert sorted_stories[1]["story_id"] == "s1"
 
     def test_same_status_ordered_by_updated_at_desc(self) -> None:
-        stories = [
+        stories: list[dict[str, object]] = [
             {"story_id": "s1", "status": "in_progress", "updated_at": "2026-01-01T00:00:00"},
             {"story_id": "s2", "status": "in_progress", "updated_at": "2026-01-03T00:00:00"},
             {"story_id": "s3", "status": "in_progress", "updated_at": "2026-01-02T00:00:00"},
@@ -95,13 +95,15 @@ class TestSortStoriesByStatus:
         assert sort_stories_by_status([]) == []
 
     def test_single_story(self) -> None:
-        stories = [{"story_id": "s1", "status": "done", "updated_at": "2026-01-01T00:00:00"}]
+        stories: list[dict[str, object]] = [
+            {"story_id": "s1", "status": "done", "updated_at": "2026-01-01T00:00:00"}
+        ]
         result = sort_stories_by_status(stories)
         assert len(result) == 1
         assert result[0]["story_id"] == "s1"
 
     def test_unknown_status_falls_to_end(self) -> None:
-        stories = [
+        stories: list[dict[str, object]] = [
             {"story_id": "s1", "status": "unknown", "updated_at": "2026-01-01T00:00:00"},
             {"story_id": "s2", "status": "ready", "updated_at": "2026-01-01T00:00:00"},
         ]
@@ -111,7 +113,7 @@ class TestSortStoriesByStatus:
 
     def test_comprehensive_sort(self) -> None:
         """完整排序验证：所有状态 + 时间。"""
-        stories = [
+        stories: list[dict[str, object]] = [
             {"story_id": "s1", "status": "backlog", "updated_at": "2026-01-05T00:00:00"},
             {"story_id": "s2", "status": "done", "updated_at": "2026-01-04T00:00:00"},
             {"story_id": "s3", "status": "in_progress", "updated_at": "2026-01-03T00:00:00"},
@@ -127,7 +129,7 @@ class TestSortStoriesByStatus:
         assert ids == ["s4", "s5", "s7", "s3", "s6", "s2", "s1"]
 
     def test_does_not_mutate_input(self) -> None:
-        stories = [
+        stories: list[dict[str, object]] = [
             {"story_id": "s1", "status": "done", "updated_at": "2026-01-01T00:00:00"},
             {"story_id": "s2", "status": "ready", "updated_at": "2026-01-01T00:00:00"},
         ]

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual.widgets import ContentSwitcher, Static
@@ -70,7 +71,7 @@ async def _insert_exception_approval(
     story_id: str = "s1",
     approval_type: str = "regression_failure",
     risk_level: str = "high",
-    payload_dict: dict | None = None,
+    payload_dict: dict[str, Any] | None = None,
 ) -> None:
     """插入异常审批记录。"""
     if payload_dict is None:

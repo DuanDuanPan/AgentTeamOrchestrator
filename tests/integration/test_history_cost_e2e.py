@@ -59,7 +59,7 @@ def _setup_history_scenario(db_path: Path) -> None:
                         phase=phase,
                         role=role,
                         cli_tool="claude",
-                        status=status,
+                        status=status,  # type: ignore[arg-type]
                         started_at=_NOW,
                         completed_at=_NOW,
                         cost_usd=cost,

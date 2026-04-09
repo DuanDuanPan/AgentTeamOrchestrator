@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -485,7 +486,7 @@ class TestBatchSelectLlmFlag:
 
         from ato.batch import LLMBatchRecommender, LLMRecommendError
 
-        async def mock_recommend(*_args, **_kwargs):
+        async def mock_recommend(*_args: Any, **_kwargs: Any) -> None:
             raise LLMRecommendError("Claude CLI 调用失败")
 
         with (
@@ -516,7 +517,9 @@ class TestBatchSelectLlmFlag:
 
         from ato.batch import BatchProposal, LLMBatchRecommender
 
-        async def mock_recommend(self, epics_info, existing_stories, max_stories):
+        async def mock_recommend(
+            self: Any, epics_info: Any, existing_stories: Any, max_stories: Any
+        ) -> BatchProposal:
             return BatchProposal(
                 stories=[epics_info[0]],
                 reason="LLM 推荐: test",
@@ -545,7 +548,9 @@ class TestBatchSelectLlmFlag:
 
         from ato.batch import BatchProposal, LLMBatchRecommender
 
-        async def mock_recommend(self, epics_info, existing_stories, max_stories):
+        async def mock_recommend(
+            self: Any, epics_info: Any, existing_stories: Any, max_stories: Any
+        ) -> BatchProposal:
             assert self._on_progress is not None
             await self._on_progress(
                 ProgressEvent(

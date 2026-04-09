@@ -700,7 +700,11 @@ class TestBatchRecommendOutput:
     def test_json_schema_has_required_fields(self) -> None:
         assert "story_keys" in BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[operator]
         assert "reason" in BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[operator]
-        assert set(BATCH_RECOMMEND_JSON_SCHEMA["required"]) == {"story_keys", "has_ui_map", "reason"}  # type: ignore[arg-type]
+        assert set(BATCH_RECOMMEND_JSON_SCHEMA["required"]) == {  # type: ignore[call-overload]
+            "story_keys",
+            "has_ui_map",
+            "reason",
+        }
 
     def test_valid_output_with_has_ui_map(self) -> None:
         output = BatchRecommendOutput(
@@ -721,6 +725,6 @@ class TestBatchRecommendOutput:
             )
 
     def test_json_schema_has_has_ui_map(self) -> None:
-        props = BATCH_RECOMMEND_JSON_SCHEMA["properties"]  # type: ignore[index]
-        assert "has_ui_map" in props
-        assert props["has_ui_map"]["type"] == "object"
+        props = BATCH_RECOMMEND_JSON_SCHEMA["properties"]
+        assert "has_ui_map" in props  # type: ignore[operator]
+        assert props["has_ui_map"]["type"] == "object"  # type: ignore[index]

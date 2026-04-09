@@ -45,7 +45,7 @@ def test_search_panel_initial_state() -> None:
 def test_update_items_stories() -> None:
     """update_items 正确解析 story 数据。"""
     panel = SearchPanel()
-    stories = [
+    stories: list[dict[str, object]] = [
         {
             "story_id": "story-001",
             "title": "Test",
@@ -92,7 +92,7 @@ def test_update_items_includes_tab_targets() -> None:
 def test_update_items_preserves_sort_order() -> None:
     """story sort_order 与输入列表顺序对齐。"""
     panel = SearchPanel()
-    stories = [
+    stories: list[dict[str, object]] = [
         {"story_id": "story-002", "title": "B", "status": "done", "current_phase": "done"},
         {"story_id": "story-001", "title": "A", "status": "in_progress", "current_phase": "dev"},
     ]

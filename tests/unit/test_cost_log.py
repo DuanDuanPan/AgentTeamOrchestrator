@@ -72,6 +72,7 @@ class TestInsertCostLog:
         cursor = await db.execute("SELECT * FROM cost_log WHERE cost_log_id = ?", ("cl-full",))
         row = await cursor.fetchone()
         await db.close()
+        assert row is not None
         data = dict(row)
         assert data["model"] == "claude-opus-4-6"
         assert data["session_id"] == "sess-123"

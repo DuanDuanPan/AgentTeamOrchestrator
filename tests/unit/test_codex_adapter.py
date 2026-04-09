@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +15,6 @@ from ato.adapters.codex_cli import (
     _aggregate_usage,
     _classify_error,
     _extract_text_result,
-    _normalize_codex_event,
     _parse_jsonl,
     _parse_output_file,
     calculate_cost,
@@ -337,8 +335,11 @@ class TestBuildCommand:
         adapter = CodexAdapter()
         cmd = adapter._build_command("review this code")
         assert cmd[:5] == [
-            "codex", "--dangerously-bypass-approvals-and-sandbox",
-            "exec", "review this code", "--json",
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "exec",
+            "review this code",
+            "--json",
         ]
         assert "--sandbox" not in cmd
 
@@ -447,7 +448,7 @@ def _mock_stream_process(
     proc.wait = AsyncMock(return_value=returncode)
 
     stdout = MagicMock()
-    _lines = list(stdout_lines) + [b""]
+    _lines = [*list(stdout_lines), b""]
     _idx = 0
 
     async def _readline() -> bytes:
@@ -506,9 +507,7 @@ class TestCodexAdapterExecute:
         proc = _mock_stream_process(_raw_to_lines(success_events_raw))
         adapter = CodexAdapter()
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
-            result = await adapter.execute(
-                "review this code", {"model": "codex-mini-latest"}
-            )
+            result = await adapter.execute("review this code", {"model": "codex-mini-latest"})
         assert result.status == "success"
         assert result.model_name == "codex-mini-latest"
         assert result.cost_usd > 0
@@ -586,7 +585,7 @@ class TestCodexAdapterExecute:
         """R2-3: 有事件但缺 turn.completed 应报 parse_error。"""
         lines = [
             b'{"type":"thread.started","thread_id":"t1"}\n',
-            b'not-json\n',
+            b"not-json\n",
         ]
         proc = _mock_stream_process(lines)
         adapter = CodexAdapter()
@@ -673,7 +672,7 @@ class TestCodexAdapterOutputFile:
 
         async def _readline_then_write() -> bytes:
             nonlocal _call_count
-            result = await original_readline()
+            result: bytes = await original_readline()
             _call_count += 1
             # 在最后一行（空 bytes）返回前写入输出文件
             if result == b"" and not out.exists():
@@ -725,9 +724,7 @@ class TestCodexAdapterStreaming:
         assert events_received[0].event_type == "init"
         assert events_received[-1].event_type == "turn_end"
 
-    async def test_stream_success_without_progress(
-        self, stream_success_lines: list[bytes]
-    ) -> None:
+    async def test_stream_success_without_progress(self, stream_success_lines: list[bytes]) -> None:
         """AC 4: 不传 on_progress，CodexOutput 字段与改造前一致。"""
         proc = _mock_stream_process(stream_success_lines)
         adapter = CodexAdapter()

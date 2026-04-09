@@ -7,20 +7,12 @@ repos:
         exclude: ^(\.(agent|agents|claude)/|_bmad/)
       - id: ruff-format
         exclude: ^(\.(agent|agents|claude)/|_bmad/)
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.19.1
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - aiosqlite>=0.22.1
-          - pydantic>=2.0
-          - "pydantic-settings[yaml]>=2.13"
-          - pytest>=9.0.2
-          - pytest-asyncio>=1.3.0
-          - python-statemachine>=3.0
-          - structlog
-          - textual>=2.0
-          - typer
-          - textual>=2.0
-          - types-PyYAML>=6.0
+        name: mypy
+        entry: uv run mypy src/ tests/
+        language: system
+        types: [python]
+        pass_filenames: false
         exclude: ^(\.(agent|agents|claude)/|_bmad/)
