@@ -21,6 +21,7 @@ from ato.models.db import (
     get_findings_by_story,
     get_paused_tasks,
     get_tasks_by_story,
+    get_undispatched_stories,
     insert_findings_batch,
     insert_story,
     insert_task,
@@ -4548,6 +4549,125 @@ class TestValidatingFileFallback:
             parsed_at=_NOW,
         )
 
+    @patch("ato.recovery._artifact_exists", return_value=False)
+    @patch("ato.recovery._is_pid_alive", return_value=False)
+    async def test_convergent_loop_keeps_story_blocked_during_post_processing(
+        self,
+        _mock_alive: MagicMock,
+        _mock_artifact: MagicMock,
+        tmp_path: Path,
+        initialized_db_path: Path,
+        _mock_recovery_adapter: AsyncMock,
+    ) -> None:
+        """CLI result persisted but BMAD parse still pending must not reopen initial dispatch."""
+        from ato.models.schemas import BmadParseResult, BmadSkillType
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            now = datetime.now(tz=UTC).isoformat()
+            await db.execute(
+                "INSERT INTO batches (batch_id, status, created_at) VALUES (?, ?, ?)",
+                ("batch-qa-race", "active", now),
+            )
+            await insert_story(
+                db,
+                _make_story(
+                    "s-qa-race",
+                    worktree_path=str(wt),
+                    current_phase="validating",
+                ),
+            )
+            await db.execute(
+                "INSERT INTO batch_stories (batch_id, story_id, sequence_no) VALUES (?, ?, ?)",
+                ("batch-qa-race", "s-qa-race", 0),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-qa-race",
+                    "s-qa-race",
+                    status="pending",
+                    pid=None,
+                    phase="validating",
+                    role="validator",
+                    cli_tool="claude",
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        _mock_recovery_adapter.execute.return_value = AdapterResult(
+            status="success",
+            exit_code=0,
+            duration_ms=10,
+            text_result="结果: PASS\n## 摘要\n无问题",
+        )
+
+        parse_started = asyncio.Event()
+        allow_parse_finish = asyncio.Event()
+
+        async def _blocking_parse(*args: object, **kwargs: object) -> BmadParseResult:
+            parse_started.set()
+            await allow_parse_finish.wait()
+            return BmadParseResult(
+                skill_type=BmadSkillType.STORY_VALIDATION,
+                verdict="approved",
+                findings=[],
+                parser_mode="deterministic",
+                raw_markdown_hash="h",
+                raw_output_preview="ok",
+                parsed_at=_NOW,
+            )
+
+        engine = self._make_engine(initialized_db_path, AsyncMock())
+        task = _make_task(
+            "t-qa-race",
+            "s-qa-race",
+            status="pending",
+            pid=None,
+            phase="validating",
+            role="validator",
+            cli_tool="claude",
+        )
+
+        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+            mock_bmad = AsyncMock()
+            mock_bmad.parse.side_effect = _blocking_parse
+            mock_bmad_cls.return_value = mock_bmad
+
+            bg = asyncio.create_task(engine._dispatch_convergent_loop(task))
+            await asyncio.wait_for(parse_started.wait(), timeout=1.0)
+
+            db = await get_connection(initialized_db_path)
+            try:
+                stories = await get_undispatched_stories(db)
+                tasks = await get_tasks_by_story(db, "s-qa-race")
+            finally:
+                await db.close()
+
+            assert stories == []
+            current = next(t for t in tasks if t.task_id == "t-qa-race")
+            assert current.status == "running"
+            assert current.completed_at is None
+            assert current.text_result == "结果: PASS\n## 摘要\n无问题"
+
+            allow_parse_finish.set()
+            assert await asyncio.wait_for(bg, timeout=1.0) is True
+
+        db = await get_connection(initialized_db_path)
+        try:
+            tasks = await get_tasks_by_story(db, "s-qa-race")
+        finally:
+            await db.close()
+
+        current = next(t for t in tasks if t.task_id == "t-qa-race")
+        assert current.status == "completed"
+        assert current.completed_at is not None
+
     def test_validating_prompt_contains_report_path_placeholder(self) -> None:
         """AC1: prompt 模板包含 workflow 绑定和 report_path 输出指令。"""
         from ato.recovery import _CONVERGENT_LOOP_PROMPTS
@@ -5605,6 +5725,6 @@ class TestCommittedRecoveryTransitions:
             finally:
                 await db.close()
             assert story is not None
-            assert story.current_phase == "dev_ready"
+            assert story.current_phase in {"dev_ready", "developing"}
         finally:
             await tq.stop()

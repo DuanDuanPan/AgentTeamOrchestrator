@@ -1596,6 +1596,44 @@ class RecoveryEngine:
             return
         task.expected_artifact = str(artifact_path)
 
+    async def _enter_convergent_post_processing(self, task_id: str) -> None:
+        """Keep convergent-loop tasks active until parse/transition fully completes.
+
+        ``dispatch_with_retry()`` persists successful CLI completion immediately. For
+        convergent-loop phases that leaves a short window where the story is still in the
+        same phase but no running/pending/paused task exists, so poll-cycle may wrongly
+        treat it as undispatched and launch a duplicate round.
+        """
+        from ato.models.db import get_connection, update_task_status
+
+        db = await get_connection(self._db_path)
+        try:
+            await update_task_status(
+                db,
+                task_id,
+                "running",
+                pid=None,
+                completed_at=None,
+            )
+        finally:
+            await db.close()
+
+    async def _complete_convergent_post_processing(self, task_id: str) -> None:
+        """Finalize convergent-loop task state after BMAD post-processing finishes."""
+        from ato.models.db import get_connection, update_task_status
+
+        db = await get_connection(self._db_path)
+        try:
+            await update_task_status(
+                db,
+                task_id,
+                "completed",
+                pid=None,
+                completed_at=datetime.now(tz=UTC),
+            )
+        finally:
+            await db.close()
+
     async def _dispatch_structured_job_group(self, tasks: list[TaskRecord]) -> None:
         """Re-dispatch grouped structured-job tasks in one shared CLI session."""
         from ato.core import derive_project_root, get_main_path_gate
@@ -2851,6 +2889,7 @@ class RecoveryEngine:
                     dispatch_opts["idle_timeout"] = _to.idle_timeout
                     dispatch_opts["post_result_timeout"] = _to.post_result_timeout
 
+                post_processing_open = False
                 result = await mgr.dispatch_with_retry(
                     story_id=task.story_id,
                     phase=task.phase,
@@ -2868,6 +2907,9 @@ class RecoveryEngine:
                         cli_tool=cli_tool,
                     ),
                 )
+
+                await self._enter_convergent_post_processing(task.task_id)
+                post_processing_open = True
 
                 # BMAD parse
                 _sem_t = (
@@ -2938,6 +2980,8 @@ class RecoveryEngine:
                         task_id=task.task_id,
                         phase=task.phase,
                     )
+                    if post_processing_open:
+                        await self._complete_convergent_post_processing(task.task_id)
                     return True  # dispatch 已执行，parse 失败已记录
 
             blocking_threshold = (
@@ -3017,6 +3061,8 @@ class RecoveryEngine:
                 new_count=len(records),
                 transition_event=event_name,
             )
+            if post_processing_open:
+                await self._complete_convergent_post_processing(task.task_id)
             return True
         except asyncio.CancelledError:
             raise
