@@ -291,6 +291,14 @@ class TransitionQueue:
                 queue_depth=self._queue.qsize(),
                 timeout_seconds=timeout_seconds,
             )
+
+            # Prevent "Future exception was never retrieved" when the consumer
+            # later calls set_exception on the now-orphaned future.
+            def _suppress_exc(f: asyncio.Future[str]) -> None:
+                if f.done() and not f.cancelled():
+                    f.exception()
+
+            completion_future.add_done_callback(_suppress_exc)
             raise
 
     async def _consumer(self, db: aiosqlite.Connection) -> None:
@@ -394,9 +402,7 @@ class TransitionQueue:
         # _dispatch_finalize_for_preflight_failure 内部已 catch 异常，
         # 但额外 try/except 确保即使 refactor 后异常泄露也执行 second preflight。
         try:
-            await self._dispatch_finalize_for_preflight_failure(
-                mgr, event.story_id, first_result
-            )
+            await self._dispatch_finalize_for_preflight_failure(mgr, event.story_id, first_result)
         except Exception:
             logger.warning(
                 "worktree_finalize_exception_proceeding_to_second_preflight",

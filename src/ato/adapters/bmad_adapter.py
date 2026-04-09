@@ -76,6 +76,7 @@ async def record_parse_failure(
     skill_type: BmadSkillType,
     db: Any,
     task_id: str | None = None,
+    timeout_seconds: float | None = None,
     notifier: ParseFailureNotifier | None = None,
 ) -> ApprovalRecord:
     """记录解析失败，创建 needs_human_review approval 并通知 Orchestrator。
@@ -89,6 +90,7 @@ async def record_parse_failure(
         skill_type: BMAD skill 类型。
         db: aiosqlite 连接。
         task_id: 关联的 task ID（可选）。提供时写入 payload 以便 retry 能定位目标 task。
+        timeout_seconds: 调用侧超时设置，写入 payload 以便排查 timeout 事故。
         notifier: 可选的通知回调。
 
     Returns:
@@ -102,6 +104,7 @@ async def record_parse_failure(
         "parser_mode": parse_result.parser_mode,
         "error": parse_result.parse_error,
         "raw_output_preview": parse_result.raw_output_preview,
+        "timeout_seconds": timeout_seconds,
         "options": ["retry", "skip", "escalate"],
     }
     if task_id is not None:
@@ -159,6 +162,7 @@ class BmadAdapter:
         skill_type: BmadSkillType,
         story_id: str,
         parser_context: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> BmadParseResult:
         """将 BMAD skill 的 Markdown 输出解析为结构化 JSON。
 
@@ -167,6 +171,7 @@ class BmadAdapter:
             skill_type: BMAD skill 类型。
             story_id: 关联的 story ID。
             parser_context: 可选的额外解析上下文。
+            timeout_seconds: 调用侧的超时设置，写入诊断信息便于排查。
 
         Returns:
             BmadParseResult，经 Pydantic model_validate() 验证。
@@ -222,16 +227,46 @@ class BmadAdapter:
         # Deterministic parser 无法识别结构时，检查 explicit verdict 是否明确通过。
         # 避免不必要的 semantic fallback 超时。
         if _is_clearly_passing_output(markdown_output):
+            # Guard: reject incomplete checkpoint output even when verdict looks passing.
+            # Mirrors _detect_incomplete_review_output logic: checkpoint + question
+            # mark is enough — the confirmation regex alone is too narrow.
+            has_checkpoint = _CHECKPOINT_RE.search(markdown_output) is not None
+            has_question = "?" in markdown_output or "？" in markdown_output
+            has_confirmation = _INCOMPLETE_CODE_REVIEW_RE.search(markdown_output) is not None
+            if has_checkpoint and (has_question or has_confirmation):
+                incomplete_reason = "Explicit pass output contains incomplete checkpoint markers"
+                logger.warning(
+                    "bmad_parse_explicit_pass_rejected_incomplete",
+                    story_id=story_id,
+                    skill_type=skill_type.value,
+                    raw_output_preview=preview,
+                )
+                return BmadParseResult.model_validate(
+                    {
+                        "skill_type": skill_type,
+                        "verdict": "parse_failed",
+                        "findings": [],
+                        "parser_mode": "failed",
+                        "raw_markdown_hash": raw_hash,
+                        "raw_output_preview": preview,
+                        "parse_error": incomplete_reason,
+                        "parsed_at": now,
+                    }
+                )
+
+            # Preserve any suggestion-level findings (e.g. defer section)
+            suggestion_findings = _extract_suggestion_findings_fast(markdown_output, skill_type)
             logger.info(
                 "bmad_parse_explicit_pass_fast_path",
                 story_id=story_id,
                 skill_type=skill_type.value,
+                suggestion_count=len(suggestion_findings),
             )
             return BmadParseResult.model_validate(
                 {
                     "skill_type": skill_type,
                     "verdict": "approved",
-                    "findings": [],
+                    "findings": suggestion_findings,
                     "parser_mode": "deterministic",
                     "raw_markdown_hash": raw_hash,
                     "raw_output_preview": preview,
@@ -298,6 +333,7 @@ class BmadAdapter:
                     error=str(exc),
                     input_length=len(markdown_output),
                     timeout_related=is_timeout,
+                    timeout_seconds=timeout_seconds,
                     parser_mode="semantic_fallback",
                 )
 
@@ -307,6 +343,7 @@ class BmadAdapter:
             f"Both deterministic and semantic parsing failed"
             f" (skill_type={skill_type.value},"
             f" input_length={len(markdown_output)},"
+            f" timeout_seconds={timeout_seconds},"
             f" semantic_runner={'available' if self._semantic_runner else 'none'})"
         )
         logger.warning(
@@ -360,6 +397,104 @@ def _is_clearly_passing_output(markdown: str) -> bool:
     if not _CLEARLY_PASSING_RE.search(markdown):
         return False
     return not _NEGATION_PASS_RE.search(markdown)
+
+
+_SUGGESTION_SECTION_PATTERNS: list[tuple[str, str]] = [
+    ("defer", r"defer"),
+    ("suggestion", r"suggest(?:ion)?s?"),
+    ("recommendation", r"recommend(?:ation)?s?"),
+    ("nice_to_have", r"nice[\s-]+to[\s-]+have"),
+]
+
+# Generic suggestion bullet: a top-level ``- ...`` line that is NOT a
+# narrative/descriptive statement about what the reviewer did.
+# We blocklist narrative patterns (small, stable set) rather than
+# allowlisting suggestion words (always incomplete — misses imperatives).
+_PLAIN_SUGGESTION_BULLET_RE = re.compile(
+    r"^[ \t]*[-*]\s+(.{10,})",
+    re.MULTILINE,
+)
+_NARRATIVE_BULLET_RE = re.compile(
+    r"^(?:"
+    r"(?:Reviewed|Checked|Verified|Confirmed|Tested|Inspected|"
+    r"Scanned|Analyzed|Examined|Validated|Ensured|Compared)\b"
+    r"|No\s+(?:issues?|regressions?|problems?|findings?|errors?|"
+    r"concerns?|blockers?|violations?)\b"
+    r"|All\s+(?:tests?|checks?|criteria|requirements?)\b"
+    r"|LGTM\b|Looks\s+good"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _extract_suggestion_findings_fast(
+    markdown: str,
+    skill_type: BmadSkillType,
+) -> list[BmadFinding]:
+    """Lightweight extraction of suggestion-level findings for the explicit-pass fast-path.
+
+    Scans named sections (defer, suggestions, recommendations, nice-to-have)
+    AND generic suggestion bullets so that non-blocking findings are not silently
+    dropped when the deterministic parser couldn't recognise the overall structure.
+    """
+    findings: list[BmadFinding] = []
+
+    # 1. Named sections (code-review only)
+    if skill_type == BmadSkillType.CODE_REVIEW:
+        for category, pattern in _SUGGESTION_SECTION_PATTERNS:
+            section_body = _extract_named_section(markdown, pattern)
+            if not section_body:
+                section_body = _extract_bold_list_section(markdown, pattern)
+            if not section_body:
+                section_body = _extract_bold_section(markdown, pattern)
+            if not section_body:
+                continue
+            items = _extract_items_from_section(section_body)
+            for title, detail, loc_path, loc_line in items:
+                desc = f"{title}: {detail}" if detail else title
+                findings.append(
+                    BmadFinding.model_validate(
+                        {
+                            "severity": "suggestion",
+                            "category": category,
+                            "description": desc,
+                            "file_path": loc_path or "N/A",
+                            "line": loc_line,
+                            "rule_id": f"code_review.{category}",
+                            "raw_location": (
+                                f"{loc_path}:{loc_line}" if loc_path and loc_line else None
+                            ),
+                        }
+                    )
+                )
+
+    # 2. Generic suggestion bullets not captured by named sections.
+    #    Narrative bullets ("Reviewed diff...", "No regressions...") are
+    #    excluded via _NARRATIVE_BULLET_RE; everything else is kept so that
+    #    imperative suggestions ("Add a test...", "Extract the helper...")
+    #    are not silently dropped.
+    if not findings:
+        for m in _PLAIN_SUGGESTION_BULLET_RE.finditer(markdown):
+            text = m.group(1).strip()
+            if text.startswith("**") or text.startswith("#"):
+                continue
+            if _NARRATIVE_BULLET_RE.match(text):
+                continue
+            findings.append(
+                BmadFinding.model_validate(
+                    {
+                        "severity": "suggestion",
+                        "category": "general",
+                        "description": text,
+                        "file_path": "N/A",
+                        "line": None,
+                        "rule_id": "fast_path.suggestion",
+                        "raw_location": None,
+                    }
+                )
+            )
+
+    return findings
 
 
 def _compute_verdict(findings: list[BmadFinding]) -> ParseVerdict:

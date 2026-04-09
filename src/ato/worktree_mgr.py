@@ -32,19 +32,44 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 
+def _unquote_porcelain_path(raw: str) -> str:
+    """Strip surrounding double-quotes added by git for paths with spaces/specials."""
+    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+        return raw[1:-1]
+    return raw
+
+
 def dirty_files_from_porcelain(porcelain_output: str) -> list[str]:
     """Extract file paths from ``git status --porcelain=v1`` output.
 
-    Handles renames (``R  old -> new``), untracked files, paths with spaces,
-    empty lines, and malformed short lines.
+    Handles renames (``R  old -> new``), untracked files, quoted paths with
+    spaces, empty lines, and malformed short lines.
+
+    Git quotes paths containing spaces/specials with double-quotes.  For
+    renames the format is ``"old name" -> "new name"``, so the ``" -> "``
+    separator must only be matched *between* quoted segments.
     """
     files: list[str] = []
     for line in porcelain_output.splitlines():
         if len(line) < 4:
             continue
         path = line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
+        # Handle renames: ``old -> new`` or ``"old" -> "new"``
+        # When the old path is quoted the naive `" -> "` split would cut
+        # inside the quotes.  Detect quoted renames explicitly.
+        if path.startswith('"'):
+            # Find the closing quote of the old-path segment.
+            close = path.find('"', 1)
+            if close != -1:
+                after = path[close + 1 :]
+                if after.startswith(" -> "):
+                    path = after[4:]  # everything after " -> "
+                else:
+                    # Not a rename — just a quoted path
+                    pass
+            path = _unquote_porcelain_path(path)
+        elif " -> " in path:
+            path = _unquote_porcelain_path(path.split(" -> ", 1)[1])
         if path:
             files.append(path)
     return files

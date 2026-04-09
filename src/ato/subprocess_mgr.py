@@ -396,14 +396,10 @@ class SubprocessManager:
                             task_id=task_id,
                             exc_info=True,
                         )
-                        await self._fallback_update_task(
-                            task_id, adapter_exc, finalize_exc
-                        )
+                        await self._fallback_update_task(task_id, adapter_exc, finalize_exc)
                     else:
                         # CancelledError: 仍尝试 fallback，然后重新抛出
-                        await self._fallback_update_task(
-                            task_id, adapter_exc, finalize_exc
-                        )
+                        await self._fallback_update_task(task_id, adapter_exc, finalize_exc)
                         raise
             finally:
                 # AC1: _unregister_running 在 outer finally，不依赖 DB 写入成功
@@ -539,7 +535,12 @@ class SubprocessManager:
             status = force_status
         else:
             status = "failed" if adapter_exc is not None else "completed"
-        exit_code = adapter_exc.exit_code if adapter_exc is not None else 0
+        if adapter_exc is not None:
+            exit_code = adapter_exc.exit_code
+        elif force_status == "failed":
+            exit_code = -1  # dead PID / forced failure without adapter error
+        else:
+            exit_code = 0
         error_msg = f"finalizer_fallback: {finalize_exc!r}"
         completed_at = datetime.now(tz=UTC).isoformat()
 

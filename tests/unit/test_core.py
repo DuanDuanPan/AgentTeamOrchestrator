@@ -1991,7 +1991,8 @@ class TestPreflightFailureApprovalConsumption:
 
         result = await orchestrator._handle_approval_decision(approval)
 
-        assert result is True
+        # Story 10.3: StateTransitionError → return False (不消费 approval)
+        assert result is False
         event = tq.event
         assert event is not None
         assert isinstance(event, TransitionEvent)

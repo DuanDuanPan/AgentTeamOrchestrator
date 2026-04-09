@@ -790,9 +790,7 @@ class TestExplicitPassFastPath:
         md = "# Story Validation\n\nResult: PASS\n\nAll criteria met."
         runner = _FakeSemanticRunner([])
         adapter = BmadAdapter(semantic_runner=runner)
-        result = await adapter.parse(
-            md, skill_type=BmadSkillType.STORY_VALIDATION, story_id="s1"
-        )
+        result = await adapter.parse(md, skill_type=BmadSkillType.STORY_VALIDATION, story_id="s1")
         assert result.verdict == "approved"
         assert result.parser_mode == "deterministic"
         assert not runner.called
@@ -802,9 +800,7 @@ class TestExplicitPassFastPath:
         md = "# Review\n\nStatus: PASS\n\nNo issues."
         runner = _FakeSemanticRunner([])
         adapter = BmadAdapter(semantic_runner=runner)
-        result = await adapter.parse(
-            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
-        )
+        result = await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
         assert result.verdict == "approved"
         assert not runner.called
 
@@ -813,9 +809,7 @@ class TestExplicitPassFastPath:
         md = "# QA\n\nRecommendation: Approve\n\nAll tests pass."
         runner = _FakeSemanticRunner([])
         adapter = BmadAdapter(semantic_runner=runner)
-        result = await adapter.parse(
-            md, skill_type=BmadSkillType.QA_REPORT, story_id="s1"
-        )
+        result = await adapter.parse(md, skill_type=BmadSkillType.QA_REPORT, story_id="s1")
         assert result.verdict == "approved"
         assert not runner.called
 
@@ -824,9 +818,7 @@ class TestExplicitPassFastPath:
         md = "# Review\n\nNo blocking findings.\n\nAll good."
         runner = _FakeSemanticRunner([])
         adapter = BmadAdapter(semantic_runner=runner)
-        result = await adapter.parse(
-            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
-        )
+        result = await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
         assert result.verdict == "approved"
         assert not runner.called
 
@@ -835,9 +827,7 @@ class TestExplicitPassFastPath:
         md = "# Review\n\n0 blocking, 2 suggestion.\nRecommendation: Approve"
         runner = _FakeSemanticRunner([])
         adapter = BmadAdapter(semantic_runner=runner)
-        result = await adapter.parse(
-            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
-        )
+        result = await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
         assert result.verdict == "approved"
         assert not runner.called
 
@@ -846,8 +836,35 @@ class TestExplicitPassFastPath:
         md = "# Review\n\nStatus: PASS but did not pass quality gates.\nFail."
         runner = _FakeSemanticRunner([])
         adapter = BmadAdapter(semantic_runner=runner)
-        await adapter.parse(
-            md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1"
-        )
+        await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
         # Should fall through to semantic (negation detected)
         assert runner.called
+
+    async def test_fast_path_drops_narrative_bullets(self) -> None:
+        """Narrative bullets (past-tense, 'No X found') must not become findings."""
+        md = (
+            "# Review\n"
+            "Recommendation: Approve\n"
+            "- Reviewed diff against main branch.\n"
+            "- No regressions found in the touched files.\n"
+            "- Checked all boundary conditions.\n"
+        )
+        adapter = BmadAdapter(semantic_runner=_FakeSemanticRunner([]))
+        result = await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
+        assert result.verdict == "approved"
+        assert result.parser_mode == "deterministic"
+        assert len(result.findings) == 0
+
+    async def test_fast_path_keeps_imperative_suggestion_bullets(self) -> None:
+        """Imperative suggestions ('Add ...', 'Extract ...') must be preserved."""
+        md = (
+            "Recommendation: Approve\n\n"
+            "- Add a regression test for the retry path.\n"
+            "- Extract the helper into a shared module.\n"
+        )
+        adapter = BmadAdapter(semantic_runner=_FakeSemanticRunner([]))
+        result = await adapter.parse(md, skill_type=BmadSkillType.CODE_REVIEW, story_id="s1")
+        assert result.verdict == "approved"
+        assert result.parser_mode == "deterministic"
+        assert len(result.findings) == 2
+        assert all(f.severity == "suggestion" for f in result.findings)

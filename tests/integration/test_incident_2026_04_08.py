@@ -94,9 +94,7 @@ class FakeAdapter:
 class TestBUG001PostResultStuck:
     """BUG-001 P0: CLI result 返回后终态收敛边界不可卡死。"""
 
-    async def test_db_hang_during_finalize_still_releases(
-        self, db_ready: Path
-    ) -> None:
+    async def test_db_hang_during_finalize_still_releases(self, db_ready: Path) -> None:
         """dispatch 在 DB helper 卡住时有界退出，running 被清空。
         Fallback 保证 task 不永久 running。"""
         import ato.models.db as db_mod
@@ -109,15 +107,13 @@ class TestBUG001PostResultStuck:
 
         orig_fn = db_mod.update_task_status
 
-        async def _hanging_update(
-            db: Any, task_id: str, status: str, **kw: Any
-        ) -> None:
+        async def _hanging_update(db: Any, task_id: str, status: str, **kw: Any) -> None:
             if status in ("completed", "failed"):
                 await asyncio.sleep(999)
             else:
                 await orig_fn(db, task_id, status, **kw)
 
-        db_mod.update_task_status = _hanging_update  # type: ignore[assignment]
+        db_mod.update_task_status = _hanging_update
         try:
             # dispatch 应有界退出（fallback 成功后正常返回）
             async with asyncio.timeout(15):
@@ -191,16 +187,19 @@ class TestBUG002ResultExitCode1:
         from ato.adapters.claude_cli import ClaudeAdapter
         from ato.models.schemas import ClaudeOutput
 
-        result_line = json.dumps(
-            {
-                "type": "result",
-                "result": "All tests pass.",
-                "total_cost_usd": 0.01,
-                "usage": {"input_tokens": 100, "output_tokens": 50},
-                "session_id": "sess-bug002",
-                "duration_ms": 1000,
-            }
-        ).encode() + b"\n"
+        result_line = (
+            json.dumps(
+                {
+                    "type": "result",
+                    "result": "All tests pass.",
+                    "total_cost_usd": 0.01,
+                    "usage": {"input_tokens": 100, "output_tokens": 50},
+                    "session_id": "sess-bug002",
+                    "duration_ms": 1000,
+                }
+            ).encode()
+            + b"\n"
+        )
 
         # Inline mock process (avoid cross-test imports)
         proc = MagicMock()
@@ -339,3 +338,139 @@ class TestBUG007BmadPassFastPath:
         assert result.verdict == "approved"
         assert result.parser_mode == "deterministic"
         assert not runner.called
+
+
+# ---------------------------------------------------------------------------
+# Finalize + git truth regression
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeGitTruth:
+    """Finalize 结果依赖 git HEAD 比较（git truth），而非 CLI exit code。"""
+
+    async def test_finalize_detects_commit_via_head_diff(self, db_ready: Path) -> None:
+        """dispatch_finalize 通过 pre/post HEAD SHA 比较判断 commit，
+        而非依赖 adapter 返回值。即使 adapter 报错，git 有新 commit 仍返回 committed=True。"""
+        from unittest.mock import AsyncMock, patch
+
+        mgr = SubprocessManager(
+            max_concurrent=4,
+            adapter=FakeAdapter(result=_make_result(status="failure", exit_code=1)),  # type: ignore[arg-type]
+            db_path=db_ready,
+        )
+
+        call_count = 0
+
+        async def _fake_finalize_git(worktree_path: str, *args: str) -> tuple[int, str, str]:
+            nonlocal call_count
+            call_count += 1
+            if args[0] == "rev-parse":
+                # First call returns pre_head, second returns different post_head
+                if call_count <= 1:
+                    return 0, "aaa111\n", ""
+                return 0, "bbb222\n", ""
+            if args[0] == "log":
+                return 0, "story-incident: finalize commit\n", ""
+            if args[0] == "diff":
+                return 0, "src/file.py\n", ""
+            return 1, "", "unknown git command"
+
+        with (
+            patch.object(mgr, "_run_finalize_git", side_effect=_fake_finalize_git),
+            patch.object(mgr, "dispatch_with_retry", new_callable=AsyncMock),
+        ):
+            result = await mgr.dispatch_finalize(
+                "story-incident",
+                "/tmp/fake-worktree",
+                "Test story",
+            )
+
+        assert result.committed is True
+        assert result.pre_head_sha == "aaa111"
+        assert result.post_head_sha == "bbb222"
+
+    async def test_finalize_no_commit_when_head_unchanged(self, db_ready: Path) -> None:
+        """HEAD 不变时 committed=False，即使 adapter 成功。"""
+        from unittest.mock import AsyncMock, patch
+
+        mgr = SubprocessManager(
+            max_concurrent=4,
+            adapter=FakeAdapter(),  # type: ignore[arg-type]
+            db_path=db_ready,
+        )
+
+        async def _fake_finalize_git(worktree_path: str, *args: str) -> tuple[int, str, str]:
+            if args[0] == "rev-parse":
+                return 0, "same_sha\n", ""
+            return 1, "", ""
+
+        with (
+            patch.object(mgr, "_run_finalize_git", side_effect=_fake_finalize_git),
+            patch.object(mgr, "dispatch_with_retry", new_callable=AsyncMock),
+        ):
+            result = await mgr.dispatch_finalize(
+                "story-incident",
+                "/tmp/fake-worktree",
+                "Test story",
+            )
+
+        assert result.committed is False
+
+
+# ---------------------------------------------------------------------------
+# Blocked preflight retry regression
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedPreflightRetry:
+    """Preflight retry 在 story 处于 blocked phase 时不消费 approval。"""
+
+    async def test_blocked_phase_rejects_preflight_retry(self, db_ready: Path) -> None:
+        """Story 处于 blocked phase 时，preflight_failure approval 的
+        manual_commit_and_retry 决策返回 False（不消费）。"""
+        import json
+        from unittest.mock import MagicMock
+
+        from ato.core import Orchestrator
+        from ato.models.db import get_connection, insert_story
+        from ato.models.schemas import ApprovalRecord, StoryRecord
+
+        # 插入一个 blocked 状态的 story
+        db = await get_connection(db_ready)
+        try:
+            await insert_story(
+                db,
+                StoryRecord(
+                    story_id="s-blocked-preflight",
+                    title="Blocked story",
+                    status="in_progress",
+                    current_phase="blocked",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                ),
+            )
+        finally:
+            await db.close()
+
+        settings = MagicMock()
+        settings.polling_interval = 1.0
+        orchestrator = Orchestrator(settings=settings, db_path=db_ready)
+        orchestrator._tq = AsyncMock()
+        orchestrator._tq.submit_and_wait = AsyncMock()
+
+        payload = json.dumps({"gate_type": "pre_review", "retry_event": "fix_done"})
+        approval = ApprovalRecord(
+            approval_id="appr-blocked-retry",
+            story_id="s-blocked-preflight",
+            approval_type="preflight_failure",
+            status="approved",
+            decision="manual_commit_and_retry",
+            payload=payload,
+            decided_at=_NOW,
+            created_at=_NOW,
+        )
+
+        result = await orchestrator._handle_approval_decision(approval)
+        assert result is False
+        # submit_and_wait should NOT have been called
+        orchestrator._tq.submit_and_wait.assert_not_awaited()

@@ -240,7 +240,7 @@ def _build_designing_prompt_template() -> str:
         "   - 将模板复制到 `{prototype_pen}`\n"
         "   - 如果最终 fallback 到 `{template_pen}`，必须在最终报告中明确说明 fallback 原因\n"
         "3. 调用：\n"
-        "   - `open_document(filePath=\"{prototype_pen}\")`\n"
+        '   - `open_document(filePath="{prototype_pen}")`\n'
         "4. 若已验证存在以下能力，则按顺序使用：\n"
         "   - `get_guidelines(...)`\n"
         "   - style guide / style reference 能力\n"
@@ -252,7 +252,7 @@ def _build_designing_prompt_template() -> str:
         "   - 是否继承项目已有视觉语言，而不是从空白风格重造一套\n\n"
         "## 阶段 4：强制落盘\n\n"
         "设计完成后必须执行以下结构化持久化链路：\n\n"
-        "1. 调用 `batch_get(filePath=\"{prototype_pen}\", readDepth=99, includePathGeometry=true)` "
+        '1. 调用 `batch_get(filePath="{prototype_pen}", readDepth=99, includePathGeometry=true)` '
         "获取完整内存节点树\n"
         "2. 读取磁盘上的 `{prototype_pen}`（`json.load`）\n"
         "3. 保留磁盘文件所有顶层字段，仅用内存态 `children` 替换磁盘态 `children`\n"
@@ -267,10 +267,10 @@ def _build_designing_prompt_template() -> str:
         "### A. 结构校验\n"
         "1. 对 `{prototype_pen}` 执行 `json.load`\n"
         "2. 确认其可解析，且保留顶层合同字段\n"
-        "3. 再次调用 `batch_get(filePath=\"{prototype_pen}\")` 做 MCP 回读验证\n"
+        '3. 再次调用 `batch_get(filePath="{prototype_pen}")` 做 MCP 回读验证\n'
         "4. 将验证结果写入 `{save_report_json}`：`json_parse_verified`、`reopen_verified`\n\n"
         "### B. 导出校验\n"
-        "1. 调用 `export_nodes(outputDir=\"{exports_dir}\", nodeIds=[...], format=\"png\")`\n"
+        '1. 调用 `export_nodes(outputDir="{exports_dir}", nodeIds=[...], format="png")`\n'
         "2. 确保 `{exports_dir}` 下至少存在 1 张 `.png`\n"
         "3. 将 `{save_report_json}` 中的 `exported_png_count` 更新为实际导出的 PNG 数量，"
         "必须与 `{exports_dir}` 中的实际文件数一致\n\n"
@@ -579,9 +579,9 @@ def _build_designing_group_body(story_ids: list[str]) -> str:
         f"{_DESIGNING_SAVE_REPORT_KEYS}\n"
         "- 禁止使用 `penFile`、`timestamp`、`snapshotSaved` 等替代键名\n\n"
         "### 阶段 5：Verification\n"
-        "- 对 `{prototype_pen}` 执行 `json.load`，并调用 `batch_get(filePath=\"{prototype_pen}\")` "
+        '- 对 `{prototype_pen}` 执行 `json.load`，并调用 `batch_get(filePath="{prototype_pen}")` '
         "做 MCP 回读验证\n"
-        "- 调用 `export_nodes(outputDir=\"{exports_dir}\", nodeIds=[...], format=\"png\")`，"
+        '- 调用 `export_nodes(outputDir="{exports_dir}", nodeIds=[...], format="png")`，'
         "并让 `exported_png_count` 与实际导出数量一致\n"
         "- 如果存在布局检查能力，优先检查 clipping / overlap / overflow / misalignment\n"
         "- 如果 `get_screenshot` 可用，则用它做视觉复核；若不可用，必须改用导出 PNG 并说明原因\n"
@@ -769,10 +769,12 @@ def _create_bmad_adapter(*, semantic_timeout: int | None = None) -> BmadAdapter:
     from ato.adapters.bmad_adapter import BmadAdapter
     from ato.adapters.semantic_parser import ClaudeSemanticParser
 
-    kwargs: dict[str, int] = {}
-    if semantic_timeout is not None:
-        kwargs["timeout"] = semantic_timeout
-    return BmadAdapter(semantic_runner=ClaudeSemanticParser(**kwargs))
+    parser = (
+        ClaudeSemanticParser(timeout=semantic_timeout)
+        if semantic_timeout is not None
+        else ClaudeSemanticParser()
+    )
+    return BmadAdapter(semantic_runner=parser)
 
 
 class RecoveryEngine:
@@ -2110,9 +2112,7 @@ class RecoveryEngine:
             db_path=self._db_path,
         )
         _sem_timeout = (
-            self._settings.timeout.semantic_parser
-            if self._settings is not None
-            else None
+            self._settings.timeout.semantic_parser if self._settings is not None else None
         )
         bmad = _create_bmad_adapter(semantic_timeout=_sem_timeout)
         return ConvergentLoop(
@@ -2120,6 +2120,7 @@ class RecoveryEngine:
             subprocess_mgr=mgr,
             bmad_adapter=bmad,
             transition_queue=self._transition_queue,
+            semantic_timeout=_sem_timeout,
             config=self._settings.convergent_loop
             if self._settings is not None
             else ConvergentLoopConfig(),
@@ -2731,15 +2732,14 @@ class RecoveryEngine:
 
                 # BMAD parse
                 _sem_t = (
-                    self._settings.timeout.semantic_parser
-                    if self._settings is not None
-                    else None
+                    self._settings.timeout.semantic_parser if self._settings is not None else None
                 )
                 bmad = _create_bmad_adapter(semantic_timeout=_sem_t)
                 parse_result = await bmad.parse(
                     markdown_output=result.text_result,
                     skill_type=skill_type,
                     story_id=task.story_id,
+                    timeout_seconds=float(_sem_t) if _sem_t is not None else None,
                 )
             finally:
                 if gate is not None:
@@ -2775,6 +2775,7 @@ class RecoveryEngine:
                                 markdown_output=file_content,
                                 skill_type=skill_type,
                                 story_id=task.story_id,
+                                timeout_seconds=float(_sem_t) if _sem_t is not None else None,
                             )
                             if fallback_result.verdict != "parse_failed":
                                 parse_result = fallback_result
@@ -2788,6 +2789,7 @@ class RecoveryEngine:
                             skill_type=skill_type,
                             db=db,
                             task_id=task.task_id,
+                            timeout_seconds=float(_sem_t) if _sem_t is not None else None,
                             notifier=self._nudge.notify if self._nudge else None,
                         )
                     finally:

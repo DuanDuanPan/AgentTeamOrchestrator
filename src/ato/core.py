@@ -1081,6 +1081,41 @@ class Orchestrator:
         # 调度 active phase 但无 task 的 stories（batch confirm 后首次 dispatch）
         await self._dispatch_undispatched_stories()
 
+        # Dead PID watchdog: 检测 running 状态但进程已死的 task 并标记 failed
+        await self._sweep_dead_worker_pids()
+
+    async def _sweep_dead_worker_pids(self) -> None:
+        """DB-based dead PID watchdog: 查询 running tasks，检测已退出进程并标记 failed。"""
+        from ato.models.db import get_running_tasks, update_task_status
+        from ato.recovery import _is_pid_alive
+
+        db = await get_connection(self._db_path)
+        try:
+            running_tasks = await get_running_tasks(db)
+            for task in running_tasks:
+                if task.pid is None:
+                    continue
+                if _is_pid_alive(task.pid):
+                    continue
+                logger.warning(
+                    "dead_worker_pid_detected",
+                    task_id=task.task_id,
+                    story_id=task.story_id,
+                    phase=task.phase,
+                    pid=task.pid,
+                )
+                await update_task_status(
+                    db,
+                    task.task_id,
+                    "failed",
+                    error_message=f"Dead worker PID {task.pid} detected by poll-cycle watchdog",
+                    exit_code=-1,
+                )
+        except Exception:
+            logger.exception("sweep_dead_worker_pids_failed")
+        finally:
+            await db.close()
+
     async def _process_approval_decisions(self) -> None:
         """消费已决策的 approvals，触发对应恢复动作或状态转换。
 

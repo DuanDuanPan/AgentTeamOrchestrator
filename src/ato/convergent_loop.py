@@ -102,6 +102,7 @@ class ConvergentLoop:
         standard_fix_profile: DispatchProfile | None = None,
         escalated_review_profile: DispatchProfile | None = None,
         escalated_fix_profile: DispatchProfile | None = None,
+        semantic_timeout: int | None = None,
     ) -> None:
         self._db_path = db_path
         self._subprocess_mgr = subprocess_mgr
@@ -110,6 +111,9 @@ class ConvergentLoop:
         self._config = config
         self._blocking_threshold = blocking_threshold
         self._nudge = nudge
+        self._semantic_timeout: float | None = (
+            float(semantic_timeout) if semantic_timeout is not None else None
+        )
         self._reviewer_options = reviewer_options or {}
         # Dispatch profiles
         self._standard_review = standard_review_profile or self._DEFAULT_STANDARD_REVIEW
@@ -868,6 +872,7 @@ class ConvergentLoop:
                 markdown_output=result.text_result,
                 skill_type=BmadSkillType.CODE_REVIEW,
                 story_id=story_id,
+                timeout_seconds=self._semantic_timeout,
             )
 
             if parse_result.verdict == "parse_failed":
@@ -879,6 +884,7 @@ class ConvergentLoop:
                         skill_type=BmadSkillType.CODE_REVIEW,
                         db=db,
                         task_id=review_task_id,
+                        timeout_seconds=self._semantic_timeout,
                         notifier=self._nudge.notify if self._nudge else None,
                     )
                 finally:
@@ -1584,6 +1590,7 @@ class ConvergentLoop:
                 markdown_output=result.text_result,
                 skill_type=BmadSkillType.CODE_REVIEW,
                 story_id=story_id,
+                timeout_seconds=self._semantic_timeout,
             )
 
             # --- Handle parse failure ---
@@ -1596,6 +1603,7 @@ class ConvergentLoop:
                         skill_type=BmadSkillType.CODE_REVIEW,
                         db=db,
                         task_id=rereview_task_id,
+                        timeout_seconds=self._semantic_timeout,
                         notifier=self._nudge.notify if self._nudge else None,
                     )
                 finally:
