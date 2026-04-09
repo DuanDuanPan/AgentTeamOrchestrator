@@ -44,6 +44,8 @@ from ato.worktree_mgr import WorktreeManager
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
+_QUEUE_OWNED_PHASES: frozenset[str] = frozenset({"merging", "regression"})
+
 # ---------------------------------------------------------------------------
 # Main-path (workspace: main) 共享-独占门控
 # ---------------------------------------------------------------------------
@@ -1804,6 +1806,14 @@ class Orchestrator:
             await db.close()
         if latest_story is not None:
             story = latest_story
+
+        if story.current_phase in _QUEUE_OWNED_PHASES:
+            logger.info(
+                "initial_dispatch_skipped_queue_owned_phase",
+                story_id=story.story_id,
+                phase=story.current_phase,
+            )
+            return
 
         if await self._has_pending_crash_recovery_approval(story.story_id):
             logger.info(

@@ -347,6 +347,53 @@ class TestTransitionQueueSubmitAndWait:
 
         await tq.stop()
 
+    async def test_submit_and_wait_uses_extended_timeout_for_pre_review_events(
+        self,
+        initialized_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """dev_done/fix_done 默认等待时间应覆盖 preflight/finalize 路径。"""
+        tq = TransitionQueue(initialized_db_path)
+        tq._running = True
+
+        captured: dict[str, float] = {}
+
+        async def fake_wait_for(awaitable: object, timeout: float) -> str:
+            captured["timeout"] = timeout
+            return "reviewing"
+
+        monkeypatch.setattr("ato.transition_queue.asyncio.wait_for", fake_wait_for)
+
+        result = await tq.submit_and_wait(_make_event("s-gated", "dev_done"))
+
+        assert result == "reviewing"
+        assert captured["timeout"] == 120.0
+
+    async def test_submit_and_wait_explicit_timeout_overrides_pre_review_default(
+        self,
+        initialized_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """显式 timeout_seconds 必须覆盖 gated transition 的默认长等待。"""
+        tq = TransitionQueue(initialized_db_path)
+        tq._running = True
+
+        captured: dict[str, float] = {}
+
+        async def fake_wait_for(awaitable: object, timeout: float) -> str:
+            captured["timeout"] = timeout
+            return "reviewing"
+
+        monkeypatch.setattr("ato.transition_queue.asyncio.wait_for", fake_wait_for)
+
+        result = await tq.submit_and_wait(
+            _make_event("s-gated-explicit", "fix_done"),
+            timeout_seconds=7.5,
+        )
+
+        assert result == "reviewing"
+        assert captured["timeout"] == 7.5
+
 
 # ---------------------------------------------------------------------------
 # Test: pre-review worktree gate

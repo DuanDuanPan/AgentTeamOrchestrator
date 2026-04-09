@@ -313,6 +313,21 @@ class TestGetUndispatchedStories:
 
         assert stories == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("phase", ["merging", "regression"])
+    async def test_queue_owned_phase_not_detected(self, tmp_path: Path, phase: str) -> None:
+        """merge queue 接管的阶段不应走普通初始调度检测。"""
+        db_path = await _setup_db(tmp_path)
+        await _insert_story(db_path, "s-queue-owned", phase, "in_progress")
+
+        db = await get_connection(db_path)
+        try:
+            stories = await get_undispatched_stories(db)
+        finally:
+            await db.close()
+
+        assert stories == []
+
 
 # ---------------------------------------------------------------------------
 # Delegation Tests
@@ -570,6 +585,58 @@ class TestInitialDispatchDelegation:
         db2 = await get_connection(db_path)
         try:
             tasks = await get_tasks_by_story(db2, "s-blocked")
+        finally:
+            await db2.close()
+
+        assert tasks == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("phase", ["merging", "regression"])
+    async def test_initial_dispatch_skips_queue_owned_phase(
+        self,
+        tmp_path: Path,
+        phase: str,
+    ) -> None:
+        """queue-owned phase 即使被直接调用，也不应生成普通初始 task。"""
+        db_path = await _setup_db(tmp_path)
+        story = _make_story_record(f"s-{phase}", current_phase=phase, status="in_progress")
+
+        db = await get_connection(db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=_make_settings(), db_path=db_path)
+
+        with (
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={
+                    "role": "developer" if phase == "merging" else "qa",
+                    "cli_tool": "claude" if phase == "merging" else "codex",
+                    "phase_type": "structured_job",
+                },
+            ),
+            patch.object(
+                orchestrator,
+                "_dispatch_batch_restart",
+                new_callable=AsyncMock,
+            ) as mock_batch,
+            patch.object(
+                orchestrator,
+                "_dispatch_convergent_restart",
+                new_callable=AsyncMock,
+            ) as mock_convergent,
+        ):
+            await orchestrator._dispatch_initial_phase(story)
+
+        mock_batch.assert_not_called()
+        mock_convergent.assert_not_called()
+
+        db2 = await get_connection(db_path)
+        try:
+            tasks = await get_tasks_by_story(db2, story.story_id)
         finally:
             await db2.close()
 

@@ -108,6 +108,18 @@ def _gate_type_for_transition(event_name: str) -> WorktreeGateType | None:
     return None
 
 
+_DEFAULT_SUBMIT_WAIT_TIMEOUT_SECONDS = 5.0
+_PRE_REVIEW_SUBMIT_WAIT_TIMEOUT_SECONDS = 120.0
+
+
+def _submit_wait_timeout_seconds(event_name: str) -> float:
+    """Return the default submit-and-wait timeout for a transition event."""
+    if _gate_type_for_transition(event_name) == "pre_review":
+        # dev_done/fix_done may synchronously run preflight + finalize before commit.
+        return _PRE_REVIEW_SUBMIT_WAIT_TIMEOUT_SECONDS
+    return _DEFAULT_SUBMIT_WAIT_TIMEOUT_SECONDS
+
+
 def _dirty_files_from_porcelain(porcelain_output: str) -> list[str]:
     """Extract file paths from git status --porcelain=v1 output for finalize context.
 
@@ -258,7 +270,7 @@ class TransitionQueue:
         self,
         event: TransitionEvent,
         *,
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float | None = None,
     ) -> str:
         """Submit an event and wait until its state transition is committed."""
         if not self._running:
@@ -277,11 +289,17 @@ class TransitionQueue:
         if self._nudge is not None:
             self._nudge.notify()
 
+        effective_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else _submit_wait_timeout_seconds(event.event_name)
+        )
+
         # Story 10.3 AC1: shield 防止 wait timeout 取消 completion_future，
         # 使 consumer 稍后仍能安全 set_result/set_exception。
         try:
             return await asyncio.wait_for(
-                asyncio.shield(completion_future), timeout=timeout_seconds
+                asyncio.shield(completion_future), timeout=effective_timeout
             )
         except TimeoutError:
             logger.warning(
@@ -289,7 +307,7 @@ class TransitionQueue:
                 story_id=event.story_id,
                 event_name=event.event_name,
                 queue_depth=self._queue.qsize(),
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=effective_timeout,
             )
 
             # Prevent "Future exception was never retrieved" when the consumer

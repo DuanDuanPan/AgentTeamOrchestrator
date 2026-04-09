@@ -730,6 +730,9 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
     存在 pending blocking approval（``crash_recovery`` 或 ``needs_human_review``）
     的 story 会被排除，避免在等待人工决策期间被初始调度路径再次补发 task。
 
+    ``merging`` / ``regression`` 由 merge queue 专职接管，不应再走普通
+    initial dispatch；否则会与 merge queue worker 并发执行同一 story。
+
     ``fixing`` 不能被全局排除：除 convergent loop 之外，UAT / regression
     也会进入 fixing，并依赖初始调度恢复 owner task。对于 convergent loop
     产生的 fixing，pending placeholder/task 会自然把它挡在查询结果之外。
@@ -742,7 +745,7 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
         JOIN batch_stories bs ON s.story_id = bs.story_id
         JOIN batches b ON bs.batch_id = b.batch_id
         WHERE b.status = 'active'
-          AND s.current_phase NOT IN ('queued', 'done', 'blocked')
+          AND s.current_phase NOT IN ('queued', 'done', 'blocked', 'merging', 'regression')
           AND NOT EXISTS (
             SELECT 1 FROM tasks t
             WHERE t.story_id = s.story_id
