@@ -1810,6 +1810,7 @@ class TestCodexRegressionRunner:
         assert "bounded discovery only" in prompt
         assert "git-clean relative to the starting snapshot" in prompt
         assert "command_audit.source" in prompt
+        assert "policy-domain commands" in prompt
 
     async def test_build_regression_prompt_with_explicit_phase_policy(self) -> None:
         from ato.merge_queue import _build_regression_prompt
@@ -1845,6 +1846,80 @@ class TestCodexRegressionRunner:
         assert "Optional layers: integration" in prompt
         assert "uv run pytest tests/integration/" in prompt
         assert "trigger_reason" in prompt
+        assert "Do NOT include auxiliary inspection commands" in prompt
+
+    def test_validate_regression_command_audit_ignores_auxiliary_inspection(self) -> None:
+        from ato.config import resolve_effective_test_policy
+        from ato.merge_queue import _validate_regression_command_audit
+        from ato.models.schemas import RegressionCommandAuditEntry
+
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                },
+            ],
+            test_catalog={
+                "unit": TestLayerConfig(commands=["uv run pytest tests/unit/"]),
+                "integration": TestLayerConfig(commands=["uv run pytest tests/integration/"]),
+            },
+            phase_test_policy={
+                "regression": PhaseTestPolicyConfig(
+                    required_layers=["unit"],
+                    optional_layers=["integration"],
+                    allow_discovery=False,
+                    max_additional_commands=1,
+                    allowed_when="after_required_commands",
+                )
+            },
+        )
+        policy = resolve_effective_test_policy(settings, "regression")
+        assert policy is not None
+
+        entries = [
+            RegressionCommandAuditEntry(
+                command="git status --short",
+                source="llm_diagnostic",
+                trigger_reason="diagnostic",
+                exit_code=0,
+            ),
+            RegressionCommandAuditEntry(
+                command="sed -n '1,220p' package.json",
+                source="llm_diagnostic",
+                trigger_reason="diagnostic",
+                exit_code=0,
+            ),
+            RegressionCommandAuditEntry(
+                command="uv run pytest tests/unit/",
+                source="project_defined",
+                trigger_reason="required_layer",
+                exit_code=0,
+            ),
+            RegressionCommandAuditEntry(
+                command="rg --files -g 'package.json' .",
+                source="llm_diagnostic",
+                trigger_reason="diagnostic",
+                exit_code=0,
+            ),
+            RegressionCommandAuditEntry(
+                command="uv run pytest tests/integration/",
+                source="project_defined",
+                trigger_reason="optional_layer",
+                exit_code=0,
+            ),
+        ]
+
+        _validate_regression_command_audit(
+            commands_attempted=[entry.command for entry in entries],
+            command_audit=entries,
+            test_policy=policy,
+            skipped_command_reason=None,
+        )
 
     def test_validate_regression_command_audit_rejects_closed_failure_gate(self) -> None:
         from ato.config import resolve_effective_test_policy

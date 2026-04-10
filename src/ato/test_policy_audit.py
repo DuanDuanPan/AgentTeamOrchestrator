@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import shlex
 from collections.abc import Sequence
 from typing import Literal
 
@@ -27,6 +29,69 @@ _DISCOVERY_SOURCES = {"llm_discovered", "llm_diagnostic"}
 _QA_PROTOCOL_INVALID_OPTIONS = ["retry", "skip", "escalate"]
 _PREVIEW_LINE_LIMIT = 5
 _PREVIEW_LINE_MAX_CHARS = 200
+_AUXILIARY_EXECUTABLES = frozenset(
+    {
+        "cat",
+        "find",
+        "git",
+        "head",
+        "ls",
+        "pwd",
+        "readlink",
+        "realpath",
+        "rg",
+        "ripgrep",
+        "sed",
+        "tail",
+        "which",
+    }
+)
+_POLICY_DOMAIN_WRAPPERS = frozenset(
+    {
+        "bash",
+        "bun",
+        "hatch",
+        "just",
+        "make",
+        "npm",
+        "nox",
+        "pipenv",
+        "pnpm",
+        "poetry",
+        "sh",
+        "task",
+        "tox",
+        "uv",
+        "yarn",
+        "zsh",
+    }
+)
+_POLICY_DOMAIN_DIRECT_EXECUTABLES = frozenset(
+    {
+        "cargo",
+        "ctest",
+        "dotnet",
+        "electron-vite",
+        "eslint",
+        "go",
+        "gradle",
+        "gradlew",
+        "jest",
+        "mocha",
+        "mvn",
+        "mvnw",
+        "mypy",
+        "playwright",
+        "pytest",
+        "ruff",
+        "tsc",
+        "vite",
+        "vitest",
+    }
+)
+_POLICY_DOMAIN_TOKEN_RE = re.compile(
+    r"(?i)(^|[:/_\-.])(build|check|clippy|e2e|integration|lint|smoke|test|typecheck|type-check|unit|verify|vet)([:/_\-.]|$)"
+)
 
 
 class CommandAuditValidationError(ValueError):
@@ -48,6 +113,84 @@ def _raise_validation_error(
     detail: str,
 ) -> None:
     raise CommandAuditValidationError(violation_code, detail)
+
+
+def _split_shell_segments(command: str) -> list[str]:
+    return [
+        segment.strip()
+        for segment in re.split(r"\s*(?:&&|\|\||;)\s*", command)
+        if segment.strip()
+    ]
+
+
+def _segment_tokens(segment: str) -> list[str]:
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
+
+
+def _normalize_executable(token: str) -> str:
+    return token.rsplit("/", 1)[-1].lower()
+
+
+def _has_policy_domain_token(token: str) -> bool:
+    return bool(_POLICY_DOMAIN_TOKEN_RE.search(token.lower()))
+
+
+def _segment_executes_policy_domain(segment: str) -> bool:
+    tokens = _segment_tokens(segment)
+    if not tokens:
+        return False
+
+    executable = _normalize_executable(tokens[0])
+    args = [token.lower() for token in tokens[1:]]
+
+    if executable in _AUXILIARY_EXECUTABLES:
+        return False
+
+    if executable in {"python", "python3"}:
+        if len(args) >= 2 and args[0] == "-m":
+            module_name = args[1]
+            return module_name in {"pytest", "unittest"} or _has_policy_domain_token(module_name)
+        return False
+
+    if executable == "node":
+        return "--test" in args
+
+    if executable in _POLICY_DOMAIN_WRAPPERS:
+        return any(_has_policy_domain_token(arg) for arg in args)
+
+    if executable in _POLICY_DOMAIN_DIRECT_EXECUTABLES:
+        if executable == "playwright":
+            return "test" in args
+        if executable == "ruff":
+            return "check" in args
+        if executable in {"vite", "electron-vite"}:
+            return "build" in args
+        if executable == "cargo":
+            return any(arg in {"test", "build", "check", "clippy"} for arg in args)
+        if executable == "go":
+            return any(arg in {"test", "build", "vet"} for arg in args)
+        if executable == "dotnet":
+            return any(arg in {"test", "build"} for arg in args)
+        if executable in {"mvn", "mvnw", "gradle", "gradlew"}:
+            return any(_has_policy_domain_token(arg) for arg in args)
+        return True
+
+    return False
+
+
+def _is_policy_domain_command(command: str, test_policy: EffectiveTestPolicy) -> bool:
+    normalized_command = command.strip()
+    project_defined_commands = {cmd.strip() for cmd in test_policy.project_defined_commands}
+    if normalized_command in project_defined_commands:
+        return True
+
+    return any(
+        _segment_executes_policy_domain(segment)
+        for segment in _split_shell_segments(normalized_command)
+    )
 
 
 def validate_command_audit(
@@ -111,11 +254,15 @@ def validate_command_audit(
                 "llm_diagnostic 命令必须使用 trigger_reason=diagnostic",
             )
 
+    policy_entries = [
+        entry for entry in command_audit if _is_policy_domain_command(entry.command, test_policy)
+    ]
+
     prefix_required_count = 0
     for expected_command in required_commands:
-        if prefix_required_count >= len(command_audit):
+        if prefix_required_count >= len(policy_entries):
             break
-        actual_command = command_audit[prefix_required_count].command
+        actual_command = policy_entries[prefix_required_count].command
         if actual_command != expected_command:
             if actual_command in required_positions:
                 _raise_validation_error(
@@ -125,13 +272,13 @@ def validate_command_audit(
             break
         prefix_required_count += 1
 
-    if any(entry.command in required_positions for entry in command_audit[prefix_required_count:]):
+    if any(entry.command in required_positions for entry in policy_entries[prefix_required_count:]):
         _raise_validation_error(
             "REQUIRED_ORDER_VIOLATION",
             "required commands 必须先于所有 additional commands 完成",
         )
 
-    executed_required_commands = [entry.command for entry in command_audit[:prefix_required_count]]
+    executed_required_commands = [entry.command for entry in policy_entries[:prefix_required_count]]
     missing_required_commands = [
         command for command in required_commands if command not in executed_required_commands
     ]
@@ -148,7 +295,7 @@ def validate_command_audit(
             "explicit required commands 必须全部执行，且顺序必须与配置一致",
         )
 
-    additional_entries = list(command_audit[prefix_required_count:])
+    additional_entries = list(policy_entries[prefix_required_count:])
     if len(additional_entries) > test_policy.max_additional_commands:
         _raise_validation_error(
             "ADDITIONAL_BUDGET_EXCEEDED",
@@ -163,7 +310,7 @@ def validate_command_audit(
 
     if test_policy.allowed_when == "after_required_failure" and additional_entries:
         has_required_failure = any(
-            entry.exit_code not in (None, 0) for entry in command_audit[:prefix_required_count]
+            entry.exit_code not in (None, 0) for entry in policy_entries[:prefix_required_count]
         )
         if not has_required_failure:
             _raise_validation_error(

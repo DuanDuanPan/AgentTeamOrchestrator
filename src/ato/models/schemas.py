@@ -570,6 +570,8 @@ class RegressionResult(_StrictBase):
 
     merge_queue 在归一化时通过 model_validate() 校验，
     缺字段或类型错误一律 fail-closed。
+    `commands_attempted` / `command_audit` 仅承载进入 regression test policy gate 的
+    policy-domain commands；辅助 inspection 应写入 `discovery_notes`。
     """
 
     regression_status: Literal["pass", "fail"]

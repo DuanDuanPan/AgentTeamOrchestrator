@@ -49,7 +49,6 @@ def get_regression_recovery_story_id(frozen_reason: str | None) -> str | None:
 
     return None
 
-
 # ---------------------------------------------------------------------------
 # LLM-Assisted Regression Runner — Schema, Prompt, Helpers
 # ---------------------------------------------------------------------------
@@ -70,7 +69,10 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
             "commands_attempted": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Shell commands actually executed during regression",
+                "description": (
+                    "Policy-domain shell commands actually executed during regression. "
+                    "Do not include auxiliary inspection commands."
+                ),
             },
             "command_audit": {
                 "type": "array",
@@ -93,7 +95,7 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
                     "required": ["command", "source", "trigger_reason", "exit_code"],
                     "additionalProperties": False,
                 },
-                "description": "Structured provenance for each executed command",
+                "description": "Structured provenance for each executed policy-domain command",
             },
             "skipped_command_reason": {
                 "type": ["string", "null"],
@@ -101,7 +103,10 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
             },
             "discovery_notes": {
                 "type": "string",
-                "description": "Notes about how the test framework was discovered/used",
+                "description": (
+                    "Notes about how regression entrypoints were discovered and any auxiliary "
+                    "inspection performed outside policy-domain audit"
+                ),
             },
         },
         "required": [
@@ -261,15 +266,20 @@ def _build_regression_policy_instructions(test_policy: dict[str, Any]) -> str:
         f"- Optional command candidates:\n{optional_commands}\n"
         f"- {discovery_rules}\n"
         "## Structured Result Contract\n"
-        "- `commands_attempted` must contain only raw shell command strings, in execution order.\n"
-        "- `command_audit` must contain one entry per executed command, in the same order as "
-        "`commands_attempted`.\n"
+        "- `commands_attempted` must contain only raw shell command strings for executed "
+        "policy-domain commands, in execution order.\n"
+        "- `command_audit` must contain one entry per executed policy-domain command, in the "
+        "same order as `commands_attempted`.\n"
         "- `command_audit.source` must be one of: "
         f"{', '.join(TEST_COMMAND_SOURCES)}.\n"
         "- `command_audit.trigger_reason` must be one of: "
         f"{', '.join(TEST_COMMAND_TRIGGER_REASONS)}.\n"
         "- `command_audit.exit_code` must be an integer when observed, otherwise null.\n"
-        "- Keep `discovery_notes` as free text explaining how you chose or discovered commands.\n"
+        "- Do NOT include auxiliary inspection commands such as `git status`, `ls`, `pwd`, "
+        "`rg`, or file-reading commands in `commands_attempted` / `command_audit`; summarize "
+        "them in `discovery_notes` instead.\n"
+        "- Keep `discovery_notes` as free text explaining how you chose or discovered policy "
+        "commands, plus any auxiliary inspection performed outside the policy audit.\n"
         "- Do NOT add source labels inside `commands_attempted`.\n"
         "- If you skip a required legacy baseline command, explain it in "
         "`skipped_command_reason`.\n"

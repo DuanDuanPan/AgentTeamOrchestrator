@@ -202,6 +202,51 @@ def test_validate_command_audit_rejects_discovery_when_disabled() -> None:
     assert exc.value.violation_code == "DISCOVERY_DISABLED"
 
 
+def test_validate_command_audit_ignores_auxiliary_inspection() -> None:
+    policy = _policy(
+        phase="regression",
+        required_layers=["unit"],
+        optional_layers=["integration"],
+        allow_discovery=False,
+        max_additional_commands=1,
+        allowed_when="after_required_commands",
+    )
+    entries = [
+        _entry(
+            "git status --short",
+            source="llm_diagnostic",
+            trigger_reason="diagnostic",
+            exit_code=0,
+        ),
+        _entry(
+            "sed -n '1,220p' package.json",
+            source="llm_diagnostic",
+            trigger_reason="diagnostic",
+            exit_code=0,
+        ),
+        _entry(
+            "uv run pytest tests/unit/",
+            source="project_defined",
+            trigger_reason="required_layer",
+            exit_code=0,
+        ),
+        _entry(
+            "rg --files -g 'package.json' .",
+            source="llm_diagnostic",
+            trigger_reason="diagnostic",
+            exit_code=0,
+        ),
+        _entry(
+            "uv run pytest tests/integration/",
+            source="project_defined",
+            trigger_reason="optional_layer",
+            exit_code=0,
+        ),
+    ]
+
+    validate_command_audit(command_audit=entries, test_policy=policy)
+
+
 def test_validate_command_audit_allows_qa_bounded_fallback_discovery() -> None:
     settings = ATOSettings(
         roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
