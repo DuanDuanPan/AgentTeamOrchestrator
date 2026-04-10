@@ -1077,6 +1077,10 @@ class Orchestrator:
         if self._merge_queue is not None:
             await self._merge_queue.check_regression_completion()
 
+        # regression-origin fixing 成功后，重建 regression tracking 并重新派发回归
+        if self._merge_queue is not None:
+            await self._dispatch_regression_resume_stories()
+
         # 调度待执行任务（由 approval restart/resume 产生的 pending tasks）
         await self._dispatch_pending_tasks()
 
@@ -1584,6 +1588,28 @@ class Orchestrator:
                 story_id=story.story_id,
                 phase=story.current_phase,
             )
+
+    async def _dispatch_regression_resume_stories(self) -> None:
+        """检测 fixing 成功后回到 regression 的 stories，并重新派发 regression。"""
+        from ato.models.db import get_regression_resume_stories
+
+        if self._merge_queue is None:
+            return
+
+        db = await get_connection(self._db_path)
+        try:
+            stories = await get_regression_resume_stories(db)
+        finally:
+            await db.close()
+
+        for story in stories:
+            dispatched = await self._merge_queue.dispatch_regression_resume(story.story_id)
+            if dispatched:
+                logger.info(
+                    "regression_resume_scheduled",
+                    story_id=story.story_id,
+                    phase=story.current_phase,
+                )
 
     async def _dispatch_group_phase(self, stories: list[StoryRecord], phase: str) -> None:
         """单会话批量 dispatch：多个 story 共享一次 CLI 调用。

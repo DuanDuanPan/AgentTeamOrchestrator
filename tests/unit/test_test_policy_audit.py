@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal, cast
 
 import pytest
 
 from ato.config import (
     ATOSettings,
+    CommandSource,
+    CommandTriggerReason,
+    EffectiveTestPolicy,
+    PhaseConfig,
     PhaseTestPolicyConfig,
+    RoleConfig,
     TestLayerConfig,
     resolve_effective_test_policy,
 )
@@ -31,8 +37,8 @@ def _entry(
 ) -> RegressionCommandAuditEntry:
     return RegressionCommandAuditEntry(
         command=command,
-        source=source,  # type: ignore[arg-type]
-        trigger_reason=trigger_reason,  # type: ignore[arg-type]
+        source=cast(CommandSource, source),
+        trigger_reason=cast(CommandTriggerReason, trigger_reason),
         exit_code=exit_code,
     )
 
@@ -45,17 +51,17 @@ def _policy(
     allow_discovery: bool = True,
     max_additional_commands: int = 2,
     allowed_when: str = "after_required_commands",
-) -> object:
+) -> EffectiveTestPolicy:
     settings = ATOSettings(
-        roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+        roles={"qa": RoleConfig(cli="codex")},
         phases=[
-            {  # type: ignore[list-item]
-                "name": phase,
-                "role": "qa",
-                "type": "convergent_loop" if phase == "qa_testing" else "structured_job",
-                "next_on_success": "done",
-                "next_on_failure": "done",
-            },
+            PhaseConfig(
+                name=phase,
+                role="qa",
+                type="convergent_loop" if phase == "qa_testing" else "structured_job",
+                next_on_success="done",
+                next_on_failure="done",
+            )
         ],
         test_catalog={
             "lint": TestLayerConfig(commands=["uv run ruff check src tests"]),
@@ -68,7 +74,10 @@ def _policy(
                 optional_layers=optional_layers or [],
                 allow_discovery=allow_discovery,
                 max_additional_commands=max_additional_commands,
-                allowed_when=allowed_when,  # type: ignore[arg-type]
+                allowed_when=cast(
+                    Literal["never", "after_required_commands", "after_required_failure", "always"],
+                    allowed_when,
+                ),
             )
         },
     )
@@ -249,15 +258,15 @@ def test_validate_command_audit_ignores_auxiliary_inspection() -> None:
 
 def test_validate_command_audit_allows_qa_bounded_fallback_discovery() -> None:
     settings = ATOSettings(
-        roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+        roles={"qa": RoleConfig(cli="codex")},
         phases=[
-            {  # type: ignore[list-item]
-                "name": "qa_testing",
-                "role": "qa",
-                "type": "convergent_loop",
-                "next_on_success": "done",
-                "next_on_failure": "done",
-            },
+            PhaseConfig(
+                name="qa_testing",
+                role="qa",
+                type="convergent_loop",
+                next_on_success="done",
+                next_on_failure="done",
+            )
         ],
     )
     policy = resolve_effective_test_policy(settings, "qa_testing")

@@ -203,6 +203,20 @@ class TestMergeQueueCRUD:
         finally:
             await db.close()
 
+    async def test_set_current_merge_story_self_heals_missing_singleton(
+        self, initialized_db_path: Path
+    ) -> None:
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute("DELETE FROM merge_queue_state")
+            await db.commit()
+
+            await set_current_merge_story(db, "s1")
+            state = await get_merge_queue_state(db)
+            assert state.current_merge_story_id == "s1"
+        finally:
+            await db.close()
+
     async def test_get_pending_merges(self, initialized_db_path: Path) -> None:
         await _insert_test_story(initialized_db_path, "s1")
         await _insert_test_story(initialized_db_path, "s2")
@@ -1095,6 +1109,53 @@ class TestRegressionTestExecution:
         event = tq.submit.call_args[0][0]
         assert event.event_name == "regression_pass"
         worktree_mgr.cleanup.assert_awaited_once_with("s1")
+
+    async def test_dispatch_regression_resume_recreates_tracking(
+        self, initialized_db_path: Path
+    ) -> None:
+        """regression-origin resume 应直接重建 regression_pending 跟踪。"""
+        queue, _worktree_mgr, _tq = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE stories SET current_phase = 'regression' WHERE story_id = ?",
+                ("s1",),
+            )
+            await db.execute(
+                """
+                INSERT INTO approvals (
+                    approval_id, story_id, approval_type, status, decision,
+                    decided_at, created_at
+                ) VALUES (?, ?, 'regression_failure', 'approved', 'fix_forward', ?, ?)
+                """,
+                ("appr-reg-1", "s1", _NOW.isoformat(), _NOW.isoformat()),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        with patch.object(
+            queue,
+            "_dispatch_regression_test",
+            AsyncMock(return_value="task-reg-resume-1"),
+        ):
+            dispatched = await queue.dispatch_regression_resume("s1")
+
+        assert dispatched is True
+
+        db = await get_connection(initialized_db_path)
+        try:
+            entry = await get_merge_queue_entry(db, "s1")
+            state = await get_merge_queue_state(db)
+            assert entry is not None
+            assert entry.status == "regression_pending"
+            assert entry.regression_task_id == "task-reg-resume-1"
+            assert entry.approval_id == "appr-reg-1"
+            assert state.current_merge_story_id == "s1"
+        finally:
+            await db.close()
 
     async def test_check_regression_completion_processes_only_one_entry_per_poll(
         self, initialized_db_path: Path

@@ -1709,6 +1709,8 @@ async def complete_merge(
 
 async def get_merge_queue_state(db: aiosqlite.Connection) -> MergeQueueState:
     """读取 merge queue 全局状态（单例行）。"""
+    if await _ensure_merge_queue_state_row(db):
+        await db.commit()
     cursor = await db.execute("SELECT * FROM merge_queue_state WHERE id = 1")
     row = await cursor.fetchone()
     if row is None:
@@ -1727,6 +1729,7 @@ async def set_current_merge_story(
     story_id: str | None,
 ) -> None:
     """设置当前正在 merge 的 story ID（None 表示清除）。"""
+    await _ensure_merge_queue_state_row(db)
     await db.execute(
         "UPDATE merge_queue_state SET current_merge_story_id = ? WHERE id = 1",
         (story_id,),
@@ -1741,6 +1744,7 @@ async def set_merge_queue_frozen(
     reason: str | None,
 ) -> None:
     """设置 merge queue 冻结状态。"""
+    await _ensure_merge_queue_state_row(db)
     frozen_at = _dt_to_iso(datetime.now(tz=UTC)) if frozen else None
     await db.execute(
         "UPDATE merge_queue_state SET frozen = ?, frozen_reason = ?, frozen_at = ? WHERE id = 1",
@@ -1804,3 +1808,75 @@ def _row_to_merge_queue_entry(row: aiosqlite.Row) -> MergeQueueEntry:
     data["approved_at"] = _iso_to_dt(data["approved_at"])
     data["enqueued_at"] = _iso_to_dt(data["enqueued_at"])
     return MergeQueueEntry.model_validate(data)
+
+
+async def get_regression_resume_stories(db: aiosqlite.Connection) -> list[StoryRecord]:
+    """返回 fixing 成功后回到 regression 且需要重新派发回归的 stories。
+
+    这些 stories 不应走普通 initial dispatch，也不应重走 merge；
+    它们只需要重建 regression tracking 并重新执行回归测试。
+    """
+    cursor = await db.execute(
+        """
+        SELECT s.story_id, s.title, s.status, s.current_phase,
+               s.worktree_path, s.created_at, s.updated_at, s.has_ui
+        FROM stories s
+        JOIN batch_stories bs ON s.story_id = bs.story_id
+        JOIN batches b ON bs.batch_id = b.batch_id
+        WHERE b.status = 'active'
+          AND s.current_phase = 'regression'
+          AND s.status = 'in_progress'
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks t
+            WHERE t.story_id = s.story_id
+              AND t.status IN ('running', 'pending', 'paused')
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM tasks latest
+            WHERE latest.story_id = s.story_id
+              AND latest.phase = 'fixing'
+              AND latest.status = 'completed'
+              AND latest.completed_at = (
+                SELECT MAX(t2.completed_at)
+                FROM tasks t2
+                WHERE t2.story_id = s.story_id
+                  AND t2.status = 'completed'
+                  AND t2.completed_at IS NOT NULL
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM approvals a
+            WHERE a.story_id = s.story_id
+              AND a.approval_type IN (
+                'crash_recovery', 'needs_human_review',
+                'merge_authorization', 'convergent_loop_escalation',
+                'regression_failure', 'preflight_failure'
+              )
+              AND a.status = 'pending'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM merge_queue mq
+            WHERE mq.story_id = s.story_id
+              AND mq.status IN ('waiting', 'merging', 'regression_pending')
+          )
+        """
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_story(row) for row in rows]
+
+
+async def _ensure_merge_queue_state_row(db: aiosqlite.Connection) -> bool:
+    """自愈 merge_queue_state 单例行。
+
+    某些旧项目数据库可能已有表但缺少 id=1 这行；让 queue update 不再静默失效。
+    """
+    cursor = await db.execute("SELECT 1 FROM merge_queue_state WHERE id = 1")
+    row = await cursor.fetchone()
+    if row is not None:
+        return False
+
+    cursor = await db.execute(
+        "INSERT OR IGNORE INTO merge_queue_state (id, frozen) VALUES (1, 0)",
+    )
+    return cursor.rowcount > 0
