@@ -348,6 +348,34 @@ async def _migrate_v12_to_v13(db: aiosqlite.Connection) -> None:
     )
 
 
+@_register(14)
+async def _migrate_v13_to_v14(db: aiosqlite.Connection) -> None:
+    """v13 -> v14: 新增 task_command_events 表（QA/Regression 命令账本）。"""
+    await db.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS task_command_events (
+            event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id         TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+            phase           TEXT NOT NULL,
+            record_type     TEXT NOT NULL,
+            command         TEXT NOT NULL,
+            source          TEXT,
+            trigger_reason  TEXT,
+            exit_code       INTEGER,
+            created_at      TEXT NOT NULL,
+            completed_at    TEXT
+        )"""
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_command_events_task "
+        "ON task_command_events(task_id, event_id)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_command_events_task_type "
+        "ON task_command_events(task_id, record_type, event_id)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 迁移执行器
 # ---------------------------------------------------------------------------

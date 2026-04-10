@@ -39,6 +39,11 @@ from ato.models.schemas import (
 from ato.nudge import Nudge
 from ato.progress import build_agent_progress_callback
 from ato.subprocess_mgr import SubprocessManager
+from ato.test_command_harness import (
+    TEST_COMMAND_RUNNER_NAME,
+    format_harnessed_command,
+    resolve_command_audit_from_ledger,
+)
 from ato.test_policy_audit import (
     CommandAuditValidationError,
     CommandAuditViolationCode,
@@ -152,6 +157,13 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
     "qa_testing": (
         "Run the full test suite for the project in the worktree at {worktree_path}. "
         "Story: {story_id}.\n\n"
+        "## Command Harness\n"
+        f"- Execute every shell command through `{TEST_COMMAND_RUNNER_NAME}`.\n"
+        "- Never run raw shell commands directly.\n"
+        f"- For discovered commands use `{TEST_COMMAND_RUNNER_NAME} --source llm_discovered "
+        "--trigger discovery_fallback --command '<RAW_COMMAND>'`.\n"
+        f"- For diagnostic commands use `{TEST_COMMAND_RUNNER_NAME} --source llm_diagnostic "
+        "--trigger diagnostic --command '<RAW_COMMAND>'`.\n\n"
         "## Steps\n"
         "1. Discover the project's test framework and commands "
         "(check package.json scripts, pyproject.toml, Makefile, etc.)\n"
@@ -161,7 +173,7 @@ _CONVERGENT_LOOP_PROMPTS: dict[str, str] = {
         "## Output format\n"
         "- **Recommendation**: Approve / Request Changes / Block\n"
         "- **Quality Score**: N/100\n"
-        "- **Commands Executed**: list each command and its exit code\n"
+        "- **Execution Notes**: explain retries, skipped commands, or discovery rationale\n"
         "- List findings under ## Critical Issues (Must Fix) and "
         "## Recommendations (Should Fix) sections.\n"
         "- For each issue include **Severity**: P0-P3, "
@@ -195,7 +207,13 @@ def _format_policy_layer_commands(
         layer_name = str(entry["layer"])
         commands = entry.get("commands", [])
         for command in commands:
-            lines.append(f"  - `{command}` (trigger={trigger_prefix}:{layer_name})")
+            trigger = f"{trigger_prefix}:{layer_name}"
+            wrapped = format_harnessed_command(
+                str(command),
+                source="project_defined",
+                trigger=trigger,
+            )
+            lines.append(f"  - `{wrapped}`")
     return "\n".join(lines)
 
 
@@ -268,6 +286,14 @@ def _build_qa_testing_prompt(
         f"- Gate semantics: {_describe_allowed_when(allowed_when)}\n"
         "Treat all commands from required/optional layers as project_defined commands.\n"
         f"{missing_optional_note}"
+        "\n## Command Harness\n"
+        f"- Execute every shell command through `{TEST_COMMAND_RUNNER_NAME}`.\n"
+        "- Never run raw shell commands directly.\n"
+        "- The harness records the authoritative command audit automatically.\n"
+        f"- Use `{TEST_COMMAND_RUNNER_NAME} --source llm_discovered --trigger "
+        "discovery_fallback --command '<RAW_COMMAND>'` for discovered commands.\n"
+        f"- Use `{TEST_COMMAND_RUNNER_NAME} --source llm_diagnostic --trigger diagnostic "
+        "--command '<RAW_COMMAND>'` for diagnostic commands.\n"
         "\n## Required Commands\n"
         "Execute required commands first, in the exact order shown below:\n"
         f"{required_commands}\n\n"
@@ -289,12 +315,10 @@ def _build_qa_testing_prompt(
         "## Output format\n"
         "- **Recommendation**: Approve / Request Changes / Block\n"
         "- **Quality Score**: N/100\n"
-        "- `## Commands Executed` section is mandatory.\n"
-        "- Under `## Commands Executed`, record each executed command on its own line using this "
-        "exact format:\n"
-        "  - `COMMAND` | source=project_defined|llm_discovered|llm_diagnostic | "
-        "trigger=required_layer:<name>|optional_layer:<name>|fallback:<kind>|diagnostic:<reason> "
-        "| exit_code=<int|null>\n"
+        "- **Execution Notes**: explain retries, skipped commands, or why a later attempt is "
+        "authoritative.\n"
+        "- Do NOT add a `## Commands Executed` section unless the operator explicitly asks "
+        "for it.\n"
         "- List findings under ## Critical Issues (Must Fix) and "
         "## Recommendations (Should Fix) sections.\n"
         "- For each issue include **Severity**: P0-P3, **Location**: `file:line`, "
@@ -1649,6 +1673,7 @@ class RecoveryEngine:
         audit_status: Literal["missing", "malformed", "invalid"],
         violation_code: CommandAuditViolationCode,
         detail: str,
+        commands_executed_preview: list[str] | None = None,
     ) -> None:
         """将 QA command-audit 协议违规分流为 needs_human_review。"""
 
@@ -1661,6 +1686,7 @@ class RecoveryEngine:
             audit_status=audit_status,
             violation_code=violation_code,
             detail=detail,
+            commands_executed_preview=commands_executed_preview,
         )
 
         db = await get_connection(self._db_path)
@@ -3064,52 +3090,80 @@ class RecoveryEngine:
                         await self._complete_convergent_post_processing(task.task_id)
                     return True  # dispatch 已执行，parse 失败已记录
 
-            if task.phase == "qa_testing" and parse_result.command_audit_parse_status is not None:
-                if parse_result.command_audit_parse_status == "missing":
-                    await self._record_qa_protocol_invalid(
-                        task,
-                        parse_result,
-                        audit_status="missing",
-                        violation_code="COMMANDS_EXECUTED_MISSING",
-                        detail="`## Commands Executed` section is missing",
-                    )
-                    if post_processing_open:
-                        await self._complete_convergent_post_processing(task.task_id)
-                    return True
-
-                if parse_result.command_audit_parse_status == "malformed":
-                    await self._record_qa_protocol_invalid(
-                        task,
-                        parse_result,
-                        audit_status="malformed",
-                        violation_code="COMMANDS_EXECUTED_MALFORMED",
-                        detail=(
-                            parse_result.command_audit_parse_error
-                            or "`## Commands Executed` section is malformed"
-                        ),
-                    )
-                    if post_processing_open:
-                        await self._complete_convergent_post_processing(task.task_id)
-                    return True
-
+            if task.phase == "qa_testing":
                 qa_test_policy = self._resolve_test_policy_static(phase_cfg, task.phase)
-                if qa_test_policy is not None and parse_result.command_audit is not None:
-                    try:
-                        validate_command_audit(
-                            command_audit=parse_result.command_audit,
-                            test_policy=qa_test_policy,
-                        )
-                    except CommandAuditValidationError as exc:
+                resolved_ledger_audit = None
+                if qa_test_policy is not None:
+                    resolved_ledger_audit = await resolve_command_audit_from_ledger(
+                        db_path=self._db_path,
+                        task_id=task.task_id,
+                        test_policy=qa_test_policy,
+                    )
+
+                if resolved_ledger_audit is not None:
+                    if resolved_ledger_audit.audit_status is not None:
                         await self._record_qa_protocol_invalid(
                             task,
                             parse_result,
-                            audit_status="invalid",
-                            violation_code=exc.violation_code,
-                            detail=exc.detail,
+                            audit_status=resolved_ledger_audit.audit_status,
+                            violation_code=(
+                                resolved_ledger_audit.violation_code
+                                or "COMMANDS_EXECUTED_MALFORMED"
+                            ),
+                            detail=(
+                                resolved_ledger_audit.detail
+                                or "Harness command audit validation failed"
+                            ),
+                            commands_executed_preview=resolved_ledger_audit.preview_lines,
                         )
                         if post_processing_open:
                             await self._complete_convergent_post_processing(task.task_id)
                         return True
+                elif parse_result.command_audit_parse_status is not None:
+                    if parse_result.command_audit_parse_status == "missing":
+                        await self._record_qa_protocol_invalid(
+                            task,
+                            parse_result,
+                            audit_status="missing",
+                            violation_code="COMMANDS_EXECUTED_MISSING",
+                            detail="No harness-tracked commands or legacy command section found",
+                        )
+                        if post_processing_open:
+                            await self._complete_convergent_post_processing(task.task_id)
+                        return True
+
+                    if parse_result.command_audit_parse_status == "malformed":
+                        await self._record_qa_protocol_invalid(
+                            task,
+                            parse_result,
+                            audit_status="malformed",
+                            violation_code="COMMANDS_EXECUTED_MALFORMED",
+                            detail=(
+                                parse_result.command_audit_parse_error
+                                or "`## Commands Executed` section is malformed"
+                            ),
+                        )
+                        if post_processing_open:
+                            await self._complete_convergent_post_processing(task.task_id)
+                        return True
+
+                    if qa_test_policy is not None and parse_result.command_audit is not None:
+                        try:
+                            validate_command_audit(
+                                command_audit=parse_result.command_audit,
+                                test_policy=qa_test_policy,
+                            )
+                        except CommandAuditValidationError as exc:
+                            await self._record_qa_protocol_invalid(
+                                task,
+                                parse_result,
+                                audit_status="invalid",
+                                violation_code=exc.violation_code,
+                                detail=exc.detail,
+                            )
+                            if post_processing_open:
+                                await self._complete_convergent_post_processing(task.task_id)
+                            return True
 
             blocking_threshold = (
                 self._settings.cost.blocking_threshold

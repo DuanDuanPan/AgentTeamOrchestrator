@@ -217,14 +217,33 @@ class SubprocessManager:
             on_progress: 实时进度回调，透传给 adapter.execute()。
         """
         from ato.models.db import (
+            clear_task_command_events,
             get_connection,
             insert_task,
+            insert_task_command_event,
             update_task_activity,
             update_task_status,
         )
+        from ato.test_command_harness import build_test_command_env
 
         if task_id is None:
             task_id = str(uuid.uuid4())
+
+        dispatch_options = dict(options or {})
+        harness_enabled = phase in {"qa_testing", "regression"}
+        if harness_enabled:
+            base_env = dispatch_options.get("env")
+            normalized_env = (
+                {str(key): str(value) for key, value in base_env.items()}
+                if isinstance(base_env, dict)
+                else None
+            )
+            dispatch_options["env"] = build_test_command_env(
+                db_path=self._db_path,
+                task_id=task_id,
+                phase=phase,
+                base_env=normalized_env,
+            )
 
         structlog.contextvars.bind_contextvars(
             story_id=story_id, phase=phase, cli_tool=cli_tool, task_id=task_id
@@ -286,6 +305,27 @@ class SubprocessManager:
         async def _progress_wrapper(event: ProgressEvent) -> None:
             nonlocal latest_event, delayed_flush_task
             latest_event = event
+            if harness_enabled and cli_tool == "codex":
+                raw = event.raw if isinstance(event.raw, dict) else None
+                item = raw.get("item", {}) if raw and raw.get("type") == "item.completed" else {}
+                call = item.get("call", {}) if isinstance(item, dict) else {}
+                command = str(call.get("command", "")).strip() if isinstance(call, dict) else ""
+                if item.get("type") == "command_execution" and command:
+                    try:
+                        db_conn = await get_connection(self._db_path)
+                        try:
+                            await insert_task_command_event(
+                                db_conn,
+                                task_id=task_id,
+                                phase=phase,
+                                record_type="observed",
+                                command=command,
+                                created_at=event.timestamp,
+                            )
+                        finally:
+                            await db_conn.close()
+                    except Exception:
+                        logger.warning("command_ledger_observed_write_failed", exc_info=True)
             if event.event_type in ("result", "error"):
                 # Terminal events: cancel pending flush and force-flush now
                 if delayed_flush_task and not delayed_flush_task.done():
@@ -315,6 +355,9 @@ class SubprocessManager:
                 db = await get_connection(self._db_path)
                 try:
                     await insert_task(db, task)
+                    if harness_enabled:
+                        await clear_task_command_events(db, task_id, commit=False)
+                    await db.commit()
                 finally:
                     await db.close()
             else:
@@ -342,6 +385,9 @@ class SubprocessManager:
                         "running",
                         **update_fields,
                     )
+                    if harness_enabled:
+                        await clear_task_command_events(db, task_id, commit=False)
+                    await db.commit()
                 finally:
                     await db.close()
 
@@ -354,7 +400,7 @@ class SubprocessManager:
                 try:
                     adapter_result = await self._resolve_adapter(cli_tool).execute(
                         prompt,
-                        options,
+                        dispatch_options,
                         on_process_start=_on_process_start,
                         on_progress=_progress_wrapper,
                     )

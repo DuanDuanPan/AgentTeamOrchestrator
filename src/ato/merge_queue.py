@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,11 @@ from ato.config import (
     resolve_effective_test_policy,
 )
 from ato.models.schemas import CLIAdapterError, TransitionEvent, WorktreePreflightResult
+from ato.test_command_harness import (
+    TEST_COMMAND_RUNNER_NAME,
+    format_harnessed_command,
+    resolve_command_audit_from_ledger,
+)
 from ato.test_policy_audit import validate_command_audit
 from ato.transition_queue import TransitionQueue
 from ato.worktree_mgr import WorktreeManager
@@ -71,8 +77,8 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Policy-domain shell commands actually executed during regression. "
-                    "Do not include auxiliary inspection commands."
+                    "Optional legacy self-report of policy-domain shell commands executed "
+                    "during regression. Do not include auxiliary inspection commands."
                 ),
             },
             "command_audit": {
@@ -96,7 +102,10 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
                     "required": ["command", "source", "trigger_reason", "exit_code"],
                     "additionalProperties": False,
                 },
-                "description": "Structured provenance for each executed policy-domain command",
+                "description": (
+                    "Optional legacy self-report of command provenance for each executed "
+                    "policy-domain command; ignored when harness ledger data is present"
+                ),
             },
             "skipped_command_reason": {
                 "type": ["string", "null"],
@@ -113,8 +122,6 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
         "required": [
             "regression_status",
             "summary",
-            "commands_attempted",
-            "command_audit",
             "skipped_command_reason",
             "discovery_notes",
         ],
@@ -133,6 +140,8 @@ You are a regression test runner for the repository at {repo_root}.
 - The repository must be git-clean relative to the starting snapshot when you
   finish. If a command leaves behind non-ignored changes, clean them up before
   reporting results.
+- Execute every shell command through `{test_command_runner}`.
+- Never run raw shell commands directly.
 
 ## YOUR TASK
 Run the project's regression tests and report results.
@@ -190,10 +199,12 @@ def _format_policy_layer_commands(
         layer_name = str(entry["layer"])
         commands = entry.get("commands", [])
         for command in commands:
-            lines.append(
-                f"  - `{command}` (source=project_defined, trigger_reason={trigger_reason}, "
-                f"layer={layer_name})"
+            wrapped = format_harnessed_command(
+                str(command),
+                source="project_defined",
+                trigger=f"{trigger_reason}:{layer_name}",
             )
+            lines.append(f"  - `{wrapped}`")
     return "\n".join(lines)
 
 
@@ -255,8 +266,16 @@ def _build_regression_policy_instructions(test_policy: dict[str, Any]) -> str:
         f"- allowed_when: {allowed_when}\n"
         f"- Gate semantics: {_describe_allowed_when(allowed_when)}\n\n"
         "## Project-defined Commands\n"
-        "Use `source=project_defined` in `command_audit` only for the commands listed here:\n"
+        "These are the raw project-defined commands that may appear in the authoritative audit:\n"
         f"{project_defined_commands}\n\n"
+        "## Command Harness\n"
+        f"- Execute every shell command through `{TEST_COMMAND_RUNNER_NAME}`.\n"
+        "- Never run raw shell commands directly.\n"
+        "- The harness records the authoritative command audit automatically.\n"
+        f"- Use `{TEST_COMMAND_RUNNER_NAME} --source llm_discovered --trigger "
+        "discovery_fallback --command '<RAW_COMMAND>'` for discovered commands.\n"
+        f"- Use `{TEST_COMMAND_RUNNER_NAME} --source llm_diagnostic --trigger diagnostic "
+        "--command '<RAW_COMMAND>'` for diagnostic commands.\n\n"
         "## Required Commands\n"
         f"{required_intro}\n"
         f"{required_commands}\n\n"
@@ -267,10 +286,13 @@ def _build_regression_policy_instructions(test_policy: dict[str, Any]) -> str:
         f"- Optional command candidates:\n{optional_commands}\n"
         f"- {discovery_rules}\n"
         "## Structured Result Contract\n"
-        "- `commands_attempted` must contain only raw shell command strings for executed "
-        "policy-domain commands, in execution order.\n"
-        "- `command_audit` must contain one entry per executed policy-domain command, in the "
-        "same order as `commands_attempted`.\n"
+        "- The harness ledger is the authoritative source of command execution facts.\n"
+        "- `commands_attempted` and `command_audit` are optional legacy fields; include them only "
+        "if they help explain the run.\n"
+        "- If you include `commands_attempted`, it must contain only raw shell command strings "
+        "for executed policy-domain commands, in execution order.\n"
+        "- If you include `command_audit`, it must contain one entry per executed policy-domain "
+        "command, in the same order as `commands_attempted`.\n"
         "- `command_audit.source` must be one of: "
         f"{', '.join(TEST_COMMAND_SOURCES)}.\n"
         "- `command_audit.trigger_reason` must be one of: "
@@ -287,22 +309,55 @@ def _build_regression_policy_instructions(test_policy: dict[str, Any]) -> str:
     )
 
 
+def _is_auxiliary_inspection_command(command: str) -> bool:
+    """Return True when a legacy self-reported command is clearly just workspace inspection."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+
+    first = ""
+    for token in tokens:
+        if "=" in token and not token.startswith("/") and token.index("=") > 0:
+            continue
+        first = token
+        break
+
+    if not first:
+        return False
+
+    if first in {"ls", "pwd", "rg", "grep", "sed", "cat", "head", "tail", "find", "nl"}:
+        return True
+
+    return first == "git"
+
+
 def _validate_regression_command_audit(
     *,
-    commands_attempted: list[str],
+    commands_attempted: list[str] | None,
     command_audit: list[Any],
     test_policy: EffectiveTestPolicy | None,
     skipped_command_reason: str | None,
 ) -> None:
-    audited_commands = [entry.command for entry in command_audit]
-    if audited_commands != commands_attempted:
-        raise ValueError("command_audit.command 必须与 commands_attempted 一一对应且顺序一致")
+    filtered_command_audit = [
+        entry for entry in command_audit if not _is_auxiliary_inspection_command(entry.command)
+    ]
+    filtered_commands_attempted = (
+        [command for command in commands_attempted if not _is_auxiliary_inspection_command(command)]
+        if commands_attempted is not None
+        else None
+    )
+
+    if filtered_commands_attempted is not None:
+        audited_commands = [entry.command for entry in filtered_command_audit]
+        if audited_commands != filtered_commands_attempted:
+            raise ValueError("command_audit.command 必须与 commands_attempted 一一对应且顺序一致")
 
     if test_policy is None:
         return
 
     validate_command_audit(
-        command_audit=command_audit,
+        command_audit=filtered_command_audit,
         test_policy=test_policy,
         skipped_command_reason=skipped_command_reason,
     )
@@ -366,6 +421,7 @@ def _build_regression_prompt(repo_root: Path, settings: ATOSettings) -> str:
     return _REGRESSION_PROMPT_TEMPLATE.format(
         repo_root=repo_root,
         baseline_instructions=baseline_instructions,
+        test_command_runner=TEST_COMMAND_RUNNER_NAME,
     )
 
 
@@ -1241,12 +1297,34 @@ class MergeQueue:
 
                 try:
                     reg_result = RegressionResult.model_validate(result.structured_output)
-                    _validate_regression_command_audit(
-                        commands_attempted=reg_result.commands_attempted,
-                        command_audit=reg_result.command_audit,
-                        test_policy=test_policy,
-                        skipped_command_reason=reg_result.skipped_command_reason,
+                    resolved_ledger_audit = (
+                        await resolve_command_audit_from_ledger(
+                            db_path=self._db_path,
+                            task_id=task_id,
+                            test_policy=test_policy,
+                            skipped_command_reason=reg_result.skipped_command_reason,
+                        )
+                        if test_policy is not None
+                        else None
                     )
+                    if resolved_ledger_audit is not None:
+                        if resolved_ledger_audit.audit_status is not None:
+                            raise ValueError(
+                                resolved_ledger_audit.detail
+                                or "Regression command ledger validation failed"
+                            )
+                    elif reg_result.command_audit is None:
+                        raise ValueError(
+                            "Regression command audit missing: no harness ledger and no "
+                            "legacy command_audit provided"
+                        )
+                    else:
+                        _validate_regression_command_audit(
+                            commands_attempted=reg_result.commands_attempted,
+                            command_audit=reg_result.command_audit,
+                            test_policy=test_policy,
+                            skipped_command_reason=reg_result.skipped_command_reason,
+                        )
                 except (ValidationError, TypeError) as ve:
                     db = await get_connection(self._db_path)
                     try:

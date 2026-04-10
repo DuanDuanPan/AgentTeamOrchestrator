@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -278,6 +279,10 @@ class ClaudeAdapter(BaseAdapter):
         cmd = self._build_command(prompt, options)
         cwd = (options or {}).get("cwd")
         timeout_seconds: int = (options or {}).get("timeout", 1800)
+        child_env: dict[str, str] | None = None
+        if isinstance((options or {}).get("env"), dict):
+            child_env = dict(os.environ)
+            child_env.update({str(k): str(v) for k, v in (options or {})["env"].items()})
 
         logger.info("claude_adapter_execute", cmd_preview=cmd[:4], cwd=cwd)
 
@@ -286,6 +291,7 @@ class ClaudeAdapter(BaseAdapter):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=child_env,
             limit=16 * 1024 * 1024,  # 16MB — MCP 工具可能返回超大 JSON
             start_new_session=True,  # PID == PGID，使 cleanup 可杀整个进程组
         )

@@ -349,12 +349,17 @@ def build_qa_protocol_invalid_payload(
     audit_status: CommandAuditStatus,
     violation_code: CommandAuditViolationCode,
     detail: str,
+    commands_executed_preview: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """构造 `needs_human_review(reason=qa_protocol_invalid)` payload。"""
 
-    raw_lines = parse_result.command_audit_raw_lines or []
-    commands_executed_preview = [
-        line[:_PREVIEW_LINE_MAX_CHARS] for line in raw_lines[:_PREVIEW_LINE_LIMIT]
+    preview_source = (
+        list(commands_executed_preview)
+        if commands_executed_preview is not None
+        else (parse_result.command_audit_raw_lines or [])
+    )
+    preview_lines = [
+        line[:_PREVIEW_LINE_MAX_CHARS] for line in preview_source[:_PREVIEW_LINE_LIMIT]
     ]
     return {
         "reason": "qa_protocol_invalid",
@@ -363,6 +368,6 @@ def build_qa_protocol_invalid_payload(
         "violation_code": violation_code,
         "detail": detail,
         "raw_output_preview": parse_result.raw_output_preview,
-        "commands_executed_preview": commands_executed_preview,
+        "commands_executed_preview": preview_lines,
         "options": list(_QA_PROTOCOL_INVALID_OPTIONS),
     }

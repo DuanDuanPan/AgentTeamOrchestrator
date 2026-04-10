@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -387,6 +388,10 @@ class CodexAdapter(BaseAdapter):
         cwd = opts.get("cwd")
         timeout_seconds: int = opts.get("timeout", 1800)
         model_name: str | None = opts.get("model")
+        child_env: dict[str, str] | None = None
+        if isinstance(opts.get("env"), dict):
+            child_env = dict(os.environ)
+            child_env.update({str(k): str(v) for k, v in opts["env"].items()})
 
         # 如果需要结构化输出但未指定 output_file，使用临时文件
         temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -429,6 +434,7 @@ class CodexAdapter(BaseAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=child_env,
                 limit=16 * 1024 * 1024,  # 16MB — MCP 工具可能返回超大 JSON
                 start_new_session=True,  # PID == PGID，使 cleanup 可杀整个进程组
             )

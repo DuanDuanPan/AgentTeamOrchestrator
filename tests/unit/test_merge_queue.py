@@ -1819,7 +1819,8 @@ class TestCodexRegressionRunner:
         prompt = _build_regression_prompt(Path("/repo"), settings)
         assert "uv run pytest tests/unit/" in prompt
         assert "baseline regression commands" in prompt
-        assert "command_audit" in prompt
+        assert "ato-test-run" in prompt
+        assert "harness ledger is the authoritative source" in prompt
         assert "git-clean relative to the starting snapshot" in prompt
         assert "legacy_baseline" in prompt
 
@@ -1872,6 +1873,7 @@ class TestCodexRegressionRunner:
         assert "git-clean relative to the starting snapshot" in prompt
         assert "command_audit.source" in prompt
         assert "policy-domain commands" in prompt
+        assert "ato-test-run" in prompt
 
     async def test_build_regression_prompt_with_explicit_phase_policy(self) -> None:
         from ato.merge_queue import _build_regression_prompt
@@ -1908,6 +1910,7 @@ class TestCodexRegressionRunner:
         assert "uv run pytest tests/integration/" in prompt
         assert "trigger_reason" in prompt
         assert "Do NOT include auxiliary inspection commands" in prompt
+        assert "--trigger optional_layer:integration" in prompt
 
     def test_validate_regression_command_audit_ignores_auxiliary_inspection(self) -> None:
         from ato.config import resolve_effective_test_policy
@@ -2227,6 +2230,73 @@ class TestCodexRegressionRunner:
 
         # pass + clean workspace → runner 不应调用 update_task_status
         # （保留 SubprocessManager 写的状态）
+        mock_update.assert_not_called()
+
+    async def test_run_regression_via_codex_pass_accepts_harness_ledger_without_legacy_audit(
+        self, initialized_db_path: Path
+    ) -> None:
+        """Harness ledger 存在时，不要求 structured output 再自报 command_audit。"""
+        from ato.core import reset_main_path_gate
+        from ato.models.schemas import RegressionCommandAuditEntry
+        from ato.test_command_harness import ResolvedCommandAudit
+
+        reset_main_path_gate()
+
+        queue = self._make_queue(initialized_db_path)
+        task_id = await self._setup_task(initialized_db_path)
+
+        result = self._make_adapter_result(
+            structured_output={
+                "regression_status": "pass",
+                "summary": "All 42 tests passed",
+                "skipped_command_reason": None,
+                "discovery_notes": "pytest detected",
+            },
+        )
+        resolved_audit = ResolvedCommandAudit(
+            command_audit=[
+                RegressionCommandAuditEntry(
+                    command="uv run pytest tests/unit/",
+                    source="llm_discovered",
+                    trigger_reason="discovery_fallback",
+                    exit_code=0,
+                )
+            ],
+            audit_status=None,
+            violation_code=None,
+            detail=None,
+            preview_lines=["- `uv run pytest tests/unit/` | source=llm_discovered"],
+        )
+
+        mock_update = AsyncMock()
+        with (
+            patch(
+                "ato.subprocess_mgr.SubprocessManager",
+                return_value=MagicMock(
+                    dispatch_with_retry=AsyncMock(return_value=result),
+                ),
+            ),
+            patch("ato.adapters.codex_cli.CodexAdapter"),
+            patch(
+                "ato.merge_queue.resolve_command_audit_from_ledger",
+                new=AsyncMock(return_value=resolved_audit),
+            ),
+            patch(
+                "ato.merge_queue._snapshot_workspace_changes",
+                new_callable=AsyncMock,
+                side_effect=[set(), set()],
+            ),
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={"workspace": "main"},
+            ),
+            patch(
+                "ato.models.db.update_task_status",
+                mock_update,
+            ),
+        ):
+            await queue._run_regression_via_codex("s1", task_id)
+
         mock_update.assert_not_called()
 
     async def test_run_regression_via_codex_fail_normalizes_to_completed_exit_code_one(

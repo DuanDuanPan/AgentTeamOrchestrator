@@ -1669,6 +1669,7 @@ class TestRecoveryActions:
     ) -> None:
         from ato.models.db import get_pending_approvals
         from ato.models.schemas import BmadParseResult, BmadSkillType, RegressionCommandAuditEntry
+        from ato.test_command_harness import ResolvedCommandAudit
 
         db = await get_connection(initialized_db_path)
         try:
@@ -1696,6 +1697,13 @@ class TestRecoveryActions:
             parser_mode="deterministic",
             raw_markdown_hash="abc",
             raw_output_preview="approve",
+            command_audit=None,
+            command_audit_parse_status="missing",
+            command_audit_parse_error=None,
+            command_audit_raw_lines=[],
+            parsed_at=_NOW,
+        )
+        resolved_audit = ResolvedCommandAudit(
             command_audit=[
                 RegressionCommandAuditEntry(
                     command="uv run pytest tests/unit/",
@@ -1710,15 +1718,15 @@ class TestRecoveryActions:
                     exit_code=0,
                 ),
             ],
-            command_audit_parse_status="parsed",
-            command_audit_parse_error=None,
-            command_audit_raw_lines=[
+            audit_status=None,
+            violation_code=None,
+            detail=None,
+            preview_lines=[
                 "- `uv run pytest tests/unit/` | source=llm_discovered | "
                 "trigger=fallback:pytest | exit_code=0",
                 "- `uv run pytest tests/integration/` | source=llm_diagnostic | "
                 "trigger=diagnostic:rerun_failed | exit_code=0",
             ],
-            parsed_at=_NOW,
         )
         settings = ATOSettings(
             roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
@@ -1748,7 +1756,13 @@ class TestRecoveryActions:
             phase="qa_testing",
         )
 
-        with patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls:
+        with (
+            patch("ato.adapters.bmad_adapter.BmadAdapter") as mock_bmad_cls,
+            patch(
+                "ato.recovery.resolve_command_audit_from_ledger",
+                new=AsyncMock(return_value=resolved_audit),
+            ),
+        ):
             mock_bmad = AsyncMock()
             mock_bmad.parse.return_value = mock_parse
             mock_bmad_cls.return_value = mock_bmad
@@ -2674,9 +2688,11 @@ class TestConvergentLoopPromptFormat:
         assert "Recommendation" in prompt
         assert "Quality Score" in prompt
         assert "Critical Issues" in prompt
-        assert "## Commands Executed" in prompt
+        assert "Execution Notes" in prompt
+        assert "Do NOT add a `## Commands Executed` section" in prompt
+        assert "ato-test-run" in prompt
         assert "repo-native wrapper scripts" in prompt
-        assert "source=project_defined|llm_discovered|llm_diagnostic" in prompt
+        assert "--source llm_discovered" in prompt
 
     @patch("ato.recovery._artifact_exists", return_value=False)
     @patch("ato.recovery._is_pid_alive", return_value=False)
@@ -2757,7 +2773,9 @@ class TestConvergentLoopPromptFormat:
         prompt = _mock_recovery_adapter.execute.call_args[0][0]
         assert "Required layers: lint, unit" in prompt
         assert "Optional layers: integration" in prompt
-        assert "trigger=required_layer:<name>|optional_layer:<name>|fallback:<kind>" in prompt
+        assert "ato-test-run" in prompt
+        assert "--trigger required_layer:lint" in prompt
+        assert "--trigger optional_layer:integration" in prompt
         assert "uv run ruff check src tests" in prompt
         assert "uv run pytest tests/integration/" in prompt
 

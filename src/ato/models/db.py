@@ -29,6 +29,7 @@ from ato.models.schemas import (
     MergeQueueState,
     StoryRecord,
     StoryStatus,
+    TaskCommandEventRecord,
     TaskRecord,
     TaskStatus,
     WorktreePreflightResult,
@@ -192,6 +193,28 @@ ON worktree_preflight_results(story_id)"""
 _WORKTREE_PREFLIGHT_GATE_IDX = """\
 CREATE INDEX IF NOT EXISTS idx_worktree_preflight_gate
 ON worktree_preflight_results(story_id, gate_type, checked_at)"""
+
+_TASK_COMMAND_EVENTS_DDL = """\
+CREATE TABLE IF NOT EXISTS task_command_events (
+    event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    phase           TEXT NOT NULL,
+    record_type     TEXT NOT NULL,
+    command         TEXT NOT NULL,
+    source          TEXT,
+    trigger_reason  TEXT,
+    exit_code       INTEGER,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT
+)"""
+
+_TASK_COMMAND_EVENTS_TASK_IDX = """\
+CREATE INDEX IF NOT EXISTS idx_task_command_events_task
+ON task_command_events(task_id, event_id)"""
+
+_TASK_COMMAND_EVENTS_TYPE_IDX = """\
+CREATE INDEX IF NOT EXISTS idx_task_command_events_task_type
+ON task_command_events(task_id, record_type, event_id)"""
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +691,106 @@ def _row_to_task(row: aiosqlite.Row) -> TaskRecord:
     for dt_field in ("started_at", "completed_at"):
         data[dt_field] = _iso_to_dt(data[dt_field])
     return TaskRecord.model_validate(data)
+
+
+def _row_to_task_command_event(row: aiosqlite.Row) -> TaskCommandEventRecord:
+    """SQLite Row → TaskCommandEventRecord。"""
+    data = dict(row)
+    for dt_field in ("created_at", "completed_at"):
+        data[dt_field] = _iso_to_dt(data[dt_field])
+    return TaskCommandEventRecord.model_validate(data)
+
+
+async def insert_task_command_event(
+    db: aiosqlite.Connection,
+    *,
+    task_id: str,
+    phase: str,
+    record_type: str,
+    command: str,
+    source: str | None = None,
+    trigger_reason: str | None = None,
+    exit_code: int | None = None,
+    created_at: datetime | None = None,
+    completed_at: datetime | None = None,
+    commit: bool = True,
+) -> int:
+    """插入一条 task_command_events 记录并返回 event_id。"""
+    cursor = await db.execute(
+        "INSERT INTO task_command_events (task_id, phase, record_type, command, source, "
+        "trigger_reason, exit_code, created_at, completed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            task_id,
+            phase,
+            record_type,
+            command,
+            source,
+            trigger_reason,
+            exit_code,
+            _dt_to_iso(created_at or datetime.now(tz=UTC)),
+            _dt_to_iso(completed_at),
+        ),
+    )
+    if commit:
+        await db.commit()
+    assert cursor.lastrowid is not None
+    return int(cursor.lastrowid)
+
+
+async def finalize_task_command_event(
+    db: aiosqlite.Connection,
+    event_id: int,
+    *,
+    exit_code: int,
+    completed_at: datetime | None = None,
+    commit: bool = True,
+) -> None:
+    """补全 task_command_events 的 exit_code / completed_at。"""
+    await db.execute(
+        "UPDATE task_command_events SET exit_code = ?, completed_at = ? WHERE event_id = ?",
+        (
+            exit_code,
+            _dt_to_iso(completed_at or datetime.now(tz=UTC)),
+            event_id,
+        ),
+    )
+    if commit:
+        await db.commit()
+
+
+async def get_task_command_events(
+    db: aiosqlite.Connection,
+    task_id: str,
+    *,
+    record_type: str | None = None,
+) -> list[TaskCommandEventRecord]:
+    """按 task_id 读取命令账本事件，按 event_id 升序。"""
+    if record_type is None:
+        cursor = await db.execute(
+            "SELECT * FROM task_command_events WHERE task_id = ? ORDER BY event_id",
+            (task_id,),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT * FROM task_command_events WHERE task_id = ? AND record_type = ? "
+            "ORDER BY event_id",
+            (task_id, record_type),
+        )
+    rows = await cursor.fetchall()
+    return [_row_to_task_command_event(row) for row in rows]
+
+
+async def clear_task_command_events(
+    db: aiosqlite.Connection,
+    task_id: str,
+    *,
+    commit: bool = True,
+) -> None:
+    """清空某个 task 的命令账本事件。"""
+    await db.execute("DELETE FROM task_command_events WHERE task_id = ?", (task_id,))
+    if commit:
+        await db.commit()
 
 
 async def get_tasks_by_status(

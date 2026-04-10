@@ -10,11 +10,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ato.models.db import get_connection, get_cost_summary, init_db
+from ato.models.db import get_connection, get_cost_summary, get_task_command_events, init_db
 from ato.models.schemas import (
     AdapterResult,
     CLIAdapterError,
     ErrorCategory,
+    ProgressEvent,
     StoryRecord,
 )
 from ato.subprocess_mgr import RunningTask, SubprocessManager
@@ -770,6 +771,91 @@ class TestActivityFlush:
         assert row is not None
         assert row[0] == "text"
         assert "正在处理" in row[1]
+
+
+# ---------------------------------------------------------------------------
+# QA / Regression command harness
+# ---------------------------------------------------------------------------
+
+
+class TestCommandHarnessDispatch:
+    async def test_dispatch_injects_harness_env_for_qa_testing(self, db_ready: Path) -> None:
+        captured_options: dict[str, Any] | None = None
+
+        class CaptureAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                nonlocal captured_options
+                captured_options = options
+                return _make_adapter_result()
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=CaptureAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+        await mgr.dispatch(
+            story_id="story-test",
+            phase="qa_testing",
+            role="qa",
+            cli_tool="codex",
+            prompt="run qa",
+            task_id="task-harness-env",
+        )
+
+        assert captured_options is not None
+        env = captured_options["env"]
+        assert env["ATO_TEST_HARNESS_DB_PATH"] == str(db_ready.resolve())
+        assert env["ATO_TEST_HARNESS_TASK_ID"] == "task-harness-env"
+        assert env["ATO_TEST_HARNESS_PHASE"] == "qa_testing"
+        assert "ato-test-runner" in env["PATH"]
+
+    async def test_dispatch_records_observed_command_execution(self, db_ready: Path) -> None:
+        class EmitCommandAdapter:
+            async def execute(self, prompt: str, options: Any = None, **kw: Any) -> AdapterResult:
+                on_progress = kw.get("on_progress")
+                if on_progress is not None:
+                    await on_progress(
+                        ProgressEvent(
+                            event_type="tool_use",
+                            summary="执行命令: ato-test-run",
+                            cli_tool="codex",
+                            timestamp=datetime.now(tz=UTC),
+                            raw={
+                                "type": "item.completed",
+                                "item": {
+                                    "type": "command_execution",
+                                    "call": {
+                                        "command": (
+                                            "ato-test-run --source project_defined "
+                                            "--trigger required_layer:unit --command "
+                                            "'uv run pytest tests/unit/'"
+                                        )
+                                    },
+                                },
+                            },
+                        )
+                    )
+                return _make_adapter_result()
+
+        mgr = SubprocessManager(max_concurrent=4, adapter=EmitCommandAdapter(), db_path=db_ready)  # type: ignore[arg-type]
+        await mgr.dispatch(
+            story_id="story-test",
+            phase="qa_testing",
+            role="qa",
+            cli_tool="codex",
+            prompt="run qa",
+            task_id="task-harness-observed",
+        )
+
+        db = await get_connection(db_ready)
+        try:
+            records = await get_task_command_events(
+                db,
+                "task-harness-observed",
+                record_type="observed",
+            )
+        finally:
+            await db.close()
+
+        assert len(records) == 1
+        assert records[0].record_type == "observed"
+        assert records[0].command.startswith("ato-test-run --source project_defined")
 
 
 # ---------------------------------------------------------------------------

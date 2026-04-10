@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # 跨模块常量
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 13
+SCHEMA_VERSION: int = 14
 """当前数据库 schema 版本号，与 PRAGMA user_version 对应。"""
 
 # ---------------------------------------------------------------------------
@@ -564,6 +564,24 @@ class RegressionCommandAuditEntry(_StrictBase):
 CommandAuditParseStatus = Literal["missing", "malformed", "parsed"]
 """QA `## Commands Executed` section 的 parser 级状态。"""
 
+TaskCommandRecordType = Literal["observed", "audit"]
+"""task_command_events 表的记录类型。"""
+
+
+class TaskCommandEventRecord(_StrictBase):
+    """任务测试命令账本记录。"""
+
+    event_id: int
+    task_id: str
+    phase: str
+    record_type: TaskCommandRecordType
+    command: str
+    source: str | None = None
+    trigger_reason: str | None = None
+    exit_code: int | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
 
 class RegressionResult(_StrictBase):
     """Codex regression runner 的结构化输出模型。
@@ -576,9 +594,9 @@ class RegressionResult(_StrictBase):
 
     regression_status: Literal["pass", "fail"]
     summary: str
-    commands_attempted: list[str]
-    command_audit: list[RegressionCommandAuditEntry]
-    skipped_command_reason: str | None
+    commands_attempted: list[str] | None = None
+    command_audit: list[RegressionCommandAuditEntry] | None = None
+    skipped_command_reason: str | None = None
     discovery_notes: str
 
 
