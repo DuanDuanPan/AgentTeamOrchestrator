@@ -120,7 +120,7 @@ class StoryLifecycle(StateMachine):
         fixing ──fix_done──→ reviewing              ← review-origin re-review
         fixing ──qa_fix_done──→ qa_testing          ← QA-origin resume
         fixing ──uat_fix_done──→ uat                ← UAT-origin resume
-        fixing ──regression_fix_done──→ regression  ← regression-origin resume
+        fixing ──regression_fix_done──→ merging     ← regression-origin re-merge
         qa_testing ──qa_pass──→ uat
         qa_testing ──qa_fail──→ fixing              ← QA Convergent Loop
         uat ──uat_pass──→ merging
@@ -159,7 +159,7 @@ class StoryLifecycle(StateMachine):
     fix_done = fixing.to(reviewing)
     qa_fix_done = fixing.to(qa_testing)
     uat_fix_done = fixing.to(uat)
-    regression_fix_done = fixing.to(regression)
+    regression_fix_done = fixing.to(merging)
     qa_pass = qa_testing.to(uat)
     qa_fail = qa_testing.to(fixing)
     uat_pass = uat.to(merging)

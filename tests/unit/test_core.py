@@ -2111,13 +2111,15 @@ class TestPreflightFailureApprovalConsumption:
         assert event.event_name == "escalate"
 
     async def test_regression_failure_fix_forward(self, initialized_db_path: Path) -> None:
-        """fix_forward 提交 regression_fail transition，清理旧 row 且 queue 保持冻结。"""
+        """fix_forward 提交 regression_fail transition，保留 failed row 且 queue 保持冻结。"""
         from ato.models.db import (
             enqueue_merge,
             get_connection,
             get_merge_queue_entry,
             insert_story,
+            set_current_merge_story,
             set_merge_queue_frozen,
+            set_pre_merge_head,
         )
         from ato.models.schemas import ApprovalRecord, StoryRecord
 
@@ -2137,10 +2139,11 @@ class TestPreflightFailureApprovalConsumption:
             )
             await enqueue_merge(db, "s1", "merge-appr-1", now, now)
             await db.execute(
-                "UPDATE merge_queue SET status = 'regression_pending' WHERE story_id = ?",
+                "UPDATE merge_queue SET status = 'failed' WHERE story_id = ?",
                 ("s1",),
             )
-            await db.commit()
+            await set_pre_merge_head(db, "s1", "abc123def")
+            await set_current_merge_story(db, "s1")
             await set_merge_queue_frozen(
                 db,
                 frozen=True,
@@ -2174,12 +2177,15 @@ class TestPreflightFailureApprovalConsumption:
         try:
             entry = await get_merge_queue_entry(db, "s1")
             cursor = await db.execute(
-                "SELECT frozen FROM merge_queue_state WHERE id = 1",
+                "SELECT frozen, current_merge_story_id FROM merge_queue_state WHERE id = 1",
             )
-            frozen_row = await cursor.fetchone()
-            assert entry is None
-            assert frozen_row is not None
-            assert frozen_row[0] == 1
+            state_row = await cursor.fetchone()
+            assert entry is not None
+            assert entry.status == "failed"
+            assert entry.pre_merge_head == "abc123def"
+            assert state_row is not None
+            assert state_row[0] == 1
+            assert state_row[1] is None
         finally:
             await db.close()
 
@@ -2347,7 +2353,7 @@ class TestRegressionFailureDecisions:
     async def test_fix_forward_submits_regression_fail_and_keeps_frozen(
         self, initialized_db_path: Path
     ) -> None:
-        """fix_forward → regression_fail event + queue 保持冻结 + worktree 保留（AC4）。"""
+        """fix_forward → regression_fail event + queue 保持冻结 + failed row/worktree 保留。"""
         from ato.models.db import get_connection, get_merge_queue_entry
         from ato.models.schemas import ApprovalRecord
 
@@ -2384,17 +2390,20 @@ class TestRegressionFailureDecisions:
         # worktree 保留（cleanup 不被调用）
         orchestrator._worktree_mgr.cleanup.assert_not_awaited()
 
-        # merge_queue entry 被移除
+        # merge_queue failed row 保留，用于 fixing 后 recovery merge
         db = await get_connection(initialized_db_path)
         try:
             entry = await get_merge_queue_entry(db, "s1")
-            assert entry is None, "merge_queue entry should be removed"
+            assert entry is not None
+            assert entry.status == "failed"
+            assert entry.pre_merge_head == "abc123def"
             cursor = await db.execute(
-                "SELECT frozen FROM merge_queue_state WHERE id = 1",
+                "SELECT frozen, current_merge_story_id FROM merge_queue_state WHERE id = 1",
             )
-            frozen_row = await cursor.fetchone()
-            assert frozen_row is not None
-            assert frozen_row[0] == 1, "Queue must stay frozen"
+            state_row = await cursor.fetchone()
+            assert state_row is not None
+            assert state_row[0] == 1, "Queue must stay frozen"
+            assert state_row[1] is None
         finally:
             await db.close()
 

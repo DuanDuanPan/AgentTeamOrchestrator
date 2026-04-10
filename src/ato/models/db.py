@@ -1933,62 +1933,6 @@ def _row_to_merge_queue_entry(row: aiosqlite.Row) -> MergeQueueEntry:
     return MergeQueueEntry.model_validate(data)
 
 
-async def get_regression_resume_stories(db: aiosqlite.Connection) -> list[StoryRecord]:
-    """返回 fixing 成功后回到 regression 且需要重新派发回归的 stories。
-
-    这些 stories 不应走普通 initial dispatch，也不应重走 merge；
-    它们只需要重建 regression tracking 并重新执行回归测试。
-    """
-    cursor = await db.execute(
-        """
-        SELECT s.story_id, s.title, s.status, s.current_phase,
-               s.worktree_path, s.created_at, s.updated_at, s.has_ui
-        FROM stories s
-        JOIN batch_stories bs ON s.story_id = bs.story_id
-        JOIN batches b ON bs.batch_id = b.batch_id
-        WHERE b.status = 'active'
-          AND s.current_phase = 'regression'
-          AND s.status = 'in_progress'
-          AND NOT EXISTS (
-            SELECT 1 FROM tasks t
-            WHERE t.story_id = s.story_id
-              AND t.status IN ('running', 'pending', 'paused')
-          )
-          AND EXISTS (
-            SELECT 1
-            FROM tasks latest
-            WHERE latest.story_id = s.story_id
-              AND latest.phase = 'fixing'
-              AND latest.status = 'completed'
-              AND latest.completed_at = (
-                SELECT MAX(t2.completed_at)
-                FROM tasks t2
-                WHERE t2.story_id = s.story_id
-                  AND t2.status = 'completed'
-                  AND t2.completed_at IS NOT NULL
-              )
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM approvals a
-            WHERE a.story_id = s.story_id
-              AND a.approval_type IN (
-                'crash_recovery', 'needs_human_review',
-                'merge_authorization', 'convergent_loop_escalation',
-                'regression_failure', 'preflight_failure'
-              )
-              AND a.status = 'pending'
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM merge_queue mq
-            WHERE mq.story_id = s.story_id
-              AND mq.status IN ('waiting', 'merging', 'regression_pending')
-          )
-        """
-    )
-    rows = await cursor.fetchall()
-    return [_row_to_story(row) for row in rows]
-
-
 async def _ensure_merge_queue_state_row(db: aiosqlite.Connection) -> bool:
     """自愈 merge_queue_state 单例行。
 

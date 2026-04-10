@@ -1110,53 +1110,6 @@ class TestRegressionTestExecution:
         assert event.event_name == "regression_pass"
         worktree_mgr.cleanup.assert_awaited_once_with("s1")
 
-    async def test_dispatch_regression_resume_recreates_tracking(
-        self, initialized_db_path: Path
-    ) -> None:
-        """regression-origin resume 应直接重建 regression_pending 跟踪。"""
-        queue, _worktree_mgr, _tq = self._make_queue(initialized_db_path)
-        await _insert_test_story(initialized_db_path, "s1")
-
-        db = await get_connection(initialized_db_path)
-        try:
-            await db.execute(
-                "UPDATE stories SET current_phase = 'regression' WHERE story_id = ?",
-                ("s1",),
-            )
-            await db.execute(
-                """
-                INSERT INTO approvals (
-                    approval_id, story_id, approval_type, status, decision,
-                    decided_at, created_at
-                ) VALUES (?, ?, 'regression_failure', 'approved', 'fix_forward', ?, ?)
-                """,
-                ("appr-reg-1", "s1", _NOW.isoformat(), _NOW.isoformat()),
-            )
-            await db.commit()
-        finally:
-            await db.close()
-
-        with patch.object(
-            queue,
-            "_dispatch_regression_test",
-            AsyncMock(return_value="task-reg-resume-1"),
-        ):
-            dispatched = await queue.dispatch_regression_resume("s1")
-
-        assert dispatched is True
-
-        db = await get_connection(initialized_db_path)
-        try:
-            entry = await get_merge_queue_entry(db, "s1")
-            state = await get_merge_queue_state(db)
-            assert entry is not None
-            assert entry.status == "regression_pending"
-            assert entry.regression_task_id == "task-reg-resume-1"
-            assert entry.approval_id == "appr-reg-1"
-            assert state.current_merge_story_id == "s1"
-        finally:
-            await db.close()
-
     async def test_check_regression_completion_processes_only_one_entry_per_poll(
         self, initialized_db_path: Path
     ) -> None:
@@ -1246,6 +1199,47 @@ class TestRegressionTestExecution:
             await db.close()
 
         worktree_mgr.merge_to_main.assert_not_awaited()
+
+    async def test_recovery_merge_preserves_original_pre_merge_head(
+        self, initialized_db_path: Path
+    ) -> None:
+        """recovery merge 不得覆盖首次 merge 记录的 pre_merge_head。"""
+        queue, worktree_mgr, tq = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s1")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s1", "a1", _NOW, _NOW)
+            await db.execute(
+                "UPDATE merge_queue SET status = 'failed', pre_merge_head = ? WHERE story_id = ?",
+                ("orig-main-head", "s1"),
+            )
+            await db.commit()
+            await enqueue_merge(db, "s1", "a2", _NOW, _NOW)
+            await dequeue_next_merge(db)
+            await set_current_merge_story(db, "s1")
+        finally:
+            await db.close()
+
+        worktree_mgr.rebase_onto_main = AsyncMock(return_value=(True, ""))
+        worktree_mgr.get_main_head = AsyncMock(return_value="new-main-head")
+        worktree_mgr.merge_to_main = AsyncMock(return_value=(True, ""))
+
+        await queue._run_merge_worker("s1")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            entry = await get_merge_queue_entry(db, "s1")
+            assert entry is not None
+            assert entry.pre_merge_head == "orig-main-head"
+            assert entry.status == "regression_pending"
+        finally:
+            await db.close()
+
+        worktree_mgr.get_main_head.assert_not_awaited()
+        tq.submit.assert_awaited_once()
+        event = tq.submit.call_args[0][0]
+        assert event.event_name == "merge_done"
 
     async def test_pre_merge_preflight_failure_blocks_before_rebase_and_releases_lock(
         self,

@@ -1077,10 +1077,6 @@ class Orchestrator:
         if self._merge_queue is not None:
             await self._merge_queue.check_regression_completion()
 
-        # regression-origin fixing 成功后，重建 regression tracking 并重新派发回归
-        if self._merge_queue is not None:
-            await self._dispatch_regression_resume_stories()
-
         # 调度待执行任务（由 approval restart/resume 产生的 pending tasks）
         await self._dispatch_pending_tasks()
 
@@ -1588,28 +1584,6 @@ class Orchestrator:
                 story_id=story.story_id,
                 phase=story.current_phase,
             )
-
-    async def _dispatch_regression_resume_stories(self) -> None:
-        """检测 fixing 成功后回到 regression 的 stories，并重新派发 regression。"""
-        from ato.models.db import get_regression_resume_stories
-
-        if self._merge_queue is None:
-            return
-
-        db = await get_connection(self._db_path)
-        try:
-            stories = await get_regression_resume_stories(db)
-        finally:
-            await db.close()
-
-        for story in stories:
-            dispatched = await self._merge_queue.dispatch_regression_resume(story.story_id)
-            if dispatched:
-                logger.info(
-                    "regression_resume_scheduled",
-                    story_id=story.story_id,
-                    phase=story.current_phase,
-                )
 
     async def _dispatch_group_phase(self, stories: list[StoryRecord], phase: str) -> None:
         """单会话批量 dispatch：多个 story 共享一次 CLI 调用。
@@ -2831,14 +2805,13 @@ class Orchestrator:
                     )
                 db = await get_connection(self._db_path)
                 try:
-                    from ato.models.db import remove_from_merge_queue, set_current_merge_story
+                    from ato.models.db import set_current_merge_story
 
-                    await remove_from_merge_queue(db, approval.story_id)
                     await set_current_merge_story(db, None)
                 finally:
                     await db.close()
-                # queue 保持冻结——main 仍处于 regression-failed 状态
-                # 仅 recovery story 可在冻结期间重新 merge，成功通过 regression 后再解冻
+                # queue 保持冻结；failed merge_queue row 和 pre_merge_head 保留。
+                # fixing 完成后 story 会回到 merging，并在冻结期间走 recovery merge。
                 return True
             if decision == "pause":
                 logger.info(

@@ -197,12 +197,12 @@ class TestLegalTransitions:
         assert sm.current_state_value == "uat"
 
     async def test_regression_fix_done(self) -> None:
-        """Regression-origin fixing 成功后应回到 regression。"""
+        """Regression-origin fixing 成功后应回到 merging 重新 merge 到 main。"""
         sm = await _make_sm()
         await _advance_to(sm, "regression")
         await sm.send("regression_fail")
         await sm.send("regression_fix_done")
-        assert sm.current_state_value == "regression"
+        assert sm.current_state_value == "merging"
 
     async def test_qa_pass(self) -> None:
         sm = await _make_sm()

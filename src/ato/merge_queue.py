@@ -725,115 +725,6 @@ class MergeQueue:
             approval_id=approval_id,
         )
 
-    async def dispatch_regression_resume(self, story_id: str) -> bool:
-        """为 regression-origin fixing 成功后的 story 重建回归跟踪并重新派发 regression。
-
-        不重走 merge；story 已经在 main 上，只需要恢复 regression tracking。
-        """
-        from ato.models.db import (
-            get_connection,
-            get_merge_queue_entry,
-            get_merge_queue_state,
-            mark_regression_dispatched,
-            set_current_merge_story,
-        )
-
-        db = await get_connection(self._db_path)
-        try:
-            state = await get_merge_queue_state(db)
-            if state.current_merge_story_id not in (None, story_id):
-                return False
-
-            entry = await get_merge_queue_entry(db, story_id)
-            if entry is not None and entry.status in ("waiting", "merging", "regression_pending"):
-                return False
-
-            approval_id, approved_at = await self._resolve_regression_resume_tracking(db, story_id)
-            now = datetime.now(tz=UTC)
-            if entry is None:
-                await db.execute(
-                    """
-                    INSERT INTO merge_queue (
-                        story_id, approval_id, approved_at, enqueued_at, status
-                    ) VALUES (?, ?, ?, ?, 'merged')
-                    """,
-                    (
-                        story_id,
-                        approval_id,
-                        approved_at.isoformat(),
-                        now.isoformat(),
-                    ),
-                )
-            else:
-                await db.execute(
-                    """
-                    UPDATE merge_queue
-                    SET approval_id = ?,
-                        approved_at = ?,
-                        enqueued_at = ?,
-                        status = 'merged',
-                        regression_task_id = NULL
-                    WHERE story_id = ?
-                    """,
-                    (
-                        approval_id,
-                        approved_at.isoformat(),
-                        now.isoformat(),
-                        story_id,
-                    ),
-                )
-            await db.commit()
-        finally:
-            await db.close()
-
-        task_id = await self._dispatch_regression_test(story_id)
-
-        db = await get_connection(self._db_path)
-        try:
-            await mark_regression_dispatched(db, story_id, task_id)
-            await set_current_merge_story(db, story_id)
-        finally:
-            await db.close()
-
-        logger.info(
-            "regression_resume_dispatched",
-            story_id=story_id,
-            task_id=task_id,
-        )
-        return True
-
-    async def _resolve_regression_resume_tracking(
-        self,
-        db: aiosqlite.Connection,
-        story_id: str,
-    ) -> tuple[str, datetime]:
-        """为 regression retry tracking 选择稳定的 approval/timestamp 元数据。"""
-        cursor = await db.execute(
-            """
-            SELECT approval_id, decided_at
-            FROM approvals
-            WHERE story_id = ?
-              AND approval_type = 'regression_failure'
-              AND status = 'approved'
-              AND decided_at IS NOT NULL
-            ORDER BY decided_at DESC
-            LIMIT 1
-            """,
-            (story_id,),
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            now = datetime.now(tz=UTC)
-            return f"regression-resume::{story_id}", now
-
-        decided_at_raw = row["decided_at"]
-        decided_at = (
-            datetime.fromisoformat(decided_at_raw)
-            if isinstance(decided_at_raw, str)
-            else datetime.now(tz=UTC)
-        )
-        return str(row["approval_id"]), decided_at
-
     async def process_next(self) -> bool:
         """尝试启动下一个 merge 操作。
 
@@ -1047,7 +938,7 @@ class MergeQueue:
 
     async def _execute_merge(self, story_id: str) -> None:
         """执行完整 merge 流程。"""
-        from ato.models.db import get_connection, mark_regression_dispatched
+        from ato.models.db import get_connection, get_merge_queue_entry, mark_regression_dispatched
 
         gate_passed = await self._run_pre_merge_gate(story_id)
         if not gate_passed:
@@ -1083,38 +974,65 @@ class MergeQueue:
                 )
                 return
 
-        # Step 2a: 记录 merge 前 main HEAD（用于精确 revert）
-        pre_merge_head = await self._worktree_mgr.get_main_head()
-        if not pre_merge_head:
-            logger.error(
-                "merge_pre_merge_head_missing",
-                story_id=story_id,
-                note="Cannot safely revert without pre-merge main HEAD",
-            )
-            await self._mark_merge_failed_and_release_lock(
-                story_id,
-                context="pre_merge_head_missing",
-            )
-            return
-
-        from ato.models.db import set_pre_merge_head
-
+        # Step 2a: 记录首次 merge 前的 main HEAD（用于后续 recovery revert）
         try:
             db = await get_connection(self._db_path)
             try:
-                await set_pre_merge_head(db, story_id, pre_merge_head)
+                entry = await get_merge_queue_entry(db, story_id)
             finally:
                 await db.close()
         except Exception:
-            logger.exception(
-                "merge_pre_merge_head_persist_failed",
+            logger.exception("merge_queue_entry_lookup_failed", story_id=story_id)
+            await self._mark_merge_failed_and_release_lock(
+                story_id,
+                context="merge_queue_entry_lookup_failed",
+            )
+            return
+
+        if entry is None:
+            logger.error(
+                "merge_queue_entry_missing",
                 story_id=story_id,
+                note="Cannot continue merge without queue tracking row",
             )
             await self._mark_merge_failed_and_release_lock(
                 story_id,
-                context="pre_merge_head_persist_failed",
+                context="merge_queue_entry_missing",
             )
             return
+
+        if entry.pre_merge_head is None:
+            pre_merge_head = await self._worktree_mgr.get_main_head()
+            if not pre_merge_head:
+                logger.error(
+                    "merge_pre_merge_head_missing",
+                    story_id=story_id,
+                    note="Cannot safely revert without pre-merge main HEAD",
+                )
+                await self._mark_merge_failed_and_release_lock(
+                    story_id,
+                    context="pre_merge_head_missing",
+                )
+                return
+
+            from ato.models.db import set_pre_merge_head
+
+            try:
+                db = await get_connection(self._db_path)
+                try:
+                    await set_pre_merge_head(db, story_id, pre_merge_head)
+                finally:
+                    await db.close()
+            except Exception:
+                logger.exception(
+                    "merge_pre_merge_head_persist_failed",
+                    story_id=story_id,
+                )
+                await self._mark_merge_failed_and_release_lock(
+                    story_id,
+                    context="pre_merge_head_persist_failed",
+                )
+                return
 
         # Step 2b: Merge to main (fast-forward)
         success, stderr = await self._worktree_mgr.merge_to_main(story_id)

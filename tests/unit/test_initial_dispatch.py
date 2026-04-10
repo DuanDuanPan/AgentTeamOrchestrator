@@ -649,29 +649,6 @@ class TestInitialDispatchDelegation:
         assert tasks == []
 
     @pytest.mark.asyncio
-    async def test_regression_resume_dispatches_via_merge_queue(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """fixing 成功回到 regression 时，应走 merge_queue 的 regression-resume 路径。"""
-        db_path = await _setup_db(tmp_path)
-        await _insert_story(db_path, "s-reg", "regression", "in_progress")
-        await _insert_task_for_story(
-            db_path,
-            "s-reg",
-            status="completed",
-            phase="fixing",
-        )
-
-        orchestrator = Orchestrator(settings=_make_settings(), db_path=db_path)
-        orchestrator._merge_queue = AsyncMock()
-        orchestrator._merge_queue.dispatch_regression_resume.return_value = True
-
-        await orchestrator._dispatch_regression_resume_stories()
-
-        orchestrator._merge_queue.dispatch_regression_resume.assert_awaited_once_with("s-reg")
-
-    @pytest.mark.asyncio
     async def test_dev_ready_initial_dispatch_uses_transition_queue_reconcile(
         self,
         tmp_path: Path,
