@@ -1214,3 +1214,119 @@ class TestBatchSpecCommitOnDevReady:
             await db.close()
 
         await tq.stop()
+
+    async def test_spec_committed_batch_revalidates_main_workspace_before_start_dev(
+        self, initialized_db_path: Path
+    ) -> None:
+        """batch.spec_committed=True 时仍需重做 main workspace gate。"""
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import get_story, insert_batch, insert_batch_story_links
+        from ato.models.schemas import BatchRecord, BatchStoryLink
+
+        now = datetime.now(UTC)
+        batch = BatchRecord(
+            batch_id="b5",
+            status="active",
+            created_at=now,
+            spec_committed=True,
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s7", "validating")
+            await insert_batch_story_links(
+                db,
+                [BatchStoryLink(batch_id="b5", story_id="s7", sequence_no=0)],
+            )
+        finally:
+            await db.close()
+
+        mock_commit = AsyncMock(return_value=(True, "all owned main artifacts already committed"))
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        with (
+            patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+            patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+        ):
+            mock_wm_cls.return_value.batch_spec_commit = mock_commit
+            await tq.submit(_make_event("s7", "validate_pass"))
+            await asyncio.sleep(0.2)
+            await tq._queue.join()
+
+        mock_commit.assert_called_once_with("b5", ["s7"])
+        db = await get_connection(initialized_db_path)
+        try:
+            story = await get_story(db, "s7")
+            assert story is not None
+            assert story.current_phase == "developing"
+        finally:
+            await db.close()
+
+        await tq.stop()
+
+    async def test_spec_committed_revalidation_failure_creates_approval(
+        self, initialized_db_path: Path
+    ) -> None:
+        """batch.spec_committed=True 但 main workspace 变脏时仍应阻止 start_dev。"""
+        import json
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import (
+            get_pending_approvals,
+            get_story,
+            insert_batch,
+            insert_batch_story_links,
+        )
+        from ato.models.schemas import BatchRecord, BatchStoryLink
+
+        now = datetime.now(UTC)
+        batch = BatchRecord(
+            batch_id="b6",
+            status="active",
+            created_at=now,
+            spec_committed=True,
+        )
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s8", "validating")
+            await insert_batch_story_links(
+                db,
+                [BatchStoryLink(batch_id="b6", story_id="s8", sequence_no=0)],
+            )
+        finally:
+            await db.close()
+
+        mock_commit = AsyncMock(
+            return_value=(False, "main workspace has foreign dirty files: other-story.md")
+        )
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        with (
+            patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+            patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+        ):
+            mock_wm_cls.return_value.batch_spec_commit = mock_commit
+            await tq.submit(_make_event("s8", "validate_pass"))
+            await asyncio.sleep(0.2)
+            await tq._queue.join()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            story = await get_story(db, "s8")
+            assert story is not None
+            assert story.current_phase == "dev_ready"
+
+            approvals = await get_pending_approvals(db)
+            spec_approvals = [a for a in approvals if a.approval_type == "precommit_failure"]
+            assert len(spec_approvals) == 1
+            payload = json.loads(spec_approvals[0].payload or "{}")
+            assert payload["scope"] == "spec_batch"
+            assert "foreign dirty files" in payload["error_output"]
+        finally:
+            await db.close()
+
+        await tq.stop()

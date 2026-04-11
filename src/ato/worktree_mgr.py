@@ -11,6 +11,7 @@ transition_queue 和 merge_queue 均从此模块导入。
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -534,6 +535,47 @@ class WorktreeManager:
             self._log_preflight_result(result)
             return result
 
+    async def inspect_rebase_state(self, story_id: str) -> tuple[bool, list[str], str]:
+        """Inspect whether the worktree is currently paused inside a git rebase.
+
+        Returns:
+            ``(in_progress, conflict_files, status_output)``.
+            ``status_output`` is best-effort human-readable `git status` text for
+            recovery logging and conflict-resolution prompts.
+        """
+        worktree_path = await self.get_path(story_id)
+        if worktree_path is None:
+            return False, [], ""
+
+        for rebase_dir in ("rebase-merge", "rebase-apply"):
+            rc, stdout, _stderr = await self._run_git_in_worktree(
+                worktree_path,
+                "rev-parse",
+                "--git-path",
+                rebase_dir,
+            )
+            if rc != 0:
+                continue
+
+            git_path = Path(stdout.strip())
+            if not git_path.is_absolute():
+                git_path = worktree_path / git_path
+            if not git_path.exists():
+                continue
+
+            status_rc, status_stdout, status_stderr = await self._run_git_in_worktree(
+                worktree_path,
+                "status",
+            )
+            conflict_files = await self.get_conflict_files(story_id)
+            return (
+                True,
+                conflict_files,
+                status_stdout if status_rc == 0 else status_stderr,
+            )
+
+        return False, [], ""
+
     async def continue_rebase(self, story_id: str) -> tuple[bool, str]:
         """在 worktree 中执行 git rebase --continue。
 
@@ -654,12 +696,27 @@ class WorktreeManager:
             WorktreeError: 命令超时。
         """
         timeout = timeout_seconds if timeout_seconds is not None else _GIT_TIMEOUT_SECONDS
+        env = os.environ.copy()
+        # Orchestrator-driven git operations must stay non-interactive. Otherwise
+        # commands like `rebase --continue` can inherit the pane TTY and block on
+        # editors or credential prompts.
+        env.update(
+            {
+                "GIT_EDITOR": "true",
+                "GIT_SEQUENCE_EDITOR": "true",
+                "EDITOR": "true",
+                "VISUAL": "true",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+        )
         proc = await asyncio.create_subprocess_exec(
             "git",
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._project_root),
+            env=env,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -717,7 +774,16 @@ class WorktreeManager:
         story_id: str,
         timeout_seconds: int | None = None,
     ) -> str:
-        """Resolve the pre-merge base ref using the same fetch/fallback policy as rebase."""
+        """Resolve the canonical pre-merge base ref for both gate and rebase.
+
+        Selection policy:
+        - If fetching ``origin/main`` fails, fall back to local ``main``.
+        - If fetching succeeds and local ``main`` is aligned with or behind
+          ``origin/main``, use ``origin/main``.
+        - If local ``main`` has diverged from ``origin/main`` (or contains
+          extra local commits), prefer local ``main`` so the worktree rebases
+          onto the same branch that will receive the final ff-only merge.
+        """
         fetch_rc, _fetch_out, fetch_err = await self._run_git_in_worktree(
             worktree_path,
             "fetch",
@@ -733,7 +799,77 @@ class WorktreeManager:
                 note="Falling back to local main branch",
             )
             return "main"
-        return "origin/main"
+
+        main_is_ancestor = await self._is_ancestor_ref(
+            worktree_path,
+            "main",
+            "origin/main",
+            timeout_seconds=timeout_seconds,
+        )
+        if main_is_ancestor is True:
+            return "origin/main"
+
+        origin_is_ancestor = await self._is_ancestor_ref(
+            worktree_path,
+            "origin/main",
+            "main",
+            timeout_seconds=timeout_seconds,
+        )
+        if origin_is_ancestor is True:
+            logger.warning(
+                "merge_base_ref_prefers_local_main",
+                story_id=story_id,
+                note=(
+                    "Local main contains commits not present on origin/main; "
+                    "using local main as merge target"
+                ),
+            )
+            return "main"
+
+        logger.warning(
+            "merge_base_ref_main_origin_diverged",
+            story_id=story_id,
+            note=(
+                "Local main and origin/main diverged; preferring local main "
+                "to preserve ff target consistency"
+            ),
+        )
+        return "main"
+
+    async def _is_ancestor_ref(
+        self,
+        worktree_path: Path,
+        ancestor_ref: str,
+        descendant_ref: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> bool | None:
+        """Return whether ``ancestor_ref`` is an ancestor of ``descendant_ref``.
+
+        Returns ``None`` when git cannot determine ancestry due to an execution
+        error, in which case callers should fail closed toward the safer local
+        merge target.
+        """
+        rc, _stdout, stderr = await self._run_git_in_worktree(
+            worktree_path,
+            "merge-base",
+            "--is-ancestor",
+            ancestor_ref,
+            descendant_ref,
+            timeout_seconds=timeout_seconds,
+        )
+        if rc == 0:
+            return True
+        if rc == 1:
+            return False
+
+        logger.warning(
+            "merge_base_ancestry_check_failed",
+            ancestor_ref=ancestor_ref,
+            descendant_ref=descendant_ref,
+            stderr=stderr,
+        )
+        return None
 
     def _make_preflight_result(
         self,
@@ -896,11 +1032,16 @@ class WorktreeManager:
         batch_id: str,
         story_ids: list[str],
     ) -> tuple[bool, str]:
-        """将 batch 内所有 story 的规格文件提交到本地 main。
+        """将 batch 内允许归属的 main-workspace 产物提交到本地 main。
 
-        Stage 路径：
+        Allowed owned paths:
         - ``_bmad-output/implementation-artifacts/{story_id}.md``
+        - ``_bmad-output/implementation-artifacts/{story_id}-validation-report.md``
         - ``_bmad-output/implementation-artifacts/{story_id}-ux/`` (若存在)
+        - ``_bmad-output/implementation-artifacts/sprint-status.yaml``
+
+        若 main workspace 存在不属于当前 batch 的脏文件，则 fail-closed，
+        阻止 dev_ready 自动推进，避免把跨 story/main 的改动带入后续 merge。
 
         Args:
             batch_id: Batch 唯一标识。
@@ -910,53 +1051,31 @@ class WorktreeManager:
             (success, message) 元组。success 为 True 时 message 是 commit hash，
             False 时 message 是错误信息。
         """
-        spec_dir = "_bmad-output/implementation-artifacts"
-        paths_to_add: list[str] = []
-        for sid in story_ids:
-            spec_file = f"{spec_dir}/{sid}.md"
-            spec_ux_dir = f"{spec_dir}/{sid}-ux/"
-            # 只 stage 存在的文件/目录
-            full_spec = self._project_root / spec_file
-            if full_spec.exists():
-                paths_to_add.append(spec_file)
-            full_ux = self._project_root / spec_ux_dir.rstrip("/")
-            if full_ux.exists() and full_ux.is_dir():
-                paths_to_add.append(spec_ux_dir)
+        paths_to_add = self._batch_owned_main_artifact_paths(story_ids)
 
-        if not paths_to_add:
-            return True, "no spec files to commit (idempotent)"
-
-        # 幂等检查：如果工作树无差异，视为已提交。
-        # 必须验证返回码——非零退出说明 git 状态异常，不能假设"无变更"。
-        rc_diff, diff_out, stderr_diff = await self._run_git(
-            "diff", "--name-only", "--", *paths_to_add
+        rc_status, porcelain_output, stderr_status = await self._run_git(
+            "status",
+            "--porcelain=v1",
+            "-uall",
         )
-        rc_staged, staged_out, stderr_staged = await self._run_git(
-            "diff", "--cached", "--name-only", "--", *paths_to_add
-        )
-        # 检查是否有 untracked 的 spec files
-        rc_ls, ls_out, stderr_ls = await self._run_git(
-            "ls-files", "--others", "--exclude-standard", "--", *paths_to_add
-        )
+        if rc_status != 0:
+            return False, f"git status --porcelain failed (rc={rc_status}): {stderr_status}"
 
-        # 任一 git 探测命令失败 → 不能做幂等假设，报错让上层处理
-        if rc_diff != 0:
-            return False, f"git diff failed (rc={rc_diff}): {stderr_diff}"
-        if rc_staged != 0:
-            return False, f"git diff --cached failed (rc={rc_staged}): {stderr_staged}"
-        if rc_ls != 0:
-            return False, f"git ls-files failed (rc={rc_ls}): {stderr_ls}"
+        dirty_files = dirty_files_from_porcelain(porcelain_output)
+        owned_dirty, foreign_dirty = self._partition_owned_dirty_files(dirty_files, paths_to_add)
+        if foreign_dirty:
+            preview = ", ".join(sorted(foreign_dirty)[:10])
+            return False, f"main workspace has foreign dirty files: {preview}"
 
-        has_changes = bool(diff_out.strip() or staged_out.strip() or ls_out.strip())
-        if not has_changes:
-            return True, "all spec files already committed (idempotent)"
+        if not owned_dirty:
+            return True, "all owned main artifacts already committed (idempotent)"
 
         # git add — 仅 stage spec paths
         rc_add, _, stderr_add = await self._run_git("add", "--", *paths_to_add)
         if rc_add != 0:
             return False, f"git add failed: {stderr_add}"
 
-        # git commit — 使用 pathspec 限定只提交 spec 文件，
+        # git commit — 使用 pathspec 限定只提交 batch 自有 main-phase 产物，
         # 不吞 index 中其他已暂存的无关变更。
         commit_msg = f"spec(batch-{batch_id}): add validated story specifications"
         rc_commit, _stdout_commit, stderr_commit = await self._run_git(
@@ -980,3 +1099,42 @@ class WorktreeManager:
             commit_hash=commit_hash,
         )
         return True, commit_hash
+
+    def _batch_owned_main_artifact_paths(self, story_ids: list[str]) -> list[str]:
+        """Return pathspecs that the current batch is allowed to own on main."""
+        spec_dir = "_bmad-output/implementation-artifacts"
+        paths_to_add: list[str] = [f"{spec_dir}/sprint-status.yaml"]
+        for sid in story_ids:
+            spec_file = f"{spec_dir}/{sid}.md"
+            validation_report = f"{spec_dir}/{sid}-validation-report.md"
+            spec_ux_dir = f"{spec_dir}/{sid}-ux/"
+            full_spec = self._project_root / spec_file
+            if full_spec.exists():
+                paths_to_add.append(spec_file)
+            full_validation = self._project_root / validation_report
+            if full_validation.exists():
+                paths_to_add.append(validation_report)
+            full_ux = self._project_root / spec_ux_dir.rstrip("/")
+            if full_ux.exists() and full_ux.is_dir():
+                paths_to_add.append(spec_ux_dir)
+        return paths_to_add
+
+    @staticmethod
+    def _partition_owned_dirty_files(
+        dirty_files: list[str],
+        owned_paths: list[str],
+    ) -> tuple[list[str], list[str]]:
+        """Split dirty files into batch-owned and foreign paths."""
+        owned_dirty: list[str] = []
+        foreign_dirty: list[str] = []
+        for dirty_path in dirty_files:
+            if any(
+                dirty_path == owned_path or (
+                    owned_path.endswith("/") and dirty_path.startswith(owned_path)
+                )
+                for owned_path in owned_paths
+            ):
+                owned_dirty.append(dirty_path)
+            else:
+                foreign_dirty.append(dirty_path)
+        return owned_dirty, foreign_dirty

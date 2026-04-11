@@ -2,7 +2,8 @@
 title: 'Worktree Boundary Enforcement Gates'
 slug: 'worktree-boundary-gates'
 created: '2026-04-08'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '38e34d250058408ccefbea2b7c49f44cccb769b9'
 stepsCompleted: [1, 2, 3, 4]
 tech_stack: ['Python >=3.11', 'asyncio', 'python-statemachine >=3.0', 'aiosqlite', 'Pydantic >=2.0', 'structlog']
 files_to_modify: ['src/ato/models/schemas.py', 'src/ato/models/db.py', 'src/ato/models/migrations.py', 'src/ato/worktree_mgr.py', 'src/ato/transition_queue.py', 'src/ato/subprocess_mgr.py', 'src/ato/merge_queue.py', 'src/ato/core.py', 'src/ato/approval_helpers.py', 'src/ato/convergent_loop.py', 'src/ato/recovery.py']

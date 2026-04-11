@@ -675,6 +675,25 @@ class TestRunGitTimeout:
         ):
             await mgr._run_git("status")
 
+    async def test_uses_non_interactive_git_environment(
+        self,
+        mgr: WorktreeManager,
+    ) -> None:
+        proc = _make_proc_mock(returncode=0)
+
+        patch_target = "ato.worktree_mgr.asyncio.create_subprocess_exec"
+        with patch(patch_target, return_value=proc) as mock_exec:
+            await mgr._run_git("status")
+
+        kwargs = mock_exec.call_args.kwargs
+        env = kwargs["env"]
+        assert kwargs["stdin"] is asyncio.subprocess.DEVNULL
+        assert env["GIT_EDITOR"] == "true"
+        assert env["GIT_SEQUENCE_EDITOR"] == "true"
+        assert env["EDITOR"] == "true"
+        assert env["VISUAL"] == "true"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+
 
 # ---------------------------------------------------------------------------
 # 路径构建
@@ -791,6 +810,47 @@ class TestRebaseOntoMain:
 
         assert success is False
         assert "CONFLICT" in stderr
+
+    async def test_rebase_prefers_local_main_when_main_and_origin_diverge(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """当 main 与 origin/main 分叉时，应 rebase 到本地 main 以匹配最终 merge 目标。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        story = _make_story("story-1", worktree_path=str(tmp_path / "wt"))
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(db, story)
+        finally:
+            await db.close()
+
+        fetch_proc = _make_proc_mock(returncode=0)
+        main_not_ancestor_proc = _make_proc_mock(returncode=1)
+        origin_not_ancestor_proc = _make_proc_mock(returncode=1)
+        rebase_proc = _make_proc_mock(returncode=0)
+        calls: list[tuple[Any, ...]] = []
+
+        async def mock_exec(*args: Any, **kwargs: Any) -> Any:
+            calls.append(args)
+            index = len(calls)
+            if index == 1:
+                return fetch_proc
+            if index == 2:
+                return main_not_ancestor_proc
+            if index == 3:
+                return origin_not_ancestor_proc
+            return rebase_proc
+
+        with patch("ato.worktree_mgr.asyncio.create_subprocess_exec", side_effect=mock_exec):
+            success, stderr = await mgr.rebase_onto_main("story-1")
+
+        assert success is True
+        assert stderr == ""
+        assert calls[-1][-2:] == ("rebase", "main")
 
 
 class TestMergeToMain:
@@ -970,14 +1030,14 @@ class TestRevertMergeRangeContract:
 
 
 class TestBatchSpecCommit:
-    """batch_spec_commit() 正确 stage 并提交 implementation-artifacts 中的 spec 文件。"""
+    """batch_spec_commit() 只提交 batch 自有 main-workspace 产物。"""
 
     async def test_commit_stages_correct_paths(
         self,
         initialized_db_path: Path,
         tmp_path: Path,
     ) -> None:
-        """spec 文件和 UX 目录被正确 stage 并 commit。"""
+        """spec、validation report、UX 目录和 sprint-status 被正确 stage 并 commit。"""
         project_root = tmp_path / "project"
         project_root.mkdir()
 
@@ -986,6 +1046,8 @@ class TestBatchSpecCommit:
         spec_dir.mkdir(parents=True)
         (spec_dir / "s1.md").write_text("spec 1")
         (spec_dir / "s2.md").write_text("spec 2")
+        (spec_dir / "s1-validation-report.md").write_text("validation")
+        (spec_dir / "sprint-status.yaml").write_text("status")
         ux_dir = spec_dir / "s1-ux"
         ux_dir.mkdir()
         (ux_dir / "wireframe.pen").write_text("design")
@@ -1003,6 +1065,16 @@ class TestBatchSpecCommit:
                 call_count += 1
                 cmd_args = args[1:]  # skip "git"
                 expected_calls.append((call_count, " ".join(str(a) for a in cmd_args)))
+                if call_count == 1:
+                    return _make_proc_mock(
+                        returncode=0,
+                        stdout=(
+                            " M _bmad-output/implementation-artifacts/s1.md\n"
+                            "?? _bmad-output/implementation-artifacts/s1-validation-report.md\n"
+                            " M _bmad-output/implementation-artifacts/sprint-status.yaml\n"
+                            "?? _bmad-output/implementation-artifacts/s1-ux/wireframe.pen\n"
+                        ),
+                    )
                 return _make_proc_mock(returncode=0, stdout="abc123\n")
 
             return side_effect
@@ -1011,10 +1083,10 @@ class TestBatchSpecCommit:
             "ato.worktree_mgr.asyncio.create_subprocess_exec",
             side_effect=_make_side_effect(),
         ):
-            success, message = await mgr.batch_spec_commit("batch-1", ["s1", "s2"])
+            success, _message = await mgr.batch_spec_commit("batch-1", ["s1", "s2"])
 
         assert success is True
-        # 应有多次 git 调用：diff, diff --cached, ls-files, add, commit, rev-parse
+        # 应有多次 git 调用：status, add, commit, rev-parse
         assert call_count >= 4
 
         # 验证 commit 调用包含 pathspec（不吞 index 中无关变更）
@@ -1022,6 +1094,11 @@ class TestBatchSpecCommit:
         assert len(commit_calls) >= 1
         commit_cmd = commit_calls[0][1]
         assert "--" in commit_cmd, f"commit 应包含 '--' pathspec 分隔符: {commit_cmd}"
+        add_calls = [c for c in expected_calls if c[1].startswith("add -- ")]
+        assert len(add_calls) == 1
+        add_cmd = add_calls[0][1]
+        assert "_bmad-output/implementation-artifacts/s1-validation-report.md" in add_cmd
+        assert "_bmad-output/implementation-artifacts/sprint-status.yaml" in add_cmd
 
     async def test_commit_idempotent_no_changes(
         self,
@@ -1038,7 +1115,7 @@ class TestBatchSpecCommit:
 
         mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
 
-        # diff, diff --cached, ls-files 全部返回空 → 无变更
+        # status 返回空 → 无变更
         proc_empty = _make_proc_mock(returncode=0, stdout="")
         with patch(
             "ato.worktree_mgr.asyncio.create_subprocess_exec",
@@ -1069,13 +1146,12 @@ class TestBatchSpecCommit:
         async def side_effect(*args: Any, **kwargs: Any) -> Any:
             nonlocal call_count
             call_count += 1
-            cmd_args = list(args[1:])  # skip "git"
-            # First 3 calls are diff checks (return non-empty to indicate changes)
-            if call_count <= 3:
-                if "ls-files" in cmd_args:
-                    return _make_proc_mock(returncode=0, stdout="s1.md\n")
-                return _make_proc_mock(returncode=0, stdout="")
-            # 4th call: git add → fail
+            if call_count == 1:
+                return _make_proc_mock(
+                    returncode=0,
+                    stdout=" M _bmad-output/implementation-artifacts/s1.md\n",
+                )
+            # 2nd call: git add → fail
             return _make_proc_mock(returncode=1, stderr="fatal: pathspec error")
 
         with patch(
@@ -1092,23 +1168,60 @@ class TestBatchSpecCommit:
         initialized_db_path: Path,
         tmp_path: Path,
     ) -> None:
-        """story 文件不存在时幂等成功。"""
+        """workspace 干净且 batch 无自有产物时幂等成功。"""
         project_root = tmp_path / "project"
         project_root.mkdir()
 
         mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
 
-        success, message = await mgr.batch_spec_commit("batch-1", ["nonexistent"])
+        proc_empty = _make_proc_mock(returncode=0, stdout="")
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            return_value=proc_empty,
+        ):
+            success, message = await mgr.batch_spec_commit("batch-1", ["nonexistent"])
 
         assert success is True
         assert "idempotent" in message
 
-    async def test_git_diff_failure_not_treated_as_idempotent(
+    async def test_foreign_dirty_files_fail_closed(
         self,
         initialized_db_path: Path,
         tmp_path: Path,
     ) -> None:
-        """git diff 非零退出不能被当成"无变更"的幂等成功。"""
+        """main workspace 存在不属于当前 batch 的脏文件时必须 fail-closed。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "s1.md").write_text("spec")
+        (spec_dir / "sprint-status.yaml").write_text("status")
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        proc_fail = _make_proc_mock(
+            returncode=0,
+            stdout=(
+                " M _bmad-output/implementation-artifacts/s1.md\n"
+                " M _bmad-output/implementation-artifacts/other-story.md\n"
+            ),
+        )
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            return_value=proc_fail,
+        ):
+            success, message = await mgr.batch_spec_commit("batch-1", ["s1"])
+
+        assert success is False
+        assert "foreign dirty files" in message
+        assert "other-story.md" in message
+
+    async def test_git_status_failure_not_treated_as_idempotent(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """git status 非零退出不能被当成幂等成功。"""
         project_root = tmp_path / "project"
         project_root.mkdir()
         spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
@@ -1117,7 +1230,6 @@ class TestBatchSpecCommit:
 
         mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
 
-        # git diff 返回非零但 stdout 为空 → 应报错，不应视为幂等
         proc_fail = _make_proc_mock(returncode=128, stdout="", stderr="fatal: bad revision")
         with patch(
             "ato.worktree_mgr.asyncio.create_subprocess_exec",
@@ -1126,4 +1238,4 @@ class TestBatchSpecCommit:
             success, message = await mgr.batch_spec_commit("batch-1", ["s1"])
 
         assert success is False
-        assert "git diff failed" in message
+        assert "git status --porcelain failed" in message

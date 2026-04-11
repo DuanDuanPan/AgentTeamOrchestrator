@@ -627,13 +627,78 @@ class TransitionQueue:
         if story is None or story.current_phase != "dev_ready":
             return
 
-        # 已提交则只推进当前仍停留在 dev_ready 的 story
+        batch_stories = await get_batch_stories(db, batch.batch_id)
+        story_ids = [s.story_id for _, s in batch_stories]
+
+        # 已提交 batch 仍需重做一次 main workspace gate，避免 validating /
+        # metadata 变更把主仓库重新弄脏后直接漏进 developing。
         if batch.spec_committed:
-            await self._submit_start_dev_events([story_id])
-            return
+            try:
+                from ato.core import derive_project_root, get_main_path_gate
+                from ato.worktree_mgr import WorktreeManager
+
+                gate = get_main_path_gate()
+                await gate.acquire_exclusive()
+                try:
+                    project_root = derive_project_root(self._db_path)
+                    mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+                    success, message = await mgr.batch_spec_commit(batch.batch_id, story_ids)
+                finally:
+                    await gate.release_exclusive()
+
+                if success:
+                    await self._submit_start_dev_events([story_id])
+                    logger.info(
+                        "batch_spec_commit_revalidated",
+                        batch_id=batch.batch_id,
+                        story_id=story_id,
+                        result=message,
+                    )
+                    return
+
+                raise RuntimeError(message)
+            except Exception as exc:
+                logger.exception(
+                    "batch_spec_commit_revalidation_failed",
+                    story_id=story_id,
+                )
+                try:
+                    import json
+                    import uuid
+                    from datetime import UTC
+                    from datetime import datetime as dt_cls
+
+                    from ato.models.schemas import ApprovalRecord
+
+                    payload = json.dumps(
+                        {
+                            "scope": "spec_batch",
+                            "batch_id": batch.batch_id,
+                            "story_ids": story_ids,
+                            "error_output": str(exc),
+                            "options": ["retry", "manual_fix", "skip"],
+                        }
+                    )
+                    approval = ApprovalRecord(
+                        approval_id=str(uuid.uuid4()),
+                        story_id=story_id,
+                        approval_type="precommit_failure",
+                        status="pending",
+                        payload=payload,
+                        created_at=dt_cls.now(tz=UTC),
+                        recommended_action="retry",
+                        risk_level="medium",
+                    )
+                    await insert_approval(db, approval)
+                    send_user_notification(
+                        "normal",
+                        f"Batch spec revalidation 失败：{exc}",
+                    )
+                except Exception:
+                    logger.exception("batch_spec_commit_revalidation_approval_failed")
+                return
 
         # 检查 batch 内所有 story 是否都到达 dev_ready
-        batch_stories = await get_batch_stories(db, batch.batch_id)
         all_dev_ready = all(s.current_phase == "dev_ready" for _, s in batch_stories)
         if not all_dev_ready:
             # 触发仍在 queued 的 story 进入 creating，避免死锁
@@ -655,8 +720,6 @@ class TransitionQueue:
                     triggered_by=story_id,
                 )
             return
-
-        story_ids = [s.story_id for _, s in batch_stories]
 
         try:
             from ato.core import derive_project_root, get_main_path_gate

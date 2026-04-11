@@ -473,6 +473,45 @@ class TestProcessApprovalDecisions:
         finally:
             await db.close()
 
+    async def test_crash_recovery_abandon_consumed_when_story_already_blocked(
+        self, initialized_db_path: Path
+    ) -> None:
+        """abandon 在 story 已 blocked 时应直接消费 approval，避免死循环重提 escalate。"""
+        from ato.models.db import get_connection, get_decided_unconsumed_approvals
+
+        await _insert_test_approval(
+            initialized_db_path,
+            approval_id="bbbb2222-1111-0000-0000-000000000000",
+            approval_type="crash_recovery",
+            decision="abandon",
+        )
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE stories SET current_phase = 'blocked', status = 'blocked' "
+                "WHERE story_id = 'test-story-1'"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = _make_settings()
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+
+        await orchestrator._process_approval_decisions()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            remaining = await get_decided_unconsumed_approvals(db)
+            assert len(remaining) == 0
+        finally:
+            await db.close()
+
+        assert orchestrator._tq.submit.await_count == 0
+        assert orchestrator._tq.submit_and_wait.await_count == 0
+
     async def test_blocking_abnormal_consumed(self, initialized_db_path: Path) -> None:
         """blocking 审批消费——story 在 reviewing 阶段时发出 review_fail。"""
         await _insert_test_approval(

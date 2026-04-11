@@ -2658,12 +2658,48 @@ class Orchestrator:
             if decision == "resume":
                 return await self._reschedule_interactive_task(approval, mode="resume")
             if decision == "abandon":
-                if self._tq is not None:
-                    await self._submit_transition_event(
+                from ato.models.db import get_story
+
+                async def _load_story_phase() -> str | None:
+                    if db is not None:
+                        story = await get_story(db, approval.story_id)
+                        return story.current_phase if story is not None else None
+
+                    lookup_db = await get_connection(self._db_path)
+                    try:
+                        story = await get_story(lookup_db, approval.story_id)
+                    finally:
+                        await lookup_db.close()
+                    return story.current_phase if story is not None else None
+
+                current_phase = await _load_story_phase()
+                if current_phase == "blocked":
+                    logger.info(
+                        "approval_abandon_already_blocked",
+                        approval_id=approval.approval_id,
+                        approval_type=atype,
                         story_id=approval.story_id,
-                        event_name="escalate",
-                        source="cli",
                     )
+                    return True
+
+                if self._tq is not None:
+                    try:
+                        await self._submit_transition_event(
+                            story_id=approval.story_id,
+                            event_name="escalate",
+                            source="cli",
+                        )
+                    except StateTransitionError:
+                        # Another decision may have already moved the story to blocked.
+                        if await _load_story_phase() == "blocked":
+                            logger.info(
+                                "approval_abandon_blocked_after_retry",
+                                approval_id=approval.approval_id,
+                                approval_type=atype,
+                                story_id=approval.story_id,
+                            )
+                            return True
+                        raise
                 return True
             # 未识别的 decision → 不消费
             logger.warning(

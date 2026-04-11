@@ -940,39 +940,43 @@ class MergeQueue:
         """执行完整 merge 流程。"""
         from ato.models.db import get_connection, get_merge_queue_entry, mark_regression_dispatched
 
-        gate_passed = await self._run_pre_merge_gate(story_id)
-        if not gate_passed:
+        resume_result = await self._resume_interrupted_rebase_if_needed(story_id)
+        if resume_result is False:
             return
+        if resume_result is None:
+            gate_passed = await self._run_pre_merge_gate(story_id)
+            if not gate_passed:
+                return
 
-        # Step 1: Rebase worktree onto main
-        logger.info("merge_rebase_started", story_id=story_id)
-        success, rebase_output = await self._worktree_mgr.rebase_onto_main(
-            story_id,
-            timeout_seconds=self._settings.merge_rebase_timeout,
-        )
+            # Step 1: Rebase worktree onto main
+            logger.info("merge_rebase_started", story_id=story_id)
+            success, rebase_output = await self._worktree_mgr.rebase_onto_main(
+                story_id,
+                timeout_seconds=self._settings.merge_rebase_timeout,
+            )
 
-        if not success:
-            # 检测冲突 — git 将 "CONFLICT" 输出到 stdout，
-            # rebase_output 已合并 stdout+stderr。
-            if "CONFLICT" in rebase_output:
-                logger.info("merge_rebase_conflict", story_id=story_id)
-                resolved = await self._handle_rebase_conflict(story_id, rebase_output)
-                if not resolved:
-                    # escalate — approval 已创建，清理 current
-                    await self._clear_current_merge_story_lock(
+            if not success:
+                # 检测冲突 — git 将 "CONFLICT" 输出到 stdout，
+                # rebase_output 已合并 stdout+stderr。
+                if "CONFLICT" in rebase_output:
+                    logger.info("merge_rebase_conflict", story_id=story_id)
+                    resolved = await self._handle_rebase_conflict(story_id, rebase_output)
+                    if not resolved:
+                        # escalate — approval 已创建，清理 current
+                        await self._clear_current_merge_story_lock(
+                            story_id,
+                            context="rebase_conflict_escalated",
+                        )
+                        return
+                else:
+                    # 非冲突的 rebase 失败 — 尝试 abort 残留 rebase 状态
+                    await self._worktree_mgr.abort_rebase(story_id)
+                    logger.error("merge_rebase_failed", story_id=story_id, stderr=rebase_output)
+                    await self._mark_merge_failed_and_release_lock(
                         story_id,
-                        context="rebase_conflict_escalated",
+                        context="rebase_failed",
                     )
                     return
-            else:
-                # 非冲突的 rebase 失败 — 尝试 abort 残留 rebase 状态
-                await self._worktree_mgr.abort_rebase(story_id)
-                logger.error("merge_rebase_failed", story_id=story_id, stderr=rebase_output)
-                await self._mark_merge_failed_and_release_lock(
-                    story_id,
-                    context="rebase_failed",
-                )
-                return
 
         # Step 2a: 记录首次 merge 前的 main HEAD（用于后续 recovery revert）
         try:
@@ -1062,6 +1066,67 @@ class MergeQueue:
             await db.close()
 
         logger.info("regression_dispatched", story_id=story_id, task_id=task_id)
+
+    async def _resume_interrupted_rebase_if_needed(self, story_id: str) -> bool | None:
+        """Resume an already-started rebase before re-running merge boundary gates.
+
+        Returns:
+            ``None`` when no active rebase exists and normal merge flow should continue.
+            ``True`` when an interrupted rebase was successfully resumed and merge can
+            proceed to the fast-forward step.
+            ``False`` when recovery already handled the failure/escalation and the
+            caller should return.
+        """
+        in_progress, conflict_files, status_output = await self._worktree_mgr.inspect_rebase_state(
+            story_id
+        )
+        if not in_progress:
+            return None
+
+        logger.warning(
+            "merge_rebase_resume_detected",
+            story_id=story_id,
+            conflict_files=conflict_files,
+        )
+
+        if conflict_files:
+            resolved = await self._handle_rebase_conflict(
+                story_id,
+                status_output or "Rebase already in progress.",
+            )
+            if not resolved:
+                await self._clear_current_merge_story_lock(
+                    story_id,
+                    context="rebase_resume_conflict_escalated",
+                )
+                return False
+            logger.info("merge_rebase_resumed_after_conflict", story_id=story_id)
+            return True
+
+        continue_success, continue_output = await self._worktree_mgr.continue_rebase(story_id)
+        if not continue_success:
+            if "CONFLICT" in continue_output:
+                logger.info("merge_rebase_resume_conflict", story_id=story_id)
+                resolved = await self._handle_rebase_conflict(story_id, continue_output)
+                if not resolved:
+                    await self._clear_current_merge_story_lock(
+                        story_id,
+                        context="rebase_resume_conflict_escalated",
+                    )
+                    return False
+                logger.info("merge_rebase_resumed_after_conflict", story_id=story_id)
+                return True
+
+            await self._worktree_mgr.abort_rebase(story_id)
+            logger.error("merge_rebase_resume_failed", story_id=story_id, stderr=continue_output)
+            await self._mark_merge_failed_and_release_lock(
+                story_id,
+                context="rebase_resume_failed",
+            )
+            return False
+
+        logger.info("merge_rebase_resumed", story_id=story_id)
+        return True
 
     def _build_regression_dispatch_options(self) -> dict[str, Any]:
         """构建 Codex regression 调度选项，复用 phase 配置解析。"""

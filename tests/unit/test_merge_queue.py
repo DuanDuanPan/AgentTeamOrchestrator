@@ -258,6 +258,7 @@ class TestMergeQueueClass:
 
         worktree_mgr = AsyncMock(
             spec=[
+                "inspect_rebase_state",
                 "rebase_onto_main",
                 "merge_to_main",
                 "cleanup",
@@ -656,6 +657,7 @@ class TestStaleLockRecovery:
 
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.inspect_rebase_state = AsyncMock(return_value=(False, [], ""))
         worktree_mgr.preflight_check = AsyncMock(
             side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
         )
@@ -1032,6 +1034,7 @@ class TestRegressionTestExecution:
 
         worktree_mgr = AsyncMock()
         worktree_mgr.project_root = Path("/fake/repo")
+        worktree_mgr.inspect_rebase_state = AsyncMock(return_value=(False, [], ""))
         worktree_mgr.preflight_check = AsyncMock(
             side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
         )
@@ -1289,6 +1292,42 @@ class TestRegressionTestExecution:
 
         worktree_mgr.rebase_onto_main.assert_not_awaited()
         worktree_mgr.merge_to_main.assert_not_awaited()
+
+    async def test_execute_merge_resumes_active_rebase_before_running_pre_merge_gate(
+        self,
+        initialized_db_path: Path,
+    ) -> None:
+        """Crash recovery should resume an in-progress rebase before boundary gating."""
+        queue, worktree_mgr, tq = self._make_queue(initialized_db_path)
+        await _insert_test_story(initialized_db_path, "s-rebase-resume")
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await enqueue_merge(db, "s-rebase-resume", "a1", _NOW, _NOW)
+            await dequeue_next_merge(db)
+            await set_current_merge_story(db, "s-rebase-resume")
+        finally:
+            await db.close()
+
+        worktree_mgr.inspect_rebase_state = AsyncMock(return_value=(True, [], "rebase status"))
+        worktree_mgr.continue_rebase = AsyncMock(return_value=(True, ""))
+        worktree_mgr.rebase_onto_main = AsyncMock(return_value=(True, ""))
+        worktree_mgr.merge_to_main = AsyncMock(return_value=(True, ""))
+        worktree_mgr.get_main_head = AsyncMock(return_value="new-main-head")
+        worktree_mgr.preflight_check = AsyncMock(
+            side_effect=lambda story_id, _gate_type: _preflight_result(story_id)
+        )
+        queue._submit_transition_event = AsyncMock()
+        queue._dispatch_regression_test = AsyncMock(return_value="task-reg-1")
+
+        await queue._execute_merge("s-rebase-resume")
+
+        worktree_mgr.inspect_rebase_state.assert_awaited_once_with("s-rebase-resume")
+        worktree_mgr.preflight_check.assert_not_awaited()
+        worktree_mgr.continue_rebase.assert_awaited_once_with("s-rebase-resume")
+        worktree_mgr.rebase_onto_main.assert_not_awaited()
+        queue._submit_transition_event.assert_awaited_once_with("s-rebase-resume", "merge_done")
+        tq.submit.assert_not_awaited()
 
     async def test_mark_merge_failed_still_clears_lock_when_status_update_fails(
         self, initialized_db_path: Path
