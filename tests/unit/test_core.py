@@ -4709,6 +4709,175 @@ class TestBatchRestartWorkspaceBranches:
         )
         mock_continue.assert_not_awaited()
 
+    async def test_batch_restart_fixing_regression_resume_includes_failure_context_prompt(
+        self, initialized_db_path: Path, tmp_path: Path
+    ) -> None:
+        """Regression-origin fixing restart 应将回归失败证据注入给 fixer。"""
+        from ato.config import ATOSettings
+        from ato.models.db import (
+            enqueue_merge,
+            get_connection,
+            insert_approval,
+            insert_task,
+            insert_task_command_event,
+            update_story_worktree_path,
+        )
+        from ato.models.schemas import AdapterResult, ApprovalRecord, TaskRecord
+
+        settings = ATOSettings(
+            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        await _insert_test_task(
+            initialized_db_path,
+            status="pending",
+            task_id="t-fix-resume-reg",
+            story_id="s-fix-resume-reg",
+        )
+        now = datetime.now(tz=UTC)
+        wt_dir = tmp_path / "wt-fix-regression"
+        wt_dir.mkdir()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await db.execute(
+                "UPDATE tasks SET phase = 'fixing', role = 'fixer', "
+                "cli_tool = 'claude', expected_artifact = 'restart_requested', "
+                "context_briefing = ? "
+                "WHERE task_id = 't-fix-resume-reg'",
+                (json.dumps({"fix_kind": "phase_resume", "resume_phase": "regression"}),),
+            )
+            await db.execute(
+                "UPDATE stories SET current_phase = 'fixing' WHERE story_id = 's-fix-resume-reg'"
+            )
+            await update_story_worktree_path(db, "s-fix-resume-reg", str(wt_dir))
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="t-regression-audit",
+                    story_id="s-fix-resume-reg",
+                    phase="regression",
+                    role="tester",
+                    cli_tool="codex",
+                    status="completed",
+                    started_at=now,
+                    completed_at=now,
+                ),
+            )
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="apr-regression-fix-forward",
+                    story_id="s-fix-resume-reg",
+                    approval_type="regression_failure",
+                    status="approved",
+                    decision="fix_forward",
+                    payload=json.dumps(
+                        {
+                            "test_output_summary": "Mermaid preview route still fails build",
+                            "blocked_count": 2,
+                        }
+                    ),
+                    created_at=now,
+                    decided_at=now,
+                    consumed_at=now,
+                ),
+            )
+            await enqueue_merge(
+                db,
+                "s-fix-resume-reg",
+                "merge-appr-reg",
+                now,
+                now,
+            )
+            await db.execute(
+                "UPDATE merge_queue SET regression_task_id = ? WHERE story_id = ?",
+                ("t-regression-audit", "s-fix-resume-reg"),
+            )
+            await insert_task_command_event(
+                db,
+                task_id="t-regression-audit",
+                phase="regression",
+                record_type="audit",
+                command="pnpm typecheck",
+                source="project_defined",
+                trigger_reason="required_layer",
+                exit_code=2,
+                created_at=now,
+                completed_at=now,
+                commit=False,
+            )
+            await insert_task_command_event(
+                db,
+                task_id="t-regression-audit",
+                phase="regression",
+                record_type="audit",
+                command="pnpm debug:preview",
+                source="llm_diagnostic",
+                trigger_reason="diagnostic",
+                exit_code=0,
+                created_at=now,
+                completed_at=now,
+                commit=False,
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=settings, db_path=initialized_db_path)
+        orchestrator._tq = AsyncMock()
+        dispatch_mock = AsyncMock(
+            return_value=AdapterResult(
+                status="success",
+                exit_code=0,
+                duration_ms=10,
+                text_result="fixed",
+            )
+        )
+        task = TaskRecord(
+            task_id="t-fix-resume-reg",
+            story_id="s-fix-resume-reg",
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            status="pending",
+            context_briefing=json.dumps(
+                {"fix_kind": "phase_resume", "resume_phase": "regression"}
+            ),
+            started_at=now,
+        )
+
+        with (
+            patch("ato.recovery._create_adapter", return_value=object()),
+            patch("ato.subprocess_mgr.SubprocessManager.dispatch_with_retry", dispatch_mock),
+            patch.object(
+                orchestrator,
+                "_submit_transition_event",
+                new=AsyncMock(),
+            ) as mock_submit_transition,
+        ):
+            await orchestrator._dispatch_batch_restart(task)
+
+        assert dispatch_mock.await_args is not None
+        prompt = dispatch_mock.await_args.kwargs["prompt"]
+        assert "systematic-debugging" in prompt
+        assert "Mermaid preview route still fails build" in prompt
+        assert "pnpm typecheck" in prompt
+        assert "pnpm debug:preview" not in prompt
+        mock_submit_transition.assert_awaited_once_with(
+            story_id="s-fix-resume-reg",
+            event_name="regression_fix_done",
+        )
+
     async def test_batch_restart_fixing_backfills_legacy_qa_resume_context(
         self, initialized_db_path: Path, tmp_path: Path
     ) -> None:

@@ -207,6 +207,9 @@ timeout:
 #   bootstrap / lint / typecheck / unit / integration / system / build / smoke / package
 
 test_catalog:
+  bootstrap:
+    commands:
+      - "uv sync --dev"
   lint:
     commands:
       - "uv run ruff check src tests"
@@ -238,6 +241,7 @@ phase_test_policy:
 
   regression:
     required_layers:
+      - bootstrap
       - unit
     optional_layers:
       - integration

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -160,6 +161,8 @@ DEFAULT_QA_FALLBACK_MAX_ADDITIONAL_COMMANDS = 4
 DEFAULT_REGRESSION_MAX_ADDITIONAL_COMMANDS = 4
 DEFAULT_REGRESSION_TEST_COMMAND = "uv run pytest"
 LEGACY_REGRESSION_BASELINE_LAYER = "_legacy_baseline"
+BOOTSTRAP_TEST_LAYER = "bootstrap"
+_NODE_PACKAGE_MANAGER_TOKENS: frozenset[str] = frozenset({"pnpm", "npm", "yarn", "bun", "npx"})
 
 
 class TestLayerConfig(BaseModel):
@@ -595,6 +598,8 @@ def _validate_numeric_bounds(config: ATOSettings) -> None:
 
 def _validate_test_policy_config(config: ATOSettings, phase_names: set[str]) -> None:
     """验证跨项目测试策略配置。"""
+    phase_by_name = {phase.name: phase for phase in config.phases}
+
     for layer_name in config.test_catalog:
         if not layer_name.strip():
             raise ConfigError("配置错误：test_catalog 不能包含空 layer 名")
@@ -631,6 +636,105 @@ def _validate_test_policy_config(config: ATOSettings, phase_names: set[str]) -> 
                 f"配置错误：阶段 '{phase_name}' 的 test policy 不会执行任何命令；"
                 "请至少配置一个 required layer，或提供可达的 additional command 路径"
             )
+
+        if (
+            phase_name == "regression"
+            and (phase_cfg := phase_by_name.get(phase_name)) is not None
+            and _resolve_workspace(phase_cfg) == "main"
+            and _should_warn_missing_regression_bootstrap(config, policy)
+        ):
+            logger.warning(
+                "config_regression_bootstrap_missing",
+                phase=phase_name,
+                required_layers=policy.required_layers,
+                optional_layers=policy.optional_layers,
+                hint=(
+                    "workspace: main 的 regression 使用 Node package-manager 命令，但未声明 "
+                    "bootstrap layer；worktree 中的 install 不会随 merge 带到 main。"
+                    "建议在 regression.required_layers 最前面添加 bootstrap "
+                    "（如 `pnpm install --frozen-lockfile`）。"
+                ),
+            )
+
+
+def _command_uses_node_package_manager(command: str) -> bool:
+    """Return True when a command is driven by a Node package manager executable."""
+    executable_tokens = _tokenize_command_for_bootstrap_detection(command)
+    if not executable_tokens:
+        return False
+
+    first = executable_tokens[0]
+    if first in _NODE_PACKAGE_MANAGER_TOKENS:
+        return True
+
+    return (
+        first == "corepack"
+        and len(executable_tokens) > 1
+        and executable_tokens[1] in _NODE_PACKAGE_MANAGER_TOKENS
+    )
+
+
+def _command_is_node_bootstrap(command: str) -> bool:
+    """Return True when a command performs deterministic Node dependency bootstrap."""
+    executable_tokens = _tokenize_command_for_bootstrap_detection(command)
+    if not executable_tokens:
+        return False
+
+    first = executable_tokens[0]
+    if first in _NODE_PACKAGE_MANAGER_TOKENS:
+        return len(executable_tokens) > 1 and executable_tokens[1] in {"install", "ci"}
+
+    return (
+        first == "corepack"
+        and len(executable_tokens) > 2
+        and executable_tokens[1] in _NODE_PACKAGE_MANAGER_TOKENS
+        and executable_tokens[2] in {"install", "ci"}
+    )
+
+
+def _tokenize_command_for_bootstrap_detection(command: str) -> list[str]:
+    """Return command tokens with leading env assignments stripped."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = command.strip().split()
+
+    executable_tokens: list[str] = []
+    for token in tokens:
+        if not token:
+            continue
+        if "=" in token and not token.startswith("/") and token.index("=") > 0:
+            continue
+        executable_tokens.append(token)
+    return executable_tokens
+
+
+def _should_warn_missing_regression_bootstrap(
+    config: ATOSettings,
+    policy: PhaseTestPolicyConfig,
+) -> bool:
+    """Detect regression policies that likely need a bootstrap layer but omit it."""
+    if BOOTSTRAP_TEST_LAYER in policy.required_layers:
+        return False
+
+    required_commands: list[str] = []
+    for layer in policy.required_layers:
+        layer_cfg = config.test_catalog.get(layer)
+        if layer_cfg is None:
+            continue
+        required_commands.extend(layer_cfg.commands)
+
+    if any(_command_is_node_bootstrap(command) for command in required_commands):
+        return False
+
+    configured_commands = list(required_commands)
+    for layer in policy.optional_layers:
+        layer_cfg = config.test_catalog.get(layer)
+        if layer_cfg is None:
+            continue
+        configured_commands.extend(layer_cfg.commands)
+
+    return any(_command_uses_node_package_manager(command) for command in configured_commands)
 
 
 def _expand_policy_layers(

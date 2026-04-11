@@ -74,15 +74,16 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
                 "description": "Human-readable summary of the regression run",
             },
             "commands_attempted": {
-                "type": "array",
+                "type": ["array", "null"],
                 "items": {"type": "string"},
                 "description": (
-                    "Optional legacy self-report of policy-domain shell commands executed "
-                    "during regression. Do not include auxiliary inspection commands."
+                    "Legacy self-report of policy-domain shell commands executed during "
+                    "regression. Use null when relying solely on the harness ledger. Do not "
+                    "include auxiliary inspection commands."
                 ),
             },
             "command_audit": {
-                "type": "array",
+                "type": ["array", "null"],
                 "items": {
                     "type": "object",
                     "properties": {
@@ -103,8 +104,8 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
                     "additionalProperties": False,
                 },
                 "description": (
-                    "Optional legacy self-report of command provenance for each executed "
-                    "policy-domain command; ignored when harness ledger data is present"
+                    "Legacy self-report of command provenance for each executed policy-domain "
+                    "command; use null when relying solely on harness ledger data"
                 ),
             },
             "skipped_command_reason": {
@@ -122,6 +123,8 @@ _REGRESSION_RESULT_SCHEMA: str = json.dumps(
         "required": [
             "regression_status",
             "summary",
+            "commands_attempted",
+            "command_audit",
             "skipped_command_reason",
             "discovery_notes",
         ],
@@ -287,11 +290,11 @@ def _build_regression_policy_instructions(test_policy: dict[str, Any]) -> str:
         f"- {discovery_rules}\n"
         "## Structured Result Contract\n"
         "- The harness ledger is the authoritative source of command execution facts.\n"
-        "- `commands_attempted` and `command_audit` are optional legacy fields; include them only "
-        "if they help explain the run.\n"
-        "- If you include `commands_attempted`, it must contain only raw shell command strings "
+        "- `commands_attempted` and `command_audit` must always be present in the JSON output.\n"
+        "- Set both fields to `null` when relying solely on the harness ledger.\n"
+        "- When `commands_attempted` is not null, it must contain only raw shell command strings "
         "for executed policy-domain commands, in execution order.\n"
-        "- If you include `command_audit`, it must contain one entry per executed policy-domain "
+        "- When `command_audit` is not null, it must contain one entry per executed policy-domain "
         "command, in the same order as `commands_attempted`.\n"
         "- `command_audit.source` must be one of: "
         f"{', '.join(TEST_COMMAND_SOURCES)}.\n"

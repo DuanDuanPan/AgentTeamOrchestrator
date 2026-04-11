@@ -3550,6 +3550,172 @@ class TestFixRecoveryContinuation:
         )
         mock_continue.assert_not_awaited()
 
+    async def test_dispatch_structured_job_fixing_regression_resume_includes_failure_context(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Regression-origin fixing recovery 也应把回归失败证据注入 prompt。"""
+        from ato.models.db import enqueue_merge, insert_approval, insert_task_command_event
+
+        wt_dir = tmp_path / "wt-fix-reg-recovery"
+        wt_dir.mkdir()
+        now = datetime.now(tz=UTC)
+
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_story(
+                db,
+                _make_story(
+                    "s-fix-reg-resume",
+                    worktree_path=str(wt_dir),
+                    current_phase="fixing",
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-fix-reg-resume",
+                    "s-fix-reg-resume",
+                    status="pending",
+                    pid=None,
+                    phase="fixing",
+                    role="fixer",
+                    cli_tool="claude",
+                    context_briefing=json.dumps(
+                        {"fix_kind": "phase_resume", "resume_phase": "regression"}
+                    ),
+                ),
+            )
+            await insert_task(
+                db,
+                _make_task(
+                    "t-regression-prev",
+                    "s-fix-reg-resume",
+                    status="completed",
+                    pid=None,
+                    phase="regression",
+                    role="tester",
+                    cli_tool="codex",
+                    started_at=now,
+                    completed_at=now,
+                ),
+            )
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="apr-reg-fix-forward-recovery",
+                    story_id="s-fix-reg-resume",
+                    approval_type="regression_failure",
+                    status="approved",
+                    decision="fix_forward",
+                    payload=json.dumps(
+                        {
+                            "test_output_summary": "DOCX preview smoke test failed again",
+                            "blocked_count": 1,
+                        }
+                    ),
+                    created_at=now,
+                    decided_at=now,
+                    consumed_at=now,
+                ),
+            )
+            await enqueue_merge(db, "s-fix-reg-resume", "merge-appr-rec", now, now)
+            await db.execute(
+                "UPDATE merge_queue SET regression_task_id = ? WHERE story_id = ?",
+                ("t-regression-prev", "s-fix-reg-resume"),
+            )
+            await insert_task_command_event(
+                db,
+                task_id="t-regression-prev",
+                phase="regression",
+                record_type="audit",
+                command="pnpm build",
+                source="project_defined",
+                trigger_reason="required_layer",
+                exit_code=1,
+                created_at=now,
+                completed_at=now,
+                commit=False,
+            )
+            await insert_task_command_event(
+                db,
+                task_id="t-regression-prev",
+                phase="regression",
+                record_type="audit",
+                command="pnpm debug:docx-preview",
+                source="llm_diagnostic",
+                trigger_reason="diagnostic",
+                exit_code=0,
+                created_at=now,
+                completed_at=now,
+                commit=False,
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        settings = ATOSettings(
+            roles={"fixer": {"cli": "claude"}},  # type: ignore[dict-item, unused-ignore]
+            phases=[
+                {  # type: ignore[list-item, unused-ignore]
+                    "name": "fixing",
+                    "role": "fixer",
+                    "type": "structured_job",
+                    "next_on_success": "reviewing",
+                    "workspace": "worktree",
+                },
+            ],
+        )
+
+        engine = RecoveryEngine(
+            db_path=initialized_db_path,
+            subprocess_mgr=None,
+            transition_queue=AsyncMock(),
+            settings=settings,
+        )
+        task = _make_task(
+            "t-fix-reg-resume",
+            "s-fix-reg-resume",
+            status="pending",
+            pid=None,
+            phase="fixing",
+            role="fixer",
+            cli_tool="claude",
+            context_briefing=json.dumps({"fix_kind": "phase_resume", "resume_phase": "regression"}),
+        )
+        dispatch_mock = AsyncMock(
+            return_value=AdapterResult(
+                status="success",
+                exit_code=0,
+                duration_ms=10,
+                text_result="fixed",
+            )
+        )
+
+        with (
+            patch("ato.subprocess_mgr.SubprocessManager.dispatch_with_retry", dispatch_mock),
+            patch.object(engine, "_submit_transition_event", new=AsyncMock()) as mock_submit,
+            patch.object(
+                engine,
+                "continue_after_fix_success",
+                new=AsyncMock(),
+            ) as mock_continue,
+        ):
+            await engine._dispatch_structured_job(task)
+
+        assert dispatch_mock.await_args is not None
+        prompt = dispatch_mock.await_args.kwargs["prompt"]
+        assert "systematic-debugging" in prompt
+        assert "DOCX preview smoke test failed again" in prompt
+        assert "pnpm build" in prompt
+        assert "pnpm debug:docx-preview" not in prompt
+        mock_submit.assert_awaited_once_with(
+            story_id="s-fix-reg-resume",
+            event_name="regression_fix_done",
+        )
+        mock_continue.assert_not_awaited()
+
 
 class TestRecoveryRoundSummaryReconstruction:
     def test_reconstruct_round_summaries_uses_first_seen_state(self) -> None:

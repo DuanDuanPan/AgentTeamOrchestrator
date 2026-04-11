@@ -115,7 +115,7 @@ async def test_pre_review_fails_for_dirty_worktree(
     assert "untracked.txt" in result.porcelain_output
 
 
-async def test_pre_review_fails_for_clean_empty_diff(
+async def test_pre_review_allows_clean_empty_diff(
     preflight_repo: tuple[Path, Path, WorktreeManager],
 ) -> None:
     _repo, db_path, mgr = preflight_repo
@@ -123,8 +123,8 @@ async def test_pre_review_fails_for_clean_empty_diff(
 
     result = await mgr.preflight_check("story-empty", "pre_review")
 
-    assert result.passed is False
-    assert result.failure_reason == "EMPTY_DIFF"
+    assert result.passed is True
+    assert result.failure_reason is None
     assert result.changed_files == []
 
 

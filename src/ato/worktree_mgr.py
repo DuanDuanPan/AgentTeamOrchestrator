@@ -506,8 +506,6 @@ class WorktreeManager:
             failure_reason: WorktreePreflightFailureReason | None = None
             if porcelain_output.strip():
                 failure_reason = "UNCOMMITTED_CHANGES"
-            elif not changed_files:
-                failure_reason = "EMPTY_DIFF"
 
             result = self._make_preflight_result(
                 story_id=story_id,

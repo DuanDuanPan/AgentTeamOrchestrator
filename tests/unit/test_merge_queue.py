@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1857,6 +1858,16 @@ class TestCodexRegressionRunner:
         assert "git-clean relative to the starting snapshot" in prompt
         assert "legacy_baseline" in prompt
 
+    def test_regression_result_schema_requires_all_top_level_properties(self) -> None:
+        """Responses API 要求 properties 中的每个顶层 key 都出现在 required 中。"""
+        from ato.merge_queue import _REGRESSION_RESULT_SCHEMA
+
+        schema = json.loads(_REGRESSION_RESULT_SCHEMA)
+
+        assert set(schema["required"]) == set(schema["properties"])
+        assert schema["properties"]["commands_attempted"]["type"] == ["array", "null"]
+        assert schema["properties"]["command_audit"]["type"] == ["array", "null"]
+
     async def test_build_regression_prompt_with_explicit_singular_command(
         self,
     ) -> None:
@@ -1944,6 +1955,41 @@ class TestCodexRegressionRunner:
         assert "trigger_reason" in prompt
         assert "Do NOT include auxiliary inspection commands" in prompt
         assert "--trigger optional_layer:integration" in prompt
+
+    async def test_build_regression_prompt_with_bootstrap_layer(self) -> None:
+        from ato.merge_queue import _build_regression_prompt
+
+        settings = ATOSettings(
+            roles={"qa": {"cli": "codex"}},  # type: ignore[dict-item]
+            phases=[
+                {  # type: ignore[list-item]
+                    "name": "regression",
+                    "role": "qa",
+                    "type": "structured_job",
+                    "next_on_success": "done",
+                    "next_on_failure": "done",
+                    "workspace": "main",
+                },
+            ],
+            test_catalog={
+                "bootstrap": TestLayerConfig(commands=["pnpm install --frozen-lockfile"]),
+                "unit": TestLayerConfig(commands=["pnpm test:unit"]),
+            },
+            phase_test_policy={
+                "regression": PhaseTestPolicyConfig(
+                    required_layers=["bootstrap", "unit"],
+                    optional_layers=[],
+                    allow_discovery=True,
+                    max_additional_commands=2,
+                    allowed_when="after_required_commands",
+                )
+            },
+        )
+
+        prompt = _build_regression_prompt(Path("/repo"), settings)
+        assert "Required layers: bootstrap, unit" in prompt
+        assert "pnpm install --frozen-lockfile" in prompt
+        assert "--trigger required_layer:bootstrap" in prompt
 
     def test_validate_regression_command_audit_ignores_auxiliary_inspection(self) -> None:
         from ato.config import resolve_effective_test_policy

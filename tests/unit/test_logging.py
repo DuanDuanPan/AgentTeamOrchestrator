@@ -15,6 +15,7 @@ from ato.logging import configure_logging
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+SHANGHAI_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*\+08:00$")
 
 
 def _reset_logging() -> None:
@@ -112,7 +113,7 @@ class TestConfigureLogging:
         assert "task=1d6ac4b2" in plain_output
 
     def test_json_contains_iso_timestamp(self, tmp_path: Path) -> None:
-        """验证 JSON 输出包含 ISO 格式时间戳。"""
+        """验证 JSON 输出包含上海时区 ISO 时间戳。"""
         log_dir = str(tmp_path / "logs")
         configure_logging(log_dir=log_dir)
 
@@ -125,8 +126,8 @@ class TestConfigureLogging:
         record = json.loads(last_line)
 
         assert "timestamp" in record
-        assert ISO_TIMESTAMP_RE.match(record["timestamp"]), (
-            f"timestamp 不是 ISO 格式: {record['timestamp']}"
+        assert SHANGHAI_TIMESTAMP_RE.match(record["timestamp"]), (
+            f"timestamp 不是上海时区 ISO 格式: {record['timestamp']}"
         )
         assert record["level"] == "info"
         assert record["event"] == "ts_event"
@@ -148,7 +149,7 @@ class TestConfigureLogging:
         assert record["event"] == "plain_event"
         assert record["level"] == "info"
         assert "timestamp" in record
-        assert ISO_TIMESTAMP_RE.match(record["timestamp"])
+        assert SHANGHAI_TIMESTAMP_RE.match(record["timestamp"])
 
     def test_log_dir_creates_directory_and_writes_file(self, tmp_path: Path) -> None:
         """验证传入 log_dir 时创建目录并写入 ato.log。"""

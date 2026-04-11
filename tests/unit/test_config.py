@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1416,6 +1417,98 @@ phases:
         assert policy.required_commands == []
         assert policy.allow_discovery is True
         assert policy.allowed_when == "always"
+
+    def test_regression_missing_bootstrap_warns_for_node_package_manager_commands(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: regression
+    role: qa
+    type: structured_job
+    next_on_success: done
+    next_on_failure: done
+    workspace: main
+test_catalog:
+  unit:
+    commands:
+      - "pnpm test:unit"
+  build:
+    commands:
+      - "pnpm build"
+phase_test_policy:
+  regression:
+    required_layers:
+      - unit
+      - build
+    optional_layers: []
+    allow_discovery: true
+    max_additional_commands: 2
+    allowed_when: after_required_commands
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+
+        with patch("ato.config.logger") as mock_logger:
+            load_config(p)
+
+        mock_logger.warning.assert_any_call(
+            "config_regression_bootstrap_missing",
+            phase="regression",
+            required_layers=["unit", "build"],
+            optional_layers=[],
+            hint=(
+                "workspace: main 的 regression 使用 Node package-manager 命令，但未声明 "
+                "bootstrap layer；worktree 中的 install 不会随 merge 带到 main。"
+                "建议在 regression.required_layers 最前面添加 bootstrap "
+                "（如 `pnpm install --frozen-lockfile`）。"
+            ),
+        )
+
+    def test_regression_explicit_install_layer_suppresses_bootstrap_warning(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        yaml_content = """\
+roles:
+  qa:
+    cli: codex
+phases:
+  - name: regression
+    role: qa
+    type: structured_job
+    next_on_success: done
+    next_on_failure: done
+    workspace: main
+test_catalog:
+  deps:
+    commands:
+      - "pnpm install --frozen-lockfile"
+  unit:
+    commands:
+      - "pnpm test:unit"
+phase_test_policy:
+  regression:
+    required_layers:
+      - deps
+      - unit
+    optional_layers: []
+    allow_discovery: true
+    max_additional_commands: 2
+    allowed_when: after_required_commands
+"""
+        p = _write_yaml(tmp_path, yaml_content)
+
+        with patch("ato.config.logger") as mock_logger:
+            load_config(p)
+
+        assert not any(
+            call.args and call.args[0] == "config_regression_bootstrap_missing"
+            for call in mock_logger.warning.call_args_list
+        )
 
 
 # ---------------------------------------------------------------------------

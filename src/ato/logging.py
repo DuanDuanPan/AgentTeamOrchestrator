@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import structlog
 
 LogFormat = Literal["auto", "json", "console"]
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _resolve_stderr_log_format(log_format: LogFormat) -> Literal["json", "console"]:
@@ -110,6 +113,16 @@ def _build_console_formatter(
     )
 
 
+def _add_shanghai_timestamp(
+    _logger: Any,
+    _method_name: str,
+    event_dict: structlog.types.EventDict,
+) -> structlog.types.EventDict:
+    """为日志事件附加固定上海时区的 ISO 时间戳。"""
+    event_dict["timestamp"] = datetime.now(tz=SHANGHAI_TZ).isoformat()
+    return event_dict
+
+
 def configure_logging(
     log_dir: str | None = None,
     debug: bool = False,
@@ -126,7 +139,7 @@ def configure_logging(
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
+        _add_shanghai_timestamp,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
     ]

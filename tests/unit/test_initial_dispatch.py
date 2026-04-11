@@ -11,6 +11,7 @@ import pytest
 
 from ato.core import Orchestrator
 from ato.models.db import (
+    enqueue_merge,
     get_connection,
     get_tasks_by_story,
     get_undispatched_stories,
@@ -18,6 +19,7 @@ from ato.models.db import (
     insert_approval,
     insert_story,
     insert_task,
+    insert_task_command_event,
 )
 from ato.models.schemas import ApprovalRecord, StoryRecord, TaskRecord
 
@@ -531,6 +533,130 @@ class TestInitialDispatchDelegation:
             "fix_kind": "phase_resume",
             "resume_phase": "qa_testing",
         }
+
+    @pytest.mark.asyncio
+    async def test_fixing_initial_dispatch_inferrs_regression_resume_context_with_failure_evidence(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Regression-origin fixing 初始调度应携带最近一次回归失败证据。"""
+        import json
+
+        db_path = await _setup_db(tmp_path)
+        story = _make_story_record("s-fix-reg", current_phase="fixing", status="in_progress")
+        worktree_dir = tmp_path / "wt-fix-reg"
+        worktree_dir.mkdir()
+        story.worktree_path = str(worktree_dir)
+        now = datetime.now(tz=UTC)
+
+        db = await get_connection(db_path)
+        try:
+            await insert_story(db, story)
+            await insert_task(
+                db,
+                TaskRecord(
+                    task_id="task-regression-completed",
+                    story_id="s-fix-reg",
+                    phase="regression",
+                    role="tester",
+                    cli_tool="codex",
+                    status="completed",
+                    started_at=now,
+                    completed_at=now,
+                ),
+            )
+            await enqueue_merge(db, "s-fix-reg", "merge-appr-1", now, now)
+            await db.execute(
+                "UPDATE merge_queue SET regression_task_id = ? WHERE story_id = ?",
+                ("task-regression-completed", "s-fix-reg"),
+            )
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="apr-reg-fix-forward",
+                    story_id="s-fix-reg",
+                    approval_type="regression_failure",
+                    status="approved",
+                    decision="fix_forward",
+                    payload=json.dumps(
+                        {
+                            "test_output_summary": "pnpm typecheck failed on DOCX preview route",
+                            "blocked_count": 2,
+                        }
+                    ),
+                    created_at=now,
+                    decided_at=now,
+                    consumed_at=now,
+                ),
+            )
+            await insert_task_command_event(
+                db,
+                task_id="task-regression-completed",
+                phase="regression",
+                record_type="audit",
+                command="pnpm typecheck",
+                source="project_defined",
+                trigger_reason="required_layer",
+                exit_code=2,
+                created_at=now,
+                completed_at=now,
+                commit=False,
+            )
+            await insert_task_command_event(
+                db,
+                task_id="task-regression-completed",
+                phase="regression",
+                record_type="audit",
+                command="pnpm debug:mermaid",
+                source="llm_diagnostic",
+                trigger_reason="diagnostic",
+                exit_code=0,
+                created_at=now,
+                completed_at=now,
+                commit=False,
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        orchestrator = Orchestrator(settings=_make_settings(), db_path=db_path)
+
+        with (
+            patch(
+                "ato.recovery.RecoveryEngine._resolve_phase_config_static",
+                return_value={
+                    "role": "fixer",
+                    "cli_tool": "claude",
+                    "phase_type": "structured_job",
+                    "workspace": "worktree",
+                },
+            ),
+            patch.object(
+                orchestrator,
+                "_dispatch_batch_restart",
+                new_callable=AsyncMock,
+            ) as mock_batch,
+        ):
+            await orchestrator._dispatch_initial_phase(story)
+
+        mock_batch.assert_called_once()
+        dispatched_task = mock_batch.call_args.args[0]
+        assert dispatched_task.context_briefing is not None
+        context = json.loads(dispatched_task.context_briefing)
+        assert context["fix_kind"] == "phase_resume"
+        assert context["resume_phase"] == "regression"
+        assert context["failure_context"]["test_output_summary"] == (
+            "pnpm typecheck failed on DOCX preview route"
+        )
+        assert context["failure_context"]["blocked_count"] == 2
+        assert context["failure_context"]["policy_command_results"] == [
+            {
+                "command": "pnpm typecheck",
+                "source": "project_defined",
+                "trigger_reason": "required_layer",
+                "exit_code": 2,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_initial_dispatch_skips_story_blocked_by_crash_recovery(
