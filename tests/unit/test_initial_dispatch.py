@@ -322,6 +322,48 @@ class TestGetUndispatchedStories:
         assert stories == []
 
     @pytest.mark.asyncio
+    async def test_story_with_pending_spec_batch_precommit_failure_not_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """等待 spec_batch precommit_failure 决策的 dev_ready story 不应反复补发。"""
+        import json
+
+        db_path = await _setup_db(tmp_path)
+        await _insert_story(db_path, "s-1", "dev_ready", "ready")
+
+        db = await get_connection(db_path)
+        try:
+            now = datetime.now(tz=UTC)
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="apr-precommit-1",
+                    story_id="s-1",
+                    approval_type="precommit_failure",
+                    status="pending",
+                    created_at=now,
+                    payload=json.dumps(
+                        {
+                            "scope": "spec_batch",
+                            "batch_id": "batch-1",
+                            "story_ids": ["s-1"],
+                            "options": ["retry", "manual_fix", "skip"],
+                        }
+                    ),
+                ),
+            )
+        finally:
+            await db.close()
+
+        db2 = await get_connection(db_path)
+        try:
+            stories = await get_undispatched_stories(db2)
+        finally:
+            await db2.close()
+
+        assert stories == []
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("phase", ["merging", "regression"])
     async def test_queue_owned_phase_not_detected(self, tmp_path: Path, phase: str) -> None:
         """merge queue 接管的阶段不应走普通初始调度检测。"""

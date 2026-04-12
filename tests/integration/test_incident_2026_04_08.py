@@ -416,6 +416,34 @@ class TestFinalizeGitTruth:
 
         assert result.committed is False
 
+    async def test_finalize_does_not_force_max_turns(self, db_ready: Path) -> None:
+        """Finalize 不应硬编码 Claude turn budget，避免在 commit 前被 turn 上限截断。"""
+        from unittest.mock import AsyncMock, patch
+
+        mgr = SubprocessManager(
+            max_concurrent=4,
+            adapter=FakeAdapter(),  # type: ignore[arg-type]
+            db_path=db_ready,
+        )
+
+        async def _fake_finalize_git(worktree_path: str, *args: str) -> tuple[int, str, str]:
+            if args[0] == "rev-parse":
+                return 0, "same_sha\n", ""
+            return 1, "", ""
+
+        with (
+            patch.object(mgr, "_run_finalize_git", side_effect=_fake_finalize_git),
+            patch.object(mgr, "dispatch_with_retry", new_callable=AsyncMock) as dispatch_mock,
+        ):
+            await mgr.dispatch_finalize(
+                "story-incident",
+                "/tmp/fake-worktree",
+                "Test story",
+            )
+
+        dispatch_mock.assert_awaited_once()
+        assert dispatch_mock.await_args.kwargs["options"] == {"cwd": "/tmp/fake-worktree"}
+
 
 # ---------------------------------------------------------------------------
 # Blocked preflight retry regression

@@ -1025,6 +1025,53 @@ class WorktreeManager:
     # Batch spec commit — Story 9.3
     # ------------------------------------------------------------------
 
+    async def _commit_owned_main_artifacts(
+        self,
+        *,
+        paths_to_add: list[str],
+        commit_message: str,
+        log_context: dict[str, object] | None = None,
+    ) -> tuple[bool, str]:
+        """Commit selected main-workspace artifacts without swallowing unrelated dirt."""
+        rc_status, porcelain_output, stderr_status = await self._run_git(
+            "status",
+            "--porcelain=v1",
+            "-uall",
+        )
+        if rc_status != 0:
+            return False, f"git status --porcelain failed (rc={rc_status}): {stderr_status}"
+
+        dirty_files = dirty_files_from_porcelain(porcelain_output)
+        owned_dirty, foreign_dirty = self._partition_owned_dirty_files(dirty_files, paths_to_add)
+        if foreign_dirty:
+            logger.warning(
+                "main_artifact_commit_ignoring_foreign_dirty",
+                foreign_dirty=sorted(foreign_dirty)[:10],
+                paths_to_add=paths_to_add,
+                **(log_context or {}),
+            )
+
+        if not owned_dirty:
+            return True, "all owned main artifacts already committed (idempotent)"
+
+        rc_add, _, stderr_add = await self._run_git("add", "--", *paths_to_add)
+        if rc_add != 0:
+            return False, f"git add failed: {stderr_add}"
+
+        rc_commit, _stdout_commit, stderr_commit = await self._run_git(
+            "commit",
+            "-m",
+            commit_message,
+            "--",
+            *paths_to_add,
+        )
+        if rc_commit != 0:
+            return False, f"git commit failed: {stderr_commit}"
+
+        rc_rev, commit_hash, _ = await self._run_git("rev-parse", "HEAD")
+        commit_hash = commit_hash.strip() if rc_rev == 0 else "unknown"
+        return True, commit_hash
+
     async def batch_spec_commit(
         self,
         batch_id: str,
@@ -1038,8 +1085,8 @@ class WorktreeManager:
         - ``_bmad-output/implementation-artifacts/{story_id}-ux/`` (若存在)
         - ``_bmad-output/implementation-artifacts/sprint-status.yaml``
 
-        若 main workspace 存在不属于当前 batch 的脏文件，则 fail-closed，
-        阻止 dev_ready 自动推进，避免把跨 story/main 的改动带入后续 merge。
+        若 main workspace 同时存在不属于当前 batch 的脏文件，仍只提交当前 batch
+        自有产物；无关脏文件保留在工作区，不再阻止 spec commit。
 
         Args:
             batch_id: Batch 唯一标识。
@@ -1050,53 +1097,39 @@ class WorktreeManager:
             False 时 message 是错误信息。
         """
         paths_to_add = self._batch_owned_main_artifact_paths(story_ids)
-
-        rc_status, porcelain_output, stderr_status = await self._run_git(
-            "status",
-            "--porcelain=v1",
-            "-uall",
-        )
-        if rc_status != 0:
-            return False, f"git status --porcelain failed (rc={rc_status}): {stderr_status}"
-
-        dirty_files = dirty_files_from_porcelain(porcelain_output)
-        owned_dirty, foreign_dirty = self._partition_owned_dirty_files(dirty_files, paths_to_add)
-        if foreign_dirty:
-            preview = ", ".join(sorted(foreign_dirty)[:10])
-            return False, f"main workspace has foreign dirty files: {preview}"
-
-        if not owned_dirty:
-            return True, "all owned main artifacts already committed (idempotent)"
-
-        # git add — 仅 stage spec paths
-        rc_add, _, stderr_add = await self._run_git("add", "--", *paths_to_add)
-        if rc_add != 0:
-            return False, f"git add failed: {stderr_add}"
-
-        # git commit — 使用 pathspec 限定只提交 batch 自有 main-phase 产物，
-        # 不吞 index 中其他已暂存的无关变更。
         commit_msg = f"spec(batch-{batch_id}): add validated story specifications"
-        rc_commit, _stdout_commit, stderr_commit = await self._run_git(
-            "commit",
-            "-m",
-            commit_msg,
-            "--",
-            *paths_to_add,
+        success, message = await self._commit_owned_main_artifacts(
+            paths_to_add=paths_to_add,
+            commit_message=commit_msg,
+            log_context={"batch_id": batch_id, "story_ids": story_ids},
         )
-        if rc_commit != 0:
-            return False, f"git commit failed: {stderr_commit}"
-
-        # 获取 commit hash
-        rc_rev, commit_hash, _ = await self._run_git("rev-parse", "HEAD")
-        commit_hash = commit_hash.strip() if rc_rev == 0 else "unknown"
+        if not success:
+            return False, message
 
         logger.info(
             "batch_spec_committed",
             batch_id=batch_id,
             story_ids=story_ids,
-            commit_hash=commit_hash,
+            commit_hash=message,
         )
-        return True, commit_hash
+        return True, message
+
+    async def commit_sprint_status_update(self, story_id: str) -> tuple[bool, str]:
+        """Commit sprint-status.yaml on main after a story state sync."""
+        spec_path = "_bmad-output/implementation-artifacts/sprint-status.yaml"
+        commit_msg = f"spec({story_id}): sync sprint status"
+        success, message = await self._commit_owned_main_artifacts(
+            paths_to_add=[spec_path],
+            commit_message=commit_msg,
+            log_context={"story_id": story_id},
+        )
+        if success and "idempotent" not in message:
+            logger.info(
+                "sprint_status_committed",
+                story_id=story_id,
+                commit_hash=message,
+            )
+        return success, message
 
     def _batch_owned_main_artifact_paths(self, story_ids: list[str]) -> list[str]:
         """Return pathspecs that the current batch is allowed to own on main."""

@@ -260,7 +260,90 @@ class TestTransitionQueueSerialization:
         assert sa is not None and sa.current_phase == "creating"
         assert sb is not None and sb.current_phase == "creating"
 
+
+class TestSprintStatusSyncOnTransition:
+    async def test_regression_pass_updates_sprint_status_yaml(
+        self, initialized_db_path: Path
+    ) -> None:
+        project_root = initialized_db_path.parent.parent
+        sprint_status_path = (
+            project_root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"
+        )
+        sprint_status_path.parent.mkdir(parents=True, exist_ok=True)
+        sprint_status_path.write_text(
+            """\
+generated: 2026-03-18
+last_updated: 2026-04-11
+project: Demo
+
+development_status:
+  epic-7: in-progress
+  7-1-mandatory-item-compliance-engine: in-progress
+""",
+            encoding="utf-8",
+        )
+        await _insert_story_at_phase(
+            initialized_db_path,
+            "7-1-mandatory-item-compliance-engine",
+            "regression",
+        )
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        await tq.submit(_make_event("7-1-mandatory-item-compliance-engine", "regression_pass"))
+        await tq._queue.join()
+
+        story = await _read_story(initialized_db_path, "7-1-mandatory-item-compliance-engine")
+        assert story is not None
+        assert story.current_phase == "done"
+        content = sprint_status_path.read_text(encoding="utf-8")
+        assert "7-1-mandatory-item-compliance-engine: done" in content
+
         await tq.stop()
+
+    async def test_regression_pass_commits_sprint_status_on_done(
+        self, initialized_db_path: Path
+    ) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from ato.core import reset_main_path_gate
+
+        await _insert_story_at_phase(
+            initialized_db_path,
+            "7-2-dynamic-adversarial-role-generation",
+            "regression",
+        )
+
+        tq = TransitionQueue(initialized_db_path)
+        await tq.start()
+
+        reset_main_path_gate()
+        try:
+            with (
+                patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+                patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+                patch("ato.transition_queue.send_user_notification"),
+            ):
+                mock_mgr = mock_wm_cls.return_value
+                mock_mgr.cleanup = AsyncMock()
+                mock_mgr.commit_sprint_status_update = AsyncMock(return_value=(True, "abc123"))
+
+                await tq.submit(
+                    _make_event(
+                        "7-2-dynamic-adversarial-role-generation",
+                        "regression_pass",
+                    )
+                )
+                await tq._queue.join()
+
+                mock_mgr.cleanup.assert_called_once_with("7-2-dynamic-adversarial-role-generation")
+                mock_mgr.commit_sprint_status_update.assert_called_once_with(
+                    "7-2-dynamic-adversarial-role-generation"
+                )
+        finally:
+            reset_main_path_gate()
+            await tq.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -1162,6 +1245,74 @@ class TestBatchSpecCommitOnDevReady:
 
         await tq.stop()
 
+    async def test_existing_spec_batch_precommit_failure_blocks_repeat_creation(
+        self, initialized_db_path: Path
+    ) -> None:
+        """同一 batch 已有 pending precommit_failure 时不应重复尝试 / 重复建单。"""
+        import json
+        from unittest.mock import AsyncMock, patch
+
+        from ato.models.db import (
+            get_pending_approvals,
+            insert_approval,
+            insert_batch,
+            insert_batch_story_links,
+        )
+        from ato.models.schemas import ApprovalRecord, BatchRecord, BatchStoryLink
+
+        now = datetime.now(UTC)
+        batch = BatchRecord(batch_id="b3-repeat", status="active", created_at=now)
+        db = await get_connection(initialized_db_path)
+        try:
+            await insert_batch(db, batch)
+            await _insert_story_at_phase(initialized_db_path, "s5-repeat", "dev_ready", "ready")
+            await insert_batch_story_links(
+                db,
+                [BatchStoryLink(batch_id="b3-repeat", story_id="s5-repeat", sequence_no=0)],
+            )
+            await insert_approval(
+                db,
+                ApprovalRecord(
+                    approval_id="precommit-existing-1",
+                    story_id="s5-repeat",
+                    approval_type="precommit_failure",
+                    status="pending",
+                    created_at=now,
+                    payload=json.dumps(
+                        {
+                            "scope": "spec_batch",
+                            "batch_id": "b3-repeat",
+                            "story_ids": ["s5-repeat"],
+                            "error_output": "main workspace has foreign dirty files: ato.yaml",
+                            "options": ["retry", "manual_fix", "skip"],
+                        }
+                    ),
+                ),
+            )
+        finally:
+            await db.close()
+
+        mock_commit = AsyncMock(return_value=(False, "should not run"))
+        tq = TransitionQueue(initialized_db_path)
+
+        with (
+            patch("ato.worktree_mgr.WorktreeManager") as mock_wm_cls,
+            patch("ato.core.derive_project_root", return_value=Path("/tmp/project")),
+        ):
+            mock_wm_cls.return_value.batch_spec_commit = mock_commit
+            await tq.ensure_dev_ready_progress("s5-repeat")
+
+        mock_commit.assert_not_called()
+
+        db = await get_connection(initialized_db_path)
+        try:
+            approvals = await get_pending_approvals(db)
+            spec_approvals = [a for a in approvals if a.approval_type == "precommit_failure"]
+            assert len(spec_approvals) == 1
+            assert spec_approvals[0].approval_id == "precommit-existing-1"
+        finally:
+            await db.close()
+
     async def test_exception_in_spec_commit_creates_approval(
         self, initialized_db_path: Path
     ) -> None:
@@ -1266,15 +1417,13 @@ class TestBatchSpecCommitOnDevReady:
 
         await tq.stop()
 
-    async def test_spec_committed_revalidation_failure_creates_approval(
+    async def test_spec_committed_revalidation_allows_foreign_dirty_workspace(
         self, initialized_db_path: Path
     ) -> None:
-        """batch.spec_committed=True 但 main workspace 变脏时仍应阻止 start_dev。"""
-        import json
+        """batch.spec_committed=True 时 foreign dirty 不再阻止 start_dev。"""
         from unittest.mock import AsyncMock, patch
 
         from ato.models.db import (
-            get_pending_approvals,
             get_story,
             insert_batch,
             insert_batch_story_links,
@@ -1300,7 +1449,7 @@ class TestBatchSpecCommitOnDevReady:
             await db.close()
 
         mock_commit = AsyncMock(
-            return_value=(False, "main workspace has foreign dirty files: other-story.md")
+            return_value=(True, "all owned main artifacts already committed (idempotent)")
         )
         tq = TransitionQueue(initialized_db_path)
         await tq.start()
@@ -1318,14 +1467,7 @@ class TestBatchSpecCommitOnDevReady:
         try:
             story = await get_story(db, "s8")
             assert story is not None
-            assert story.current_phase == "dev_ready"
-
-            approvals = await get_pending_approvals(db)
-            spec_approvals = [a for a in approvals if a.approval_type == "precommit_failure"]
-            assert len(spec_approvals) == 1
-            payload = json.loads(spec_approvals[0].payload or "{}")
-            assert payload["scope"] == "spec_batch"
-            assert "foreign dirty files" in payload["error_output"]
+            assert story.current_phase == "developing"
         finally:
             await db.close()
 

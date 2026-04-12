@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import ato.test_command_harness as harness_module
 from ato.config import EffectiveTestPolicy
-from ato.models.db import get_connection, insert_story, insert_task, insert_task_command_event
+from ato.models.db import (
+    get_connection,
+    get_task_command_events,
+    insert_story,
+    insert_task,
+    insert_task_command_event,
+)
 from ato.models.schemas import StoryRecord, TaskRecord
 from ato.test_command_harness import (
     _sqlite_connect,
@@ -186,6 +195,74 @@ class TestResolveCommandAuditFromLedger:
 
 
 class TestHarnessDbPathHandling:
+    async def test_generated_runner_executes_main_and_records_audit(
+        self,
+        initialized_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        await _setup_task(initialized_db_path)
+        runner_dir = tmp_path / "runner"
+        runner_path = runner_dir / "ato-test-run"
+        monkeypatch.setattr(harness_module, "TEST_COMMAND_RUNNER_DIR", runner_dir)
+        monkeypatch.setattr(harness_module, "TEST_COMMAND_RUNNER_PATH", runner_path)
+
+        env = build_test_command_env(
+            db_path=initialized_db_path,
+            task_id="task-harness",
+            phase="qa_testing",
+            base_env={},
+        )
+        result = subprocess.run(
+            [
+                str(runner_path),
+                "--source",
+                "project_defined",
+                "--trigger",
+                "required_layer:unit",
+                "--command",
+                "true",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        db = await get_connection(initialized_db_path)
+        try:
+            events = await get_task_command_events(db, "task-harness", record_type="audit")
+        finally:
+            await db.close()
+        assert len(events) == 1
+        assert events[0].command == "true"
+        assert events[0].exit_code == 0
+
+    def test_build_test_command_env_writes_runner_bound_to_current_python(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        runner_dir = tmp_path / "runner dir"
+        runner_path = runner_dir / "ato-test-run"
+        monkeypatch.setattr(harness_module, "TEST_COMMAND_RUNNER_DIR", runner_dir)
+        monkeypatch.setattr(harness_module, "TEST_COMMAND_RUNNER_PATH", runner_path)
+        monkeypatch.setattr(sys, "executable", "/tmp/python with spaces/bin/python3")
+
+        build_test_command_env(
+            db_path=tmp_path / ".ato" / "state.db",
+            task_id="task-harness",
+            phase="qa_testing",
+            base_env={},
+        )
+
+        content = runner_path.read_text(encoding="utf-8")
+        assert content.startswith("#!/bin/sh\n")
+        assert "env python3" not in content
+        assert "RUNNER_PYTHON='/tmp/python with spaces/bin/python3'" in content
+        assert 'exec "$RUNNER_PYTHON" -m ato.test_command_harness "$@"' in content
+
     def test_build_test_command_env_normalizes_relative_db_path(
         self,
         monkeypatch: pytest.MonkeyPatch,

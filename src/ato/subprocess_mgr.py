@@ -776,7 +776,7 @@ by this finalize attempt. The normal path is commit only.
                 role="developer",
                 cli_tool="claude",
                 prompt=prompt,
-                options={"cwd": worktree_path, "max_turns": 3},
+                options={"cwd": worktree_path},
                 max_retries=0,
             )
         except CLIAdapterError as exc:

@@ -3223,7 +3223,10 @@ class Orchestrator:
         import json as _json
         import uuid
 
-        from ato.models.db import insert_approval
+        from ato.models.db import (
+            get_pending_spec_batch_precommit_approval,
+            insert_approval,
+        )
 
         payload = _json.dumps(
             {
@@ -3245,15 +3248,34 @@ class Orchestrator:
             risk_level="medium",
         )
         if db is not None:
+            existing = await get_pending_spec_batch_precommit_approval(db, batch_id)
+            if existing is not None:
+                logger.info(
+                    "spec_batch_approval_exists",
+                    batch_id=batch_id,
+                    story_id=story_id,
+                    existing_approval_id=existing.approval_id,
+                )
+                return
             # 同事务：不 commit，外层 mark_consumed 会 commit
             await insert_approval(db, new_approval, commit=False)
-        else:
-            # 独立连接回退（如 _on_enter_dev_ready 异常路径）
-            own_db = await get_connection(self._db_path)
-            try:
-                await insert_approval(own_db, new_approval)
-            finally:
-                await own_db.close()
+            return
+
+        # 独立连接回退（如 _on_enter_dev_ready 异常路径）
+        own_db = await get_connection(self._db_path)
+        try:
+            existing = await get_pending_spec_batch_precommit_approval(own_db, batch_id)
+            if existing is not None:
+                logger.info(
+                    "spec_batch_approval_exists",
+                    batch_id=batch_id,
+                    story_id=story_id,
+                    existing_approval_id=existing.approval_id,
+                )
+                return
+            await insert_approval(own_db, new_approval)
+        finally:
+            await own_db.close()
 
     async def _reschedule_interactive_task(
         self,

@@ -1184,12 +1184,12 @@ class TestBatchSpecCommit:
         assert success is True
         assert "idempotent" in message
 
-    async def test_foreign_dirty_files_fail_closed(
+    async def test_foreign_dirty_files_do_not_block_owned_commit(
         self,
         initialized_db_path: Path,
         tmp_path: Path,
     ) -> None:
-        """main workspace 存在不属于当前 batch 的脏文件时必须 fail-closed。"""
+        """main workspace 的无关脏文件不应阻止当前 batch 提交自有产物。"""
         project_root = tmp_path / "project"
         project_root.mkdir()
         spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
@@ -1199,22 +1199,33 @@ class TestBatchSpecCommit:
 
         mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
 
-        proc_fail = _make_proc_mock(
-            returncode=0,
-            stdout=(
-                " M _bmad-output/implementation-artifacts/s1.md\n"
-                " M _bmad-output/implementation-artifacts/other-story.md\n"
-            ),
-        )
+        call_count = 0
+
+        async def side_effect(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_proc_mock(
+                    returncode=0,
+                    stdout=(
+                        " M _bmad-output/implementation-artifacts/s1.md\n"
+                        " M _bmad-output/implementation-artifacts/other-story.md\n"
+                    ),
+                )
+            if call_count == 2:
+                return _make_proc_mock(returncode=0)
+            if call_count == 3:
+                return _make_proc_mock(returncode=0)
+            return _make_proc_mock(returncode=0, stdout="abc123\n")
+
         with patch(
             "ato.worktree_mgr.asyncio.create_subprocess_exec",
-            return_value=proc_fail,
+            side_effect=side_effect,
         ):
             success, message = await mgr.batch_spec_commit("batch-1", ["s1"])
 
-        assert success is False
-        assert "foreign dirty files" in message
-        assert "other-story.md" in message
+        assert success is True
+        assert message == "abc123"
 
     async def test_git_status_failure_not_treated_as_idempotent(
         self,
@@ -1239,3 +1250,84 @@ class TestBatchSpecCommit:
 
         assert success is False
         assert "git status --porcelain failed" in message
+
+
+class TestSprintStatusCommit:
+    async def test_commit_sprint_status_update_stages_only_status_file(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """done 后的 sprint-status commit 只提交 sprint-status.yaml。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "sprint-status.yaml").write_text("status")
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        expected_calls: list[tuple[str, ...]] = []
+
+        async def side_effect(*args: Any, **kwargs: Any) -> Any:
+            expected_calls.append(args)
+            if args[1] == "status":
+                return _make_proc_mock(
+                    returncode=0,
+                    stdout=(
+                        " M _bmad-output/implementation-artifacts/sprint-status.yaml\n"
+                        " M _bmad-output/planning-artifacts/epics.md\n"
+                    ),
+                )
+            if args[1] in {"add", "commit"}:
+                return _make_proc_mock(returncode=0)
+            return _make_proc_mock(returncode=0, stdout="abc123\n")
+
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            side_effect=side_effect,
+        ):
+            success, message = await mgr.commit_sprint_status_update("7-2")
+
+        assert success is True
+        assert message == "abc123"
+        add_cmd = expected_calls[1]
+        assert add_cmd == (
+            "git",
+            "add",
+            "--",
+            "_bmad-output/implementation-artifacts/sprint-status.yaml",
+        )
+        commit_cmd = expected_calls[2]
+        assert commit_cmd == (
+            "git",
+            "commit",
+            "-m",
+            "spec(7-2): sync sprint status",
+            "--",
+            "_bmad-output/implementation-artifacts/sprint-status.yaml",
+        )
+
+    async def test_commit_sprint_status_update_idempotent_when_clean(
+        self,
+        initialized_db_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        """sprint-status 无脏改动时不创建空 commit。"""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        spec_dir = project_root / "_bmad-output" / "implementation-artifacts"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "sprint-status.yaml").write_text("status")
+
+        mgr = WorktreeManager(project_root=project_root, db_path=initialized_db_path)
+
+        proc_empty = _make_proc_mock(returncode=0, stdout="")
+        with patch(
+            "ato.worktree_mgr.asyncio.create_subprocess_exec",
+            return_value=proc_empty,
+        ):
+            success, message = await mgr.commit_sprint_status_update("7-2")
+
+        assert success is True
+        assert "idempotent" in message

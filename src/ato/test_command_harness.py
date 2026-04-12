@@ -7,6 +7,7 @@ import os
 import shlex
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,18 +46,18 @@ class ResolvedCommandAudit:
 
 
 def _runner_script_text(src_root: Path) -> str:
-    return f"""#!/usr/bin/env python3
-import sys
-from pathlib import Path
+    runner_python = str(Path(sys.executable))
+    return f"""#!/bin/sh
+RUNNER_PYTHON={shlex.quote(runner_python)}
+SRC_ROOT={shlex.quote(str(src_root))}
 
-SRC_ROOT = Path({str(src_root)!r})
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+if [ -n "${{PYTHONPATH:-}}" ]; then
+    export PYTHONPATH="$SRC_ROOT:$PYTHONPATH"
+else
+    export PYTHONPATH="$SRC_ROOT"
+fi
 
-from ato.test_command_harness import main
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+exec "$RUNNER_PYTHON" -m ato.test_command_harness "$@"
 """
 
 
@@ -375,3 +376,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(completed.returncode)
     finally:
         conn.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

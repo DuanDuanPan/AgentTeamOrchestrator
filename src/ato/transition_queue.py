@@ -19,7 +19,11 @@ import structlog
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from ato.config import PhaseDefinition, evaluate_skip_condition
-from ato.models.db import get_connection, get_story
+from ato.models.db import (
+    get_connection,
+    get_pending_spec_batch_precommit_approval,
+    get_story,
+)
 from ato.models.schemas import (
     StateTransitionError,
     TransitionEvent,
@@ -204,6 +208,56 @@ class TransitionQueue:
             finally:
                 await db.close()
 
+    async def _ensure_spec_batch_precommit_approval(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        story_id: str,
+        batch_id: str,
+        story_ids: list[str],
+        error_output: str,
+    ) -> bool:
+        """Create one pending spec-batch precommit_failure approval at most."""
+        import json
+        import uuid
+        from datetime import UTC
+        from datetime import datetime as dt_cls
+
+        from ato.models.db import insert_approval
+        from ato.models.schemas import ApprovalRecord
+
+        existing = await get_pending_spec_batch_precommit_approval(db, batch_id)
+        if existing is not None:
+            logger.info(
+                "spec_batch_precommit_approval_exists",
+                batch_id=batch_id,
+                story_id=story_id,
+                existing_approval_id=existing.approval_id,
+            )
+            return False
+
+        payload = json.dumps(
+            {
+                "scope": "spec_batch",
+                "batch_id": batch_id,
+                "story_ids": story_ids,
+                "error_output": error_output,
+                "options": ["retry", "manual_fix", "skip"],
+            }
+        )
+        approval = ApprovalRecord(
+            approval_id=str(uuid.uuid4()),
+            story_id=story_id,
+            approval_type="precommit_failure",
+            status="pending",
+            payload=payload,
+            created_at=dt_cls.now(tz=UTC),
+            recommended_action="retry",
+            risk_level="medium",
+        )
+        await insert_approval(db, approval)
+        return True
+
     async def start(self) -> None:
         """启动 consumer 后台任务并打开长连接。
 
@@ -354,6 +408,7 @@ class TransitionQueue:
                 new_state = sm.current_state_value
                 await save_story_state(db, event.story_id, new_state)
                 await db.commit()
+                await self._sync_sprint_status_after_commit(event.story_id, new_state)
                 if queued.completion_future is not None and not queued.completion_future.done():
                     queued.completion_future.set_result(new_state)
 
@@ -390,6 +445,22 @@ class TransitionQueue:
             finally:
                 self._queue.task_done()
                 clear_contextvars()
+
+    async def _sync_sprint_status_after_commit(self, story_id: str, phase: str) -> None:
+        """Best-effort sync of committed story phase into sprint-status.yaml."""
+        try:
+            from ato.core import derive_project_root
+            from ato.sprint_status import sync_story_phase_to_sprint_status
+
+            project_root = derive_project_root(self._db_path)
+            sync_story_phase_to_sprint_status(project_root, story_id, phase)
+        except Exception:
+            logger.warning(
+                "sprint_status_sync_failed",
+                story_id=story_id,
+                phase=phase,
+                exc_info=True,
+            )
 
     async def _run_pre_review_gate_if_needed(
         self,
@@ -614,7 +685,6 @@ class TransitionQueue:
         from ato.models.db import (
             get_active_batch,
             get_batch_stories,
-            insert_approval,
             mark_batch_spec_committed,
         )
 
@@ -629,6 +699,16 @@ class TransitionQueue:
 
         batch_stories = await get_batch_stories(db, batch.batch_id)
         story_ids = [s.story_id for _, s in batch_stories]
+
+        existing_approval = await get_pending_spec_batch_precommit_approval(db, batch.batch_id)
+        if existing_approval is not None:
+            logger.info(
+                "dev_ready_blocked_by_pending_precommit_failure",
+                story_id=story_id,
+                batch_id=batch.batch_id,
+                approval_id=existing_approval.approval_id,
+            )
+            return
 
         # 已提交 batch 仍需重做一次 main workspace gate，避免 validating /
         # metadata 变更把主仓库重新弄脏后直接漏进 developing。
@@ -663,37 +743,18 @@ class TransitionQueue:
                     story_id=story_id,
                 )
                 try:
-                    import json
-                    import uuid
-                    from datetime import UTC
-                    from datetime import datetime as dt_cls
-
-                    from ato.models.schemas import ApprovalRecord
-
-                    payload = json.dumps(
-                        {
-                            "scope": "spec_batch",
-                            "batch_id": batch.batch_id,
-                            "story_ids": story_ids,
-                            "error_output": str(exc),
-                            "options": ["retry", "manual_fix", "skip"],
-                        }
-                    )
-                    approval = ApprovalRecord(
-                        approval_id=str(uuid.uuid4()),
+                    created = await self._ensure_spec_batch_precommit_approval(
+                        db,
                         story_id=story_id,
-                        approval_type="precommit_failure",
-                        status="pending",
-                        payload=payload,
-                        created_at=dt_cls.now(tz=UTC),
-                        recommended_action="retry",
-                        risk_level="medium",
+                        batch_id=batch.batch_id,
+                        story_ids=story_ids,
+                        error_output=str(exc),
                     )
-                    await insert_approval(db, approval)
-                    send_user_notification(
-                        "normal",
-                        f"Batch spec revalidation 失败：{exc}",
-                    )
+                    if created:
+                        send_user_notification(
+                            "normal",
+                            f"Batch spec revalidation 失败：{exc}",
+                        )
                 except Exception:
                     logger.exception("batch_spec_commit_revalidation_approval_failed")
                 return
@@ -744,43 +805,30 @@ class TransitionQueue:
                     commit_hash=message,
                 )
             else:
-                # 创建 precommit_failure approval
-                import json
-                import uuid
-                from datetime import UTC
-                from datetime import datetime as dt_cls
-
-                from ato.models.schemas import ApprovalRecord
-
-                payload = json.dumps(
-                    {
-                        "scope": "spec_batch",
-                        "batch_id": batch.batch_id,
-                        "story_ids": story_ids,
-                        "error_output": message,
-                        "options": ["retry", "manual_fix", "skip"],
-                    }
-                )
-                approval = ApprovalRecord(
-                    approval_id=str(uuid.uuid4()),
+                created = await self._ensure_spec_batch_precommit_approval(
+                    db,
                     story_id=story_id,
-                    approval_type="precommit_failure",
-                    status="pending",
-                    payload=payload,
-                    created_at=dt_cls.now(tz=UTC),
-                    recommended_action="retry",
-                    risk_level="medium",
-                )
-                await insert_approval(db, approval)
-                send_user_notification(
-                    "normal",
-                    f"Batch spec commit 失败：{message}",
-                )
-                logger.warning(
-                    "batch_spec_commit_failed",
                     batch_id=batch.batch_id,
-                    error=message,
+                    story_ids=story_ids,
+                    error_output=message,
                 )
+                if created:
+                    send_user_notification(
+                        "normal",
+                        f"Batch spec commit 失败：{message}",
+                    )
+                    logger.warning(
+                        "batch_spec_commit_failed",
+                        batch_id=batch.batch_id,
+                        error=message,
+                    )
+                else:
+                    logger.info(
+                        "batch_spec_commit_failed_existing_pending",
+                        batch_id=batch.batch_id,
+                        story_id=story_id,
+                        error=message,
+                    )
         except Exception as exc:
             logger.exception(
                 "batch_spec_commit_error",
@@ -788,37 +836,18 @@ class TransitionQueue:
             )
             # 异常也需创建 approval，否则 batch 卡死且无恢复路径
             try:
-                import json
-                import uuid
-                from datetime import UTC
-                from datetime import datetime as dt_cls
-
-                from ato.models.schemas import ApprovalRecord
-
-                payload = json.dumps(
-                    {
-                        "scope": "spec_batch",
-                        "batch_id": batch.batch_id,
-                        "story_ids": story_ids,
-                        "error_output": str(exc),
-                        "options": ["retry", "manual_fix", "skip"],
-                    }
-                )
-                approval = ApprovalRecord(
-                    approval_id=str(uuid.uuid4()),
+                created = await self._ensure_spec_batch_precommit_approval(
+                    db,
                     story_id=story_id,
-                    approval_type="precommit_failure",
-                    status="pending",
-                    payload=payload,
-                    created_at=dt_cls.now(tz=UTC),
-                    recommended_action="retry",
-                    risk_level="medium",
+                    batch_id=batch.batch_id,
+                    story_ids=story_ids,
+                    error_output=str(exc),
                 )
-                await insert_approval(db, approval)
-                send_user_notification(
-                    "normal",
-                    f"Batch spec commit 异常：{exc}",
-                )
+                if created:
+                    send_user_notification(
+                        "normal",
+                        f"Batch spec commit 异常：{exc}",
+                    )
             except Exception:
                 logger.exception("batch_spec_commit_approval_creation_failed")
 
@@ -890,7 +919,7 @@ class TransitionQueue:
             )
 
     async def _on_story_done(self, db: aiosqlite.Connection, story_id: str) -> None:
-        """Story 完成后的 post-commit hook：worktree 清理 + 里程碑通知 + batch 完成检测。"""
+        """Story 完成后的 post-commit hook：清理、同步 main 状态和里程碑通知。"""
         from ato.models.db import complete_batch, get_active_batch, get_batch_progress
 
         # Worktree cleanup — 兜底清理，无论经由哪条路径到达 done
@@ -903,6 +932,24 @@ class TransitionQueue:
             await mgr.cleanup(story_id)
         except Exception:
             logger.warning("worktree_cleanup_on_done_failed", story_id=story_id, exc_info=True)
+
+        try:
+            from ato.core import derive_project_root, get_main_path_gate
+            from ato.worktree_mgr import WorktreeManager
+
+            project_root = derive_project_root(self._db_path)
+            mgr = WorktreeManager(project_root=project_root, db_path=self._db_path)
+            gate = get_main_path_gate()
+            async with gate.exclusive():
+                success, message = await mgr.commit_sprint_status_update(story_id)
+            if not success:
+                logger.warning(
+                    "sprint_status_commit_on_done_failed",
+                    story_id=story_id,
+                    error=message,
+                )
+        except Exception:
+            logger.warning("sprint_status_commit_on_done_error", story_id=story_id, exc_info=True)
 
         send_user_notification("milestone", f"Story {story_id} 已完成！")
 

@@ -850,8 +850,9 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
     """返回 active batch 中处于活跃阶段且可被自动调度的 stories。
 
     用于检测需要初始调度的 stories（batch confirm 后首次 dispatch）。
-    存在 pending blocking approval（``crash_recovery`` 或 ``needs_human_review``）
-    的 story 会被排除，避免在等待人工决策期间被初始调度路径再次补发 task。
+    存在 pending blocking approval（如 ``crash_recovery``、``needs_human_review``
+    或 ``precommit_failure``）的 story 会被排除，避免在等待人工决策期间
+    被初始调度路径再次补发 task / 重复触发 main-workspace gate。
 
     ``merging`` / ``regression`` 由 merge queue 专职接管，不应再走普通
     initial dispatch；否则会与 merge queue worker 并发执行同一 story。
@@ -880,7 +881,8 @@ async def get_undispatched_stories(db: aiosqlite.Connection) -> list[StoryRecord
               AND a.approval_type IN (
                 'crash_recovery', 'needs_human_review',
                 'merge_authorization', 'convergent_loop_escalation',
-                'regression_failure', 'preflight_failure'
+                'regression_failure', 'preflight_failure',
+                'precommit_failure'
               )
               AND a.status = 'pending'
           )
@@ -959,6 +961,31 @@ async def get_pending_approvals(db: aiosqlite.Connection) -> list[ApprovalRecord
     )
     rows = await cursor.fetchall()
     return [_row_to_approval(r) for r in rows]
+
+
+async def get_pending_spec_batch_precommit_approval(
+    db: aiosqlite.Connection,
+    batch_id: str,
+) -> ApprovalRecord | None:
+    """返回同一 spec batch 的 pending precommit_failure approval。"""
+    if not batch_id:
+        return None
+
+    pending = await get_pending_approvals(db)
+    for approval in pending:
+        if approval.approval_type != "precommit_failure" or not approval.payload:
+            continue
+        try:
+            payload = json.loads(approval.payload)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("scope") != "spec_batch":
+            continue
+        if payload.get("batch_id") == batch_id:
+            return approval
+    return None
 
 
 def _row_to_approval(row: aiosqlite.Row) -> ApprovalRecord:
